@@ -2,6 +2,8 @@ package shardnode
 
 import (
 	"context"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -182,4 +184,55 @@ func TestClassifyUCEpochBoundaryMatrix(t *testing.T) {
 			}
 		})
 	}
+}
+
+// bft-core#1067: a root-free follower's LUC can lag several installed root epochs behind the journal's durably admitted tip (its head
+// follower offers only the newest certificate). The durable path classifies such a certificate as at a single handoff; every other
+// verdict, and the live classifier's refusal of a skipped epoch, stays.
+func TestADurablyAdmittedCertificateAcrossSkippedEpochsIsClassifiedAsAtTheBoundary(t *testing.T) {
+	makeUC := func(epoch, round, root uint64, previous, hash byte) *types.UnicityCertificate {
+		value := uc(round, root, []byte{previous}, []byte{hash}, []byte{hash})
+		value.UnicitySeal.Epoch = epoch
+		return value
+	}
+	old := makeUC(3, 5, 8000, 4, 5)
+	client := &BFTClient{admission: epochAdmissionStub{ready: true}}
+
+	later := makeUC(6, 6, 30, 5, 6)
+	_, err := ClassifyUCEpoch(old, later)
+	require.ErrorIs(t, err, ErrImpossibleUCOrder, "premise: the live classifier refuses the skipped epochs")
+	class, err := client.classifyDurable(old, later)
+	require.NoError(t, err, "the journal's tip is adopted, as a restart would seed it")
+	require.Equal(t, UCValid, class)
+
+	class, err = client.classifyDurable(old, makeUC(6, 5, 30, 4, 5))
+	require.NoError(t, err)
+	require.Equal(t, UCRepeat, class, "the same round re-certified after the handoffs")
+	_, err = client.classifyDurable(old, makeUC(6, 4, 30, 3, 4))
+	require.ErrorIs(t, err, ErrImpossibleUCOrder, "an older partition round stays impossible")
+	_, err = client.classifyDurable(old, makeUC(6, 5, 30, 4, 9))
+	require.ErrorIs(t, err, ErrEquivocatingUC, "a different statement for the round stays equivocation")
+	_, err = client.classifyDurable(old, makeUC(6, 6, 30, 9, 6))
+	require.ErrorIs(t, err, ErrEquivocatingUC, "a round that does not extend the certified state stays equivocation")
+	class, err = client.classifyDurable(old, makeUC(4, 6, 1, 5, 6))
+	require.NoError(t, err, "a single handoff is unchanged")
+	require.Equal(t, UCValid, class)
+	class, err = client.classifyDurable(old, makeUC(3, 6, 8001, 5, 6))
+	require.NoError(t, err, "the same epoch is unchanged")
+	require.Equal(t, UCValid, class)
+
+	client.admission = epochAdmissionStub{ready: false}
+	_, err = client.classifyDurable(old, later)
+	require.ErrorIs(t, err, ErrImpossibleUCOrder, "an epoch this node has not installed is never adopted")
+}
+
+// The configured delivery path is the one that uses it.
+func TestDeliverConfiguredClassifiesAsDurable(t *testing.T) {
+	src, err := os.ReadFile("bftclient.go")
+	require.NoError(t, err)
+	body := string(src)
+	start := strings.Index(body, "func (c *BFTClient) deliverConfigured(")
+	require.Positive(t, start)
+	end := strings.Index(body[start:], "\n}\n")
+	require.Contains(t, body[start:start+end], "c.classifyDurable(c.luc, cursor)")
 }

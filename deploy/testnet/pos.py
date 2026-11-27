@@ -18,15 +18,15 @@ import sys
 
 # The lane's values (scripts/lib/p85-lib.sh). The cadence is a rehearsal value: an election is due this many ordinary root rounds and UC seconds after the
 # last acknowledged rotation. #437 sets the testnet's own (--pos-cadence-rounds / --pos-cadence-seconds).
-# manifest limits.vMax, limits.lMax, election nMax: the election price AND the records hook's per-record reservation are measured at exactly these. (16, 1, 6) is what
-# the 3,000,000 per record covers with the 1.25 margin (the RecoveryAck of 8 members in 2 lots costs 3,629,888 cold, contracts docs/p85/HOOK_GAS.md); until the owner
-# decides between a higher limit and lower caps (Q12) the package declares caps the limit covers, and `b1-profile --hook-measurement` refuses any pair it does not.
+# Measure the election and records hook at the same limits (vMax, lMax, nMax). CI measured a minimum of
+# 3,174,198 gas per record after margin at these caps. Keep 3,500,000 for the legacy ceremony and let
+# b1-profile reject any future measurement that exceeds it. The VR profile uses its own measurements.
 CAPS = (16, 1, 6)
 BOND_UNIT = 100 * 10**18               # 100 UCT in base units: one weight unit
 GENESIS_UNITS = 1                      # bond units per genesis identity (unit weights)
 HOOK_RECORDS = ('ack', 'stage', 'closure', 'recovery')   # the records of script/measure-hook-gas.sh: the hook's worst record is the largest of them
 H_RECORDS = 2
-HOOK_RECORD_GAS = 3_000_000
+HOOK_RECORD_GAS = 3_500_000
 CADENCE_ROUNDS = 400
 CADENCE_SECONDS = 300
 REGISTRY = '0xff00000000000000000000000000000000000002'
@@ -204,7 +204,8 @@ class Genesis:
         env = dict(clean_environ(), P85_NETWORK_WORD=network_word(self.generation), P85_CHAIN_ID=str(self.chain_id), P85_ROOTS=REGISTRY, P85_TREASURY=TREASURY,
                    P85_GOVERNANCE_AUTHORITY=GOVERNANCE_AUTHORITY, P85_REWARD_FUNDING=str(REWARD_FUNDING), P85_REWARD_RATE=str(REWARD_RATE),
                    P85_V_MAX=str(CAPS[0]), P85_L_MAX=str(CAPS[1]), P85_N_MAX=str(CAPS[2]), P85_CADENCE_ROUNDS=str(self.cadence[0]),
-                   P85_CADENCE_SECONDS=str(self.cadence[1]), P85_DIST_NUM=str(self.dist[0]), P85_DIST_DEN=str(self.dist[1]))
+                   P85_CADENCE_SECONDS=str(self.cadence[1]), P85_DIST_NUM=str(self.dist[0]), P85_DIST_DEN=str(self.dist[1]),
+                   P85_PROFILE='testnet')   # #1298: reportWindow 1,800 + settlementMargin 1,800 <= timeFloor 3,600 (older contracts ignore it)
         if self.contracts_take_root_identity():   # contracts#46 and later; an older pinned checkout does not know the variables
             env['P85_ROOT_NETWORK'], env['P85_ROOT_GENESIS'] = self.root_identity()
         self._run(self.contracts / 'script/p85-genesis.sh', self.dir / 'contracts-genesis.json', self.dir / 'genesis', env=env)
@@ -235,8 +236,12 @@ class Genesis:
 
     def alloc_code_hashes(self, genesis):
         """The code hashes the deployment file records must be those of the code the genesis carries (the keccak of the runtime code): custody, election, the
-        governed policy source and the reward pool. The reward pool must also hold exactly its recorded funding from block 0 (T8: allocated, not promised)."""
-        for module, key in (('custody', 'custody'), ('election', 'election'), ('policy', 'policy'), ('rewardPool', 'rewardPool')):
+        governed policy source, the reward pool and the election's publication implementation, which it delegatecalls for PoPs and finalization (a genesis
+        without it cannot publish a result). The reward pool must also hold exactly its recorded funding from block 0 (T8: allocated, not promised)."""
+        if 'electionPublication' not in self.deployment:
+            raise PosError('the deployment records no electionPublication: the contracts genesis script predates allocating it (unicity-pos-contracts P85Genesis)')
+        for module, key in (('custody', 'custody'), ('election', 'election'), ('policy', 'policy'), ('rewardPool', 'rewardPool'),
+                            ('electionPublication', 'electionPublication')):
             want = self.deployment[module + 'CodeHash']
             have = code_hash(genesis, self.deployment[key])
             if want.lower() != have:

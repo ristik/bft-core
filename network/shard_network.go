@@ -58,23 +58,32 @@ func NewShardNetwork(peer *Peer, obs Observability, opts ShardNetworkOptions) (*
 		return nil, fmt.Errorf("registering send protocols: %w", err)
 	}
 
-	receiveProtocols := []ReceiveProtocolDescription{
-		{
-			ProtocolID: ProtocolUnicityCertificates,
-			TypeFn:     func() any { return &certification.CertificationResponse{} },
-		},
-		{
-			ProtocolID: ProtocolUnicityCertificatesV2,
-			TypeFn:     func() any { return &certification.CertificationResponseV2{} },
-		},
-		{
-			ProtocolID: ProtocolUnicityCertificatesV3,
-			TypeFn:     func() any { return &certification.CertificationResponseV3{} },
-		},
-	}
+	receiveProtocols := shardReceiveProtocols()
 	if err := n.RegisterReceiveProtocols(receiveProtocols); err != nil {
 		return nil, fmt.Errorf("registering receive protocols: %w", err)
 	}
 
 	return n, nil
+}
+
+// shardReceiveProtocols are the certification response protocols a shard receives. V1, V2 and V3 frames are bounded by their declared payload limits, checked
+// against the announced length before anything is allocated (V1 is derived from V2's, see MaxCertificationResponseV1Frame).
+func shardReceiveProtocols() []ReceiveProtocolDescription {
+	return []ReceiveProtocolDescription{
+		{
+			ProtocolID:   ProtocolUnicityCertificates,
+			TypeFn:       func() any { return &certification.CertificationResponse{} },
+			MaxFrameSize: certification.MaxCertificationResponseV1Frame,
+		},
+		{
+			ProtocolID:   ProtocolUnicityCertificatesV2,
+			TypeFn:       func() any { return &certification.CertificationResponseV2{} },
+			MaxFrameSize: certification.MaxCertificationResponseV2Frame,
+		},
+		{
+			ProtocolID:   ProtocolUnicityCertificatesV3,
+			TypeFn:       func() any { return &certification.CertificationResponseV3{} },
+			MaxFrameSize: certification.MaxCertificationResponseV3Frame,
+		},
+	}
 }

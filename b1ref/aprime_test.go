@@ -3,6 +3,7 @@ package b1ref
 import (
 	"encoding/hex"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/unicitynetwork/bft-core/b1ref/b1gen"
@@ -59,22 +60,24 @@ func TestGroupingParity(t *testing.T) {
 	}
 }
 
-func TestCallerScannerRejectsSignatureShape(t *testing.T) {
+// A signature value of any byte-string length is well formed: the scanner admits it and the quorum decides (it counts zero unless it is an exact
+// canonical recoverable signature of the member). Only an empty value, which upstream's native seal validation refuses, fails later and as invalid.
+func TestSignatureShapesAreNotScannerFailures(t *testing.T) {
 	m := b1gen.Build(corpusSeed)
 	count := 0
 	for _, v := range m.Vectors {
-		if v.Expected.Sentinel != "ErrSigFormat" {
+		if !strings.HasPrefix(v.ID, "quorum.sig.") && !strings.HasPrefix(v.ID, "frozen.signature-length") {
 			continue
 		}
 		raw, _ := hex.DecodeString(v.Request)
 		var pl plan
-		if err := scanBatch(raw, &pl, Standard); !errors.Is(err, ErrSigFormat) {
-			t.Fatalf("%s: %v", v.ID, err)
+		if err := scanBatch(raw, &pl, Standard); err != nil {
+			t.Fatalf("%s: the scanner refused a well-formed signature value: %v", v.ID, err)
 		}
 		count++
 	}
-	if count < 6 {
-		t.Fatal("missing signature format cases", count)
+	if count < 30 {
+		t.Fatal("missing signature shape cases", count)
 	}
 }
 
@@ -140,29 +143,5 @@ func TestClaimConflictPredicate(t *testing.T) {
 	pl.occ[1].sealGroup, pl.occ[0].newClaim = 0, false
 	if conflicts(claims, pl, 1) {
 		t.Fatal("an exact repeat (not a new claim) is no conflict")
-	}
-}
-
-// TestComposedLimits: the composition's anchor table is grouped under Composed. Seventeen occurrences of one claim exceed the
-// standalone claim bound (ErrCount) but group under Composed into one claim, one seal and one epoch, with the occurrences counted.
-func TestComposedLimits(t *testing.T) {
-	single := vectorByID(t, b1gen.Build(corpusSeed), "cert.single.ok")
-	one, err := GroupWith(single, Composed)
-	if err != nil {
-		t.Fatal(err)
-	}
-	in := []byte{2, 0, 0, 17}
-	for i := 0; i < 17; i++ {
-		in = append(in, single[4:]...)
-	}
-	if _, err := Group(in); !errors.Is(err, ErrCount) {
-		t.Fatalf("standalone: %v", err)
-	}
-	g, err := GroupWith(in, Composed)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if g.K != 17 || g.A != 1 || g.S != 1 || g.E != 1 || g.Q != one.Q || g.P != one.P {
-		t.Fatalf("composed grouping %+v, single %+v", g, one)
 	}
 }

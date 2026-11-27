@@ -73,6 +73,11 @@ func (r *ExecutionRecovery) catchUpPage(ctx context.Context, after shardnode.Blo
 			// that one faulty peer first in the provider order cannot hold the catch-up with fabricated tails, however often it varies them.
 			r.catchUpRefuseProvider(source)
 		}
+		if source == "" && walked == 0 {
+			// An earlier certified target the walk could not start from (most often one the catch-up has passed since: its chain runs
+			// below the anchor) is not tried again; the staging joiner of bft-core#1071 lost a minute to one.
+			r.catchUpForget(top)
+		}
 		return r.catchUpWaiting(ctx, target, "walking the archive", err)
 	}
 	if !joined {
@@ -172,6 +177,19 @@ func (r *ExecutionRecovery) catchUpTop(ctx context.Context, after shardnode.Bloc
 	return target, ""
 }
 
+// catchUpForget drops top from the earlier targets catchUpTop offers (the current target is always offered last).
+func (r *ExecutionRecovery) catchUpForget(top []byte) {
+	if len(top) != 32 {
+		return
+	}
+	if bytes.Equal(r.catchUpSeen, top) {
+		r.catchUpSeen = nil
+	}
+	if bytes.Equal(r.catchUpPrev, top) {
+		r.catchUpPrev = nil
+	}
+}
+
 // catchUpRefusedFor is how long a provider whose tail named a top the archive walk could not start from is not asked.
 const catchUpRefusedFor = time.Minute
 
@@ -235,6 +253,12 @@ func (r *ExecutionRecovery) catchUpHeadroom() int { return max(2, r.walkLimit()/
 // whose own length plus the headroom exceeds a limit is held to that limit alone, as before: waiting for room it can never have would
 // stop the catch-up.
 func (r *ExecutionRecovery) catchUpRoom(ctx context.Context, n int) (bool, error) {
+	// A stall leaves dead same-height proposals and superseded repeat certificates in the journal below its bounds; this check refuses
+	// before any insertion could evict them, and only the frontier frees anything else, which cannot pass the stall's height without the
+	// blocks this catch-up is fetching (bft-core#1019). Free them against durable progress first.
+	if _, _, err := r.Store.EvictSuperseded(ctx, r.Context, r.JournalLimits); err != nil {
+		return false, fmt.Errorf("%w: freeing superseded journal history: %w", ErrRecoveryUnavailable, err)
+	}
 	image, err := r.Store.LoadJournal(ctx, r.Context, r.JournalLimits)
 	if err != nil {
 		return false, fmt.Errorf("%w: verifying journal: %w", ErrRecoveryUnavailable, err)

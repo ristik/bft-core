@@ -36,11 +36,15 @@ type (
 	}
 
 	VoteRegister struct {
+		// the complete timeout messages that were verified and counted this round, by author (never persisted)
+		verifiedTimeouts map[string]verifiedTimeout
 		// Hash of ConsensusInfo to signatures/votes for it
 		hashToSignatures map[voteID]*ConsensusWithSignatures
 		// Tracks all timeout votes for this round
 		// if 2f+1 or threshold votes, then TC is formed
 		timeoutCert *drctypes.TimeoutCert
+		// timeoutWeight is the weight of the signers in timeoutCert, summed as they are added (see InsertTimeoutVote)
+		timeoutWeight quorumweight.Tally
 		// Helper, to avoid duplicate votes
 		authorToVote map[string]voteID
 	}
@@ -178,7 +182,7 @@ func (v *VoteRegister) InsertVote(vote *abdrc.VoteMsg, quorumInfo QuorumInfo) (*
 InsertTimeoutVote returns non nil TC when quorum has been achieved.
 Second return value is number of signatures in the TC.
 */
-func (v *VoteRegister) InsertTimeoutVote(timeout *abdrc.TimeoutMsg, quorumInfo QuorumInfo) (*drctypes.TimeoutCert, uint64, error) {
+func (v *VoteRegister) InsertTimeoutVote(timeout *abdrc.TimeoutMsg, quorumInfo QuorumInfo, remember ...timeoutMemo) (*drctypes.TimeoutCert, uint64, error) {
 	// Create partial timeout cert on first vote received
 	scheme := timeoutScheme(timeout)
 	if v.timeoutCert == nil {
@@ -192,15 +196,32 @@ func (v *VoteRegister) InsertTimeoutVote(timeout *abdrc.TimeoutMsg, quorumInfo Q
 	if v.timeoutCert.Scheme != scheme {
 		return nil, 0, fmt.Errorf("%w: timeout vote of %q is scheme %d, the certificate being formed is scheme %d", votesig.ErrScheme, timeout.Author, scheme, v.timeoutCert.Scheme)
 	}
+	// The signers' weight is summed as they are added, not recounted over the whole certificate for every vote (that was O(n) per vote, and
+	// O(n^2) under stake weighting, where authorWeight scans the committee: #982). The sum equals the recount: every signer of the certificate
+	// is of the certificate's epoch (TimeoutCert.Add refuses another), the manager registers a vote only of its current trust base's epoch
+	// (checkWeightEpoch), and an installed epoch's committee and weights never change, so no counted signer's weight changes while the
+	// register lives. The author's weight and the new sum are established before the certificate is touched: a vote that has no weight (not
+	// a member of a weighted committee) or would overflow the sum is refused and leaves the certificate as it was.
+	w, err := authorWeight(quorumInfo, timeout.Author)
+	if err != nil {
+		return nil, 0, fmt.Errorf("timeout vote weight: %w", err)
+	}
+	if _, err := quorumweight.Add(v.timeoutWeight.Weight(), w); err != nil {
+		return nil, 0, fmt.Errorf("timeout vote weight: %w", err)
+	}
 	// append signature
 	if err := v.timeoutCert.Add(timeout.Author, timeout.Timeout, timeout.Signature); err != nil {
 		return nil, 0, fmt.Errorf("failed to add vote to timeout certificate: %w", err)
 	}
-
-	// Check if TC can be formed
-	sigCount, err := signedTimeoutWeight(v.timeoutCert.Signatures, quorumInfo)
-	if err != nil {
+	// cannot fail: Add refused a signer already in the certificate and the sum was checked above
+	if err := v.timeoutWeight.Add(timeout.Author, w); err != nil {
 		return nil, 0, fmt.Errorf("timeout vote weight: %w", err)
+	}
+	sigCount := v.timeoutWeight.Weight()
+	// The vote is counted and its weight accounted: only now is the exact message remembered (an error above, including one after Add has
+	// stored the signature, remembers nothing).
+	if len(remember) > 0 {
+		v.NoteVerifiedTimeout(timeout.Author, timeout.Timeout.Round, timeout.Timeout.Epoch, remember[0].digest, remember[0].ctx)
 	}
 	if reached(sigCount, quorumInfo) {
 		return v.timeoutCert, sigCount, nil
@@ -304,10 +325,53 @@ func maxFaultyWeight(quorum QuorumInfo) uint64 {
 	return 0
 }
 
+// verifyContext is the authenticated configuration a timeout message was verified under: the signing configuration of every epoch whose
+// trust base or rule the verification used (the vote's epoch, its high QC's, its last TC's and that TC's high QC's). A trust base of an
+// installed epoch never changes (TrustBaseStore.Store refuses a second one), so epoch plus signing configuration identify the rules.
+type verifyContext struct {
+	n      int
+	epochs [4]uint64
+	cfgs   [4]votesig.Config
+}
+
+// timeoutMemo is what the handler asks the register to remember once the vote is verified, counted and its weight accounted.
+type timeoutMemo struct {
+	digest [32]byte
+	ctx    verifyContext
+}
+
+// verifiedTimeout is the memory of one counted timeout vote: the digest of the complete message that was verified and registered.
+type verifiedTimeout struct {
+	round, epoch uint64
+	digest       [32]byte
+	ctx          verifyContext
+}
+
+// VerifiedTimeoutHit reports whether the author's counted vote of this round and epoch was exactly this message (same digest of the
+// complete envelope) verified under the same context. A hit lets the caller skip only the message's signature verification.
+func (v *VoteRegister) VerifiedTimeoutHit(author string, round, epoch uint64, digest [32]byte, ctx verifyContext) bool {
+	e, ok := v.verifiedTimeouts[author]
+	return ok && e.round == round && e.epoch == epoch && e.digest == digest && e.ctx == ctx
+}
+
+// NoteVerifiedTimeout remembers the digest of a message that was verified AND counted. The first remembered digest of an author is kept: a
+// different message of the same author never replaces it.
+func (v *VoteRegister) NoteVerifiedTimeout(author string, round, epoch uint64, digest [32]byte, ctx verifyContext) {
+	if _, ok := v.verifiedTimeouts[author]; ok {
+		return
+	}
+	if v.verifiedTimeouts == nil {
+		v.verifiedTimeouts = make(map[string]verifiedTimeout)
+	}
+	v.verifiedTimeouts[author] = verifiedTimeout{round: round, epoch: epoch, digest: digest, ctx: ctx}
+}
+
 func (v *VoteRegister) Reset() {
+	clear(v.verifiedTimeouts)
 	clear(v.hashToSignatures)
 	clear(v.authorToVote)
 	v.timeoutCert = nil
+	v.timeoutWeight = quorumweight.Tally{}
 }
 
 // timeoutScheme is the wire scheme of a timeout vote: 2 for the domain-bound form, 0 for the legacy one (0 and 1 are the same form).

@@ -15,26 +15,44 @@ on where the authority runs. So a refusal travels as the name the contract gives
 back on the other side. A name this table does not know stays a plain error carrying that name,
 never a nil error and never silently one of the known ones.
 */
+// ErrCredentialPublication reports an error accessing the configured managed credential.
+var ErrCredentialPublication = errors.New("signing-client-credential-publication-failed")
+
+// ErrManagedSession requires credential writers to use server-side publication
+// for the configured file. An explicit alternate target is still an operator fence.
+var ErrManagedSession = errors.New("signing-client-credential-managed")
+
 var refusalsByName = map[string]error{
-	signingauthority.ErrContextMismatch.Error():      signingauthority.ErrContextMismatch,
-	signingauthority.ErrPoPDomain.Error():            signingauthority.ErrPoPDomain,
-	signingauthority.ErrUnauthenticated.Error():      signingauthority.ErrUnauthenticated,
-	signingauthority.ErrProposalMismatch.Error():     signingauthority.ErrProposalMismatch,
-	signingauthority.ErrRequestTooLarge.Error():      signingauthority.ErrRequestTooLarge,
-	signingauthority.ErrUnsupportedVersion.Error():   signingauthority.ErrUnsupportedVersion,
-	signingauthority.ErrKeyLost.Error():              signingauthority.ErrKeyLost,
-	signingauthority.ErrFenced.Error():               signingauthority.ErrFenced,
-	signingauthority.ErrStale.Error():                signingauthority.ErrStale,
-	signingauthority.ErrConflict.Error():             signingauthority.ErrConflict,
-	signingauthority.ErrNoReservation.Error():        signingauthority.ErrNoReservation,
-	signingauthority.ErrResponseNotRetained.Error():  signingauthority.ErrResponseNotRetained,
-	signingauthority.ErrStateUntrusted.Error():       signingauthority.ErrStateUntrusted,
-	signingauthority.ErrEnrollmentIncomplete.Error(): signingauthority.ErrEnrollmentIncomplete,
-	errFrameTooLarge.Error():                         errFrameTooLarge,
-	errWrongEndpoint.Error():                         errWrongEndpoint,
-	errOperatorUnauthenticated.Error():               errOperatorUnauthenticated,
-	errMalformed.Error():                             errMalformed,
-	errInternal.Error():                              errInternal,
+	ErrManagedSession.Error():                            ErrManagedSession,
+	ErrCredentialPublication.Error():                     ErrCredentialPublication,
+	signingauthority.ErrContextMismatch.Error():          signingauthority.ErrContextMismatch,
+	signingauthority.ErrPoPDomain.Error():                signingauthority.ErrPoPDomain,
+	signingauthority.ErrPosPolicy.Error():                signingauthority.ErrPosPolicy,
+	signingauthority.ErrPosPolicyConflict.Error():        signingauthority.ErrPosPolicyConflict,
+	signingauthority.ErrRegistrationDeployment.Error():   signingauthority.ErrRegistrationDeployment,
+	signingauthority.ErrRegistrationDomain.Error():       signingauthority.ErrRegistrationDomain,
+	signingauthority.ErrRegistrationUnauthorized.Error(): signingauthority.ErrRegistrationUnauthorized,
+	signingauthority.ErrUnauthenticated.Error():          signingauthority.ErrUnauthenticated,
+	signingauthority.ErrProposalMismatch.Error():         signingauthority.ErrProposalMismatch,
+	signingauthority.ErrRequestTooLarge.Error():          signingauthority.ErrRequestTooLarge,
+	signingauthority.ErrUnsupportedVersion.Error():       signingauthority.ErrUnsupportedVersion,
+	signingauthority.ErrKeyLost.Error():                  signingauthority.ErrKeyLost,
+	signingauthority.ErrFenced.Error():                   signingauthority.ErrFenced,
+	signingauthority.ErrStale.Error():                    signingauthority.ErrStale,
+	signingauthority.ErrConflict.Error():                 signingauthority.ErrConflict,
+	signingauthority.ErrNoReservation.Error():            signingauthority.ErrNoReservation,
+	signingauthority.ErrResponseNotRetained.Error():      signingauthority.ErrResponseNotRetained,
+	signingauthority.ErrStateUntrusted.Error():           signingauthority.ErrStateUntrusted,
+	signingauthority.ErrEnrollmentIncomplete.Error():     signingauthority.ErrEnrollmentIncomplete,
+	signingauthority.ErrRetired.Error():                  signingauthority.ErrRetired,
+	signingauthority.ErrRecoveryOnly.Error():             signingauthority.ErrRecoveryOnly,
+	signingauthority.ErrLineageUnverified.Error():        signingauthority.ErrLineageUnverified,
+	signingauthority.ErrAdvanceBusy.Error():              signingauthority.ErrAdvanceBusy,
+	errFrameTooLarge.Error():                             errFrameTooLarge,
+	errWrongEndpoint.Error():                             errWrongEndpoint,
+	errOperatorUnauthenticated.Error():                   errOperatorUnauthenticated,
+	errMalformed.Error():                                 errMalformed,
+	errInternal.Error():                                  errInternal,
 }
 
 // errInternal is a failure inside the authority process that is not one of the contract's decisions:

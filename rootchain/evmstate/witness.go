@@ -9,7 +9,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rlp"
-	"github.com/unicitynetwork/bft-core/bridgeprofile"
 	basetypes "github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -113,7 +112,7 @@ func (w Witness) verify(stateRoot [32]byte) (map[ethcommon.Address]*proven, erro
 	out := map[ethcommon.Address]*proven{}
 	for _, a := range w.Accounts {
 		addr := ethcommon.BytesToAddress(a.Addr)
-		value, present, err := bridgeprofile.VerifyMPTEntry(stateRoot, [32]byte(ethcrypto.Keccak256Hash(a.Addr)), a.Proofs)
+		value, present, err := verifyMPTEntry(stateRoot, [32]byte(ethcrypto.Keccak256Hash(a.Addr)), a.Proofs)
 		if err != nil {
 			return nil, errors.Join(ErrProof, fmt.Errorf("account %s", addr), err)
 		}
@@ -129,7 +128,7 @@ func (w Witness) verify(stateRoot [32]byte) (map[ethcommon.Address]*proven, erro
 			var slot, claimed [32]byte
 			copy(slot[:], s.Slot)
 			copy(claimed[:], s.Value)
-			stored, present, err := bridgeprofile.VerifyMPTEntry(p.storageRoot, [32]byte(ethcrypto.Keccak256Hash(s.Slot)), s.Proofs)
+			stored, present, err := verifyMPTEntry(p.storageRoot, [32]byte(ethcrypto.Keccak256Hash(s.Slot)), s.Proofs)
 			if err != nil {
 				return nil, errors.Join(ErrProof, fmt.Errorf("slot %x of %s", slot, addr), err)
 			}

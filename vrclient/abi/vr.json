@@ -1,0 +1,2053 @@
+[
+ {
+  "type": "function",
+  "name": "activationAt",
+  "inputs": [
+   {
+    "name": "i",
+    "type": "uint32",
+    "internalType": "uint32"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "tuple",
+    "internalType": "struct Activation",
+    "components": [
+     {
+      "name": "ruleId",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     },
+     {
+      "name": "releaseDigest",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     },
+     {
+      "name": "rootEpoch",
+      "type": "uint64",
+      "internalType": "uint64"
+     },
+     {
+      "name": "notBeforeUcTime",
+      "type": "uint64",
+      "internalType": "uint64"
+     },
+     {
+      "name": "state",
+      "type": "uint8",
+      "internalType": "uint8"
+     },
+     {
+      "name": "changeId",
+      "type": "uint64",
+      "internalType": "uint64"
+     }
+    ]
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "activationCount",
+  "inputs": [],
+  "outputs": [
+   {
+    "name": "",
+    "type": "uint32",
+    "internalType": "uint32"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "activeModule",
+  "inputs": [],
+  "outputs": [
+   {
+    "name": "",
+    "type": "tuple",
+    "internalType": "struct ModuleView",
+    "components": [
+     {
+      "name": "module",
+      "type": "address",
+      "internalType": "address"
+     },
+     {
+      "name": "codeHash",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     },
+     {
+      "name": "meta",
+      "type": "tuple",
+      "internalType": "struct ModuleMeta",
+      "components": [
+       {
+        "name": "moduleTag",
+        "type": "bytes32",
+        "internalType": "bytes32"
+       },
+       {
+        "name": "capabilities",
+        "type": "uint32",
+        "internalType": "uint32"
+       },
+       {
+        "name": "maxElectionInterval",
+        "type": "uint64",
+        "internalType": "uint64"
+       },
+       {
+        "name": "gasBounds",
+        "type": "uint64[8]",
+        "internalType": "uint64[8]"
+       },
+       {
+        "name": "liabilityHolder",
+        "type": "address",
+        "internalType": "address"
+       },
+       {
+        "name": "liabilityHolderCodeHash",
+        "type": "bytes32",
+        "internalType": "bytes32"
+       }
+      ]
+     },
+     {
+      "name": "health",
+      "type": "uint8",
+      "internalType": "uint8"
+     },
+     {
+      "name": "workPending",
+      "type": "bool",
+      "internalType": "bool"
+     },
+     {
+      "name": "workSince",
+      "type": "uint64",
+      "internalType": "uint64"
+     },
+     {
+      "name": "stallDeadline",
+      "type": "uint64",
+      "internalType": "uint64"
+     }
+    ]
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "binding",
+  "inputs": [
+   {
+    "name": "ref",
+    "type": "bytes32",
+    "internalType": "bytes32"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "tuple",
+    "internalType": "struct Binding",
+    "components": [
+     {
+      "name": "rootNodeWord",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     },
+     {
+      "name": "rootKeyHash",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     },
+     {
+      "name": "evmNodeWord",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     },
+     {
+      "name": "evmKeyHash",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     },
+     {
+      "name": "payee",
+      "type": "address",
+      "internalType": "address"
+     },
+     {
+      "name": "rootNodeID",
+      "type": "string",
+      "internalType": "string"
+     },
+     {
+      "name": "rootKey",
+      "type": "bytes",
+      "internalType": "bytes"
+     },
+     {
+      "name": "evmNodeID",
+      "type": "string",
+      "internalType": "string"
+     },
+     {
+      "name": "evmKey",
+      "type": "bytes",
+      "internalType": "bytes"
+     }
+    ]
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "bindingOf",
+  "inputs": [
+   {
+    "name": "id",
+    "type": "uint64",
+    "internalType": "uint64"
+   },
+   {
+    "name": "staged",
+    "type": "bool",
+    "internalType": "bool"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "tuple",
+    "internalType": "struct Member",
+    "components": [
+     {
+      "name": "id",
+      "type": "uint64",
+      "internalType": "uint64"
+     },
+     {
+      "name": "generation",
+      "type": "uint64",
+      "internalType": "uint64"
+     },
+     {
+      "name": "weight",
+      "type": "uint64",
+      "internalType": "uint64"
+     },
+     {
+      "name": "rawWeight",
+      "type": "uint64",
+      "internalType": "uint64"
+     },
+     {
+      "name": "rootNodeWord",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     },
+     {
+      "name": "rootKeyHash",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     },
+     {
+      "name": "evmNodeWord",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     },
+     {
+      "name": "evmKeyHash",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     },
+     {
+      "name": "payee",
+      "type": "address",
+      "internalType": "address"
+     },
+     {
+      "name": "exposureDigest",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     }
+    ]
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "cancel",
+  "inputs": [
+   {
+    "name": "changeId",
+    "type": "uint64",
+    "internalType": "uint64"
+   }
+  ],
+  "outputs": [],
+  "stateMutability": "nonpayable"
+ },
+ {
+  "type": "function",
+  "name": "change",
+  "inputs": [
+   {
+    "name": "changeId",
+    "type": "uint64",
+    "internalType": "uint64"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "tuple",
+    "internalType": "struct ChangeView",
+    "components": [
+     {
+      "name": "kind",
+      "type": "uint8",
+      "internalType": "uint8"
+     },
+     {
+      "name": "state",
+      "type": "uint8",
+      "internalType": "uint8"
+     },
+     {
+      "name": "rejectReason",
+      "type": "uint8",
+      "internalType": "uint8"
+     },
+     {
+      "name": "notBeforeProgress",
+      "type": "uint64",
+      "internalType": "uint64"
+     },
+     {
+      "name": "notBeforeTime",
+      "type": "uint64",
+      "internalType": "uint64"
+     },
+     {
+      "name": "activeRootEpoch",
+      "type": "uint64",
+      "internalType": "uint64"
+     },
+     {
+      "name": "scheduledAt",
+      "type": "uint64",
+      "internalType": "uint64"
+     },
+     {
+      "name": "payloadHash",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     },
+     {
+      "name": "boundTo",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     },
+     {
+      "name": "payload",
+      "type": "bytes",
+      "internalType": "bytes"
+     }
+    ]
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "committee",
+  "inputs": [],
+  "outputs": [
+   {
+    "name": "",
+    "type": "tuple[]",
+    "internalType": "struct Member[]",
+    "components": [
+     {
+      "name": "id",
+      "type": "uint64",
+      "internalType": "uint64"
+     },
+     {
+      "name": "generation",
+      "type": "uint64",
+      "internalType": "uint64"
+     },
+     {
+      "name": "weight",
+      "type": "uint64",
+      "internalType": "uint64"
+     },
+     {
+      "name": "rawWeight",
+      "type": "uint64",
+      "internalType": "uint64"
+     },
+     {
+      "name": "rootNodeWord",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     },
+     {
+      "name": "rootKeyHash",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     },
+     {
+      "name": "evmNodeWord",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     },
+     {
+      "name": "evmKeyHash",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     },
+     {
+      "name": "payee",
+      "type": "address",
+      "internalType": "address"
+     },
+     {
+      "name": "exposureDigest",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     }
+    ]
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "committeeIds",
+  "inputs": [],
+  "outputs": [
+   {
+    "name": "",
+    "type": "uint64[]",
+    "internalType": "uint64[]"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "config",
+  "inputs": [],
+  "outputs": [
+   {
+    "name": "",
+    "type": "tuple",
+    "internalType": "struct ConfigView",
+    "components": [
+     {
+      "name": "network",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     },
+     {
+      "name": "governor",
+      "type": "address",
+      "internalType": "address"
+     },
+     {
+      "name": "nMin",
+      "type": "uint32",
+      "internalType": "uint32"
+     },
+     {
+      "name": "nTarget",
+      "type": "uint32",
+      "internalType": "uint32"
+     },
+     {
+      "name": "nMax",
+      "type": "uint32",
+      "internalType": "uint32"
+     },
+     {
+      "name": "vMax",
+      "type": "uint32",
+      "internalType": "uint32"
+     },
+     {
+      "name": "lMax",
+      "type": "uint32",
+      "internalType": "uint32"
+     },
+     {
+      "name": "rMax",
+      "type": "uint32",
+      "internalType": "uint32"
+     },
+     {
+      "name": "maxBatch",
+      "type": "uint32",
+      "internalType": "uint32"
+     },
+     {
+      "name": "feesPrevious",
+      "type": "tuple",
+      "internalType": "struct FeeSet",
+      "components": [
+       {
+        "name": "baseFeeFloor",
+        "type": "uint64",
+        "internalType": "uint64"
+       },
+       {
+        "name": "changeDenominator",
+        "type": "uint64",
+        "internalType": "uint64"
+       },
+       {
+        "name": "feeCollector",
+        "type": "address",
+        "internalType": "address"
+       }
+      ]
+     },
+     {
+      "name": "feesCurrent",
+      "type": "tuple",
+      "internalType": "struct FeeSet",
+      "components": [
+       {
+        "name": "baseFeeFloor",
+        "type": "uint64",
+        "internalType": "uint64"
+       },
+       {
+        "name": "changeDenominator",
+        "type": "uint64",
+        "internalType": "uint64"
+       },
+       {
+        "name": "feeCollector",
+        "type": "address",
+        "internalType": "address"
+       }
+      ]
+     },
+     {
+      "name": "feesEffectiveBlock",
+      "type": "uint64",
+      "internalType": "uint64"
+     },
+     {
+      "name": "delayRounds",
+      "type": "uint64",
+      "internalType": "uint64"
+     },
+     {
+      "name": "delaySeconds",
+      "type": "uint64",
+      "internalType": "uint64"
+     },
+     {
+      "name": "knownRootEpoch",
+      "type": "uint64",
+      "internalType": "uint64"
+     },
+     {
+      "name": "epochStartProgress",
+      "type": "uint64",
+      "internalType": "uint64"
+     },
+     {
+      "name": "maxGas",
+      "type": "uint64",
+      "internalType": "uint64"
+     },
+     {
+      "name": "systemGas",
+      "type": "uint64",
+      "internalType": "uint64"
+     },
+     {
+      "name": "continuityMaxM",
+      "type": "uint64",
+      "internalType": "uint64"
+     },
+     {
+      "name": "continuityDistNum",
+      "type": "uint64",
+      "internalType": "uint64"
+     },
+     {
+      "name": "continuityDistDen",
+      "type": "uint64",
+      "internalType": "uint64"
+     }
+    ]
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "execute",
+  "inputs": [
+   {
+    "name": "changeId",
+    "type": "uint64",
+    "internalType": "uint64"
+   }
+  ],
+  "outputs": [],
+  "stateMutability": "nonpayable"
+ },
+ {
+  "type": "function",
+  "name": "feesFor",
+  "inputs": [
+   {
+    "name": "n",
+    "type": "uint64",
+    "internalType": "uint64"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "tuple",
+    "internalType": "struct FeeSet",
+    "components": [
+     {
+      "name": "baseFeeFloor",
+      "type": "uint64",
+      "internalType": "uint64"
+     },
+     {
+      "name": "changeDenominator",
+      "type": "uint64",
+      "internalType": "uint64"
+     },
+     {
+      "name": "feeCollector",
+      "type": "address",
+      "internalType": "address"
+     }
+    ]
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "health",
+  "inputs": [],
+  "outputs": [
+   {
+    "name": "",
+    "type": "uint8",
+    "internalType": "uint8"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "holderAt",
+  "inputs": [
+   {
+    "name": "h",
+    "type": "uint8",
+    "internalType": "uint8"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "tuple",
+    "internalType": "struct HolderView",
+    "components": [
+     {
+      "name": "holder",
+      "type": "address",
+      "internalType": "address"
+     },
+     {
+      "name": "holderCodeHash",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     },
+     {
+      "name": "module",
+      "type": "address",
+      "internalType": "address"
+     },
+     {
+      "name": "registeredEpoch",
+      "type": "uint64",
+      "internalType": "uint64"
+     }
+    ]
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "holderCount",
+  "inputs": [],
+  "outputs": [
+   {
+    "name": "",
+    "type": "uint8",
+    "internalType": "uint8"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "identity",
+  "inputs": [
+   {
+    "name": "id",
+    "type": "uint64",
+    "internalType": "uint64"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "tuple",
+    "internalType": "struct IdentityView",
+    "components": [
+     {
+      "name": "owner",
+      "type": "address",
+      "internalType": "address"
+     },
+     {
+      "name": "generation",
+      "type": "uint64",
+      "internalType": "uint64"
+     },
+     {
+      "name": "currentRef",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     },
+     {
+      "name": "stagedRef",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     },
+     {
+      "name": "bindingNonce",
+      "type": "uint64",
+      "internalType": "uint64"
+     },
+     {
+      "name": "registrationNonce",
+      "type": "uint64",
+      "internalType": "uint64"
+     },
+     {
+      "name": "current",
+      "type": "tuple",
+      "internalType": "struct Binding",
+      "components": [
+       {
+        "name": "rootNodeWord",
+        "type": "bytes32",
+        "internalType": "bytes32"
+       },
+       {
+        "name": "rootKeyHash",
+        "type": "bytes32",
+        "internalType": "bytes32"
+       },
+       {
+        "name": "evmNodeWord",
+        "type": "bytes32",
+        "internalType": "bytes32"
+       },
+       {
+        "name": "evmKeyHash",
+        "type": "bytes32",
+        "internalType": "bytes32"
+       },
+       {
+        "name": "payee",
+        "type": "address",
+        "internalType": "address"
+       },
+       {
+        "name": "rootNodeID",
+        "type": "string",
+        "internalType": "string"
+       },
+       {
+        "name": "rootKey",
+        "type": "bytes",
+        "internalType": "bytes"
+       },
+       {
+        "name": "evmNodeID",
+        "type": "string",
+        "internalType": "string"
+       },
+       {
+        "name": "evmKey",
+        "type": "bytes",
+        "internalType": "bytes"
+       }
+      ]
+     },
+     {
+      "name": "staged",
+      "type": "tuple",
+      "internalType": "struct Binding",
+      "components": [
+       {
+        "name": "rootNodeWord",
+        "type": "bytes32",
+        "internalType": "bytes32"
+       },
+       {
+        "name": "rootKeyHash",
+        "type": "bytes32",
+        "internalType": "bytes32"
+       },
+       {
+        "name": "evmNodeWord",
+        "type": "bytes32",
+        "internalType": "bytes32"
+       },
+       {
+        "name": "evmKeyHash",
+        "type": "bytes32",
+        "internalType": "bytes32"
+       },
+       {
+        "name": "payee",
+        "type": "address",
+        "internalType": "address"
+       },
+       {
+        "name": "rootNodeID",
+        "type": "string",
+        "internalType": "string"
+       },
+       {
+        "name": "rootKey",
+        "type": "bytes",
+        "internalType": "bytes"
+       },
+       {
+        "name": "evmNodeID",
+        "type": "string",
+        "internalType": "string"
+       },
+       {
+        "name": "evmKey",
+        "type": "bytes",
+        "internalType": "bytes"
+       }
+      ]
+     },
+     {
+      "name": "endpoints",
+      "type": "bytes",
+      "internalType": "bytes"
+     }
+    ]
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "lastAcked",
+  "inputs": [],
+  "outputs": [
+   {
+    "name": "",
+    "type": "bytes32",
+    "internalType": "bytes32"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "limits",
+  "inputs": [],
+  "outputs": [
+   {
+    "name": "vMax",
+    "type": "uint32",
+    "internalType": "uint32"
+   },
+   {
+    "name": "lMax",
+    "type": "uint32",
+    "internalType": "uint32"
+   },
+   {
+    "name": "rMax",
+    "type": "uint32",
+    "internalType": "uint32"
+   },
+   {
+    "name": "maxBatch",
+    "type": "uint32",
+    "internalType": "uint32"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "openOutput",
+  "inputs": [],
+  "outputs": [
+   {
+    "name": "",
+    "type": "bytes32",
+    "internalType": "bytes32"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "output",
+  "inputs": [
+   {
+    "name": "resultId",
+    "type": "bytes32",
+    "internalType": "bytes32"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "tuple",
+    "internalType": "struct OutputView",
+    "components": [
+     {
+      "name": "state",
+      "type": "uint8",
+      "internalType": "uint8"
+     },
+     {
+      "name": "attempt",
+      "type": "uint64",
+      "internalType": "uint64"
+     },
+     {
+      "name": "reservedProgress",
+      "type": "uint64",
+      "internalType": "uint64"
+     },
+     {
+      "name": "expiresAtProgress",
+      "type": "uint64",
+      "internalType": "uint64"
+     },
+     {
+      "name": "predecessor",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     },
+     {
+      "name": "sourceModule",
+      "type": "address",
+      "internalType": "address"
+     },
+     {
+      "name": "native",
+      "type": "bool",
+      "internalType": "bool"
+     },
+     {
+      "name": "moduleTag",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     },
+     {
+      "name": "membersDigest",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     },
+     {
+      "name": "kDigest",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     },
+     {
+      "name": "changesDigest",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     },
+     {
+      "name": "snapshotDigest",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     },
+     {
+      "name": "policyDigest",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     },
+     {
+      "name": "outputCommit",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     },
+     {
+      "name": "invalidReason",
+      "type": "uint8",
+      "internalType": "uint8"
+     },
+     {
+      "name": "invalidAtProgress",
+      "type": "uint64",
+      "internalType": "uint64"
+     },
+     {
+      "name": "members",
+      "type": "tuple[]",
+      "internalType": "struct Member[]",
+      "components": [
+       {
+        "name": "id",
+        "type": "uint64",
+        "internalType": "uint64"
+       },
+       {
+        "name": "generation",
+        "type": "uint64",
+        "internalType": "uint64"
+       },
+       {
+        "name": "weight",
+        "type": "uint64",
+        "internalType": "uint64"
+       },
+       {
+        "name": "rawWeight",
+        "type": "uint64",
+        "internalType": "uint64"
+       },
+       {
+        "name": "rootNodeWord",
+        "type": "bytes32",
+        "internalType": "bytes32"
+       },
+       {
+        "name": "rootKeyHash",
+        "type": "bytes32",
+        "internalType": "bytes32"
+       },
+       {
+        "name": "evmNodeWord",
+        "type": "bytes32",
+        "internalType": "bytes32"
+       },
+       {
+        "name": "evmKeyHash",
+        "type": "bytes32",
+        "internalType": "bytes32"
+       },
+       {
+        "name": "payee",
+        "type": "address",
+        "internalType": "address"
+       },
+       {
+        "name": "exposureDigest",
+        "type": "bytes32",
+        "internalType": "bytes32"
+       }
+      ]
+     },
+     {
+      "name": "changes",
+      "type": "uint64[]",
+      "internalType": "uint64[]"
+     }
+    ]
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "ownerOf",
+  "inputs": [
+   {
+    "name": "id",
+    "type": "uint64",
+    "internalType": "uint64"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "address",
+    "internalType": "address"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "pendingChanges",
+  "inputs": [],
+  "outputs": [
+   {
+    "name": "",
+    "type": "uint64[]",
+    "internalType": "uint64[]"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "pendingPair",
+  "inputs": [],
+  "outputs": [
+   {
+    "name": "",
+    "type": "bytes32",
+    "internalType": "bytes32"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "proposeBinding",
+  "inputs": [
+   {
+    "name": "id",
+    "type": "uint64",
+    "internalType": "uint64"
+   },
+   {
+    "name": "r",
+    "type": "tuple",
+    "internalType": "struct Registration",
+    "components": [
+     {
+      "name": "rootNodeID",
+      "type": "string",
+      "internalType": "string"
+     },
+     {
+      "name": "rootKey",
+      "type": "bytes",
+      "internalType": "bytes"
+     },
+     {
+      "name": "evmNodeID",
+      "type": "string",
+      "internalType": "string"
+     },
+     {
+      "name": "evmKey",
+      "type": "bytes",
+      "internalType": "bytes"
+     },
+     {
+      "name": "payee",
+      "type": "address",
+      "internalType": "address"
+     },
+     {
+      "name": "nonce",
+      "type": "uint64",
+      "internalType": "uint64"
+     }
+    ]
+   },
+   {
+    "name": "rootPoP",
+    "type": "bytes",
+    "internalType": "bytes"
+   },
+   {
+    "name": "evmPoP",
+    "type": "bytes",
+    "internalType": "bytes"
+   }
+  ],
+  "outputs": [],
+  "stateMutability": "nonpayable"
+ },
+ {
+  "type": "function",
+  "name": "queue",
+  "inputs": [
+   {
+    "name": "kind",
+    "type": "uint8",
+    "internalType": "uint8"
+   },
+   {
+    "name": "payload",
+    "type": "bytes",
+    "internalType": "bytes"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "changeId",
+    "type": "uint64",
+    "internalType": "uint64"
+   }
+  ],
+  "stateMutability": "nonpayable"
+ },
+ {
+  "type": "function",
+  "name": "recordCursor",
+  "inputs": [],
+  "outputs": [
+   {
+    "name": "",
+    "type": "uint64",
+    "internalType": "uint64"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "register",
+  "inputs": [
+   {
+    "name": "r",
+    "type": "tuple",
+    "internalType": "struct Registration",
+    "components": [
+     {
+      "name": "rootNodeID",
+      "type": "string",
+      "internalType": "string"
+     },
+     {
+      "name": "rootKey",
+      "type": "bytes",
+      "internalType": "bytes"
+     },
+     {
+      "name": "evmNodeID",
+      "type": "string",
+      "internalType": "string"
+     },
+     {
+      "name": "evmKey",
+      "type": "bytes",
+      "internalType": "bytes"
+     },
+     {
+      "name": "payee",
+      "type": "address",
+      "internalType": "address"
+     },
+     {
+      "name": "nonce",
+      "type": "uint64",
+      "internalType": "uint64"
+     }
+    ]
+   },
+   {
+    "name": "rootPoP",
+    "type": "bytes",
+    "internalType": "bytes"
+   },
+   {
+    "name": "evmPoP",
+    "type": "bytes",
+    "internalType": "bytes"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "id",
+    "type": "uint64",
+    "internalType": "uint64"
+   }
+  ],
+  "stateMutability": "nonpayable"
+ },
+ {
+  "type": "function",
+  "name": "registrationNonce",
+  "inputs": [
+   {
+    "name": "owner",
+    "type": "address",
+    "internalType": "address"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "uint64",
+    "internalType": "uint64"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "retired",
+  "inputs": [
+   {
+    "name": "holder",
+    "type": "uint8",
+    "internalType": "uint8"
+   },
+   {
+    "name": "id",
+    "type": "uint64",
+    "internalType": "uint64"
+   },
+   {
+    "name": "generation",
+    "type": "uint64",
+    "internalType": "uint64"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "bool",
+    "internalType": "bool"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "scheduledForceRemoves",
+  "inputs": [],
+  "outputs": [
+   {
+    "name": "changeIds",
+    "type": "uint64[]",
+    "internalType": "uint64[]"
+   },
+   {
+    "name": "targets",
+    "type": "uint64[]",
+    "internalType": "uint64[]"
+   },
+   {
+    "name": "scheduledAt",
+    "type": "uint64[]",
+    "internalType": "uint64[]"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "setEndpoints",
+  "inputs": [
+   {
+    "name": "id",
+    "type": "uint64",
+    "internalType": "uint64"
+   },
+   {
+    "name": "multiaddrs",
+    "type": "bytes",
+    "internalType": "bytes"
+   }
+  ],
+  "outputs": [],
+  "stateMutability": "nonpayable"
+ },
+ {
+  "type": "event",
+  "name": "ActivationRecorded",
+  "inputs": [
+   {
+    "name": "index",
+    "type": "uint32",
+    "indexed": true,
+    "internalType": "uint32"
+   },
+   {
+    "name": "ruleId",
+    "type": "bytes32",
+    "indexed": true,
+    "internalType": "bytes32"
+   },
+   {
+    "name": "rootEpoch",
+    "type": "uint64",
+    "indexed": false,
+    "internalType": "uint64"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
+  "name": "BindingProposed",
+  "inputs": [
+   {
+    "name": "id",
+    "type": "uint64",
+    "indexed": true,
+    "internalType": "uint64"
+   },
+   {
+    "name": "nonce",
+    "type": "uint64",
+    "indexed": false,
+    "internalType": "uint64"
+   },
+   {
+    "name": "bindingRef",
+    "type": "bytes32",
+    "indexed": false,
+    "internalType": "bytes32"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
+  "name": "ChangeBound",
+  "inputs": [
+   {
+    "name": "id",
+    "type": "uint64",
+    "indexed": true,
+    "internalType": "uint64"
+   },
+   {
+    "name": "resultId",
+    "type": "bytes32",
+    "indexed": true,
+    "internalType": "bytes32"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
+  "name": "ChangeCancelled",
+  "inputs": [
+   {
+    "name": "id",
+    "type": "uint64",
+    "indexed": true,
+    "internalType": "uint64"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
+  "name": "ChangeQueued",
+  "inputs": [
+   {
+    "name": "id",
+    "type": "uint64",
+    "indexed": true,
+    "internalType": "uint64"
+   },
+   {
+    "name": "kind",
+    "type": "uint8",
+    "indexed": true,
+    "internalType": "uint8"
+   },
+   {
+    "name": "payloadHash",
+    "type": "bytes32",
+    "indexed": false,
+    "internalType": "bytes32"
+   },
+   {
+    "name": "notBeforeProgress",
+    "type": "uint64",
+    "indexed": false,
+    "internalType": "uint64"
+   },
+   {
+    "name": "notBeforeTime",
+    "type": "uint64",
+    "indexed": false,
+    "internalType": "uint64"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
+  "name": "ChangeReleased",
+  "inputs": [
+   {
+    "name": "id",
+    "type": "uint64",
+    "indexed": true,
+    "internalType": "uint64"
+   },
+   {
+    "name": "resultId",
+    "type": "bytes32",
+    "indexed": true,
+    "internalType": "bytes32"
+   },
+   {
+    "name": "state",
+    "type": "uint8",
+    "indexed": false,
+    "internalType": "uint8"
+   },
+   {
+    "name": "reason",
+    "type": "uint8",
+    "indexed": false,
+    "internalType": "uint8"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
+  "name": "ChangeScheduled",
+  "inputs": [
+   {
+    "name": "id",
+    "type": "uint64",
+    "indexed": true,
+    "internalType": "uint64"
+   },
+   {
+    "name": "scheduledAt",
+    "type": "uint64",
+    "indexed": false,
+    "internalType": "uint64"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
+  "name": "EndpointsSet",
+  "inputs": [
+   {
+    "name": "id",
+    "type": "uint64",
+    "indexed": true,
+    "internalType": "uint64"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
+  "name": "HolderAllocated",
+  "inputs": [
+   {
+    "name": "index",
+    "type": "uint8",
+    "indexed": true,
+    "internalType": "uint8"
+   },
+   {
+    "name": "holder",
+    "type": "address",
+    "indexed": true,
+    "internalType": "address"
+   },
+   {
+    "name": "module",
+    "type": "address",
+    "indexed": true,
+    "internalType": "address"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
+  "name": "ModuleActionExecuted",
+  "inputs": [
+   {
+    "name": "id",
+    "type": "uint64",
+    "indexed": true,
+    "internalType": "uint64"
+   },
+   {
+    "name": "state",
+    "type": "uint8",
+    "indexed": false,
+    "internalType": "uint8"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
+  "name": "ModuleFaulted",
+  "inputs": [
+   {
+    "name": "module",
+    "type": "address",
+    "indexed": true,
+    "internalType": "address"
+   },
+   {
+    "name": "step",
+    "type": "uint8",
+    "indexed": false,
+    "internalType": "uint8"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
+  "name": "ModuleStalled",
+  "inputs": [
+   {
+    "name": "module",
+    "type": "address",
+    "indexed": true,
+    "internalType": "address"
+   },
+   {
+    "name": "reason",
+    "type": "uint8",
+    "indexed": false,
+    "internalType": "uint8"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
+  "name": "ModuleSwitched",
+  "inputs": [
+   {
+    "name": "previous",
+    "type": "address",
+    "indexed": true,
+    "internalType": "address"
+   },
+   {
+    "name": "module",
+    "type": "address",
+    "indexed": true,
+    "internalType": "address"
+   },
+   {
+    "name": "changeId",
+    "type": "uint64",
+    "indexed": false,
+    "internalType": "uint64"
+   },
+   {
+    "name": "attached",
+    "type": "bool",
+    "indexed": false,
+    "internalType": "bool"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
+  "name": "OutputAcknowledged",
+  "inputs": [
+   {
+    "name": "resultId",
+    "type": "bytes32",
+    "indexed": true,
+    "internalType": "bytes32"
+   },
+   {
+    "name": "recovered",
+    "type": "bool",
+    "indexed": false,
+    "internalType": "bool"
+   },
+   {
+    "name": "rootEpoch",
+    "type": "uint64",
+    "indexed": false,
+    "internalType": "uint64"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
+  "name": "OutputClosed",
+  "inputs": [
+   {
+    "name": "resultId",
+    "type": "bytes32",
+    "indexed": true,
+    "internalType": "bytes32"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
+  "name": "OutputInvalidated",
+  "inputs": [
+   {
+    "name": "resultId",
+    "type": "bytes32",
+    "indexed": true,
+    "internalType": "bytes32"
+   },
+   {
+    "name": "reason",
+    "type": "uint8",
+    "indexed": false,
+    "internalType": "uint8"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
+  "name": "OutputPublished",
+  "inputs": [
+   {
+    "name": "resultId",
+    "type": "bytes32",
+    "indexed": true,
+    "internalType": "bytes32"
+   },
+   {
+    "name": "outputCommit",
+    "type": "bytes32",
+    "indexed": false,
+    "internalType": "bytes32"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
+  "name": "OutputRejected",
+  "inputs": [
+   {
+    "name": "resultId",
+    "type": "bytes32",
+    "indexed": true,
+    "internalType": "bytes32"
+   },
+   {
+    "name": "reason",
+    "type": "uint8",
+    "indexed": false,
+    "internalType": "uint8"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
+  "name": "OutputReserved",
+  "inputs": [
+   {
+    "name": "resultId",
+    "type": "bytes32",
+    "indexed": true,
+    "internalType": "bytes32"
+   },
+   {
+    "name": "source",
+    "type": "address",
+    "indexed": true,
+    "internalType": "address"
+   },
+   {
+    "name": "native",
+    "type": "bool",
+    "indexed": false,
+    "internalType": "bool"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
+  "name": "PairStaged",
+  "inputs": [
+   {
+    "name": "resultId",
+    "type": "bytes32",
+    "indexed": true,
+    "internalType": "bytes32"
+   },
+   {
+    "name": "recovered",
+    "type": "bool",
+    "indexed": false,
+    "internalType": "bool"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
+  "name": "RecordAnomaly",
+  "inputs": [
+   {
+    "name": "index",
+    "type": "uint64",
+    "indexed": true,
+    "internalType": "uint64"
+   },
+   {
+    "name": "kind",
+    "type": "uint8",
+    "indexed": false,
+    "internalType": "uint8"
+   },
+   {
+    "name": "code",
+    "type": "uint8",
+    "indexed": false,
+    "internalType": "uint8"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
+  "name": "Registered",
+  "inputs": [
+   {
+    "name": "id",
+    "type": "uint64",
+    "indexed": true,
+    "internalType": "uint64"
+   },
+   {
+    "name": "owner",
+    "type": "address",
+    "indexed": true,
+    "internalType": "address"
+   },
+   {
+    "name": "bindingRef",
+    "type": "bytes32",
+    "indexed": false,
+    "internalType": "bytes32"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
+  "name": "RetirementMarked",
+  "inputs": [
+   {
+    "name": "holder",
+    "type": "uint8",
+    "indexed": true,
+    "internalType": "uint8"
+   },
+   {
+    "name": "id",
+    "type": "uint64",
+    "indexed": true,
+    "internalType": "uint64"
+   },
+   {
+    "name": "generation",
+    "type": "uint64",
+    "indexed": true,
+    "internalType": "uint64"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
+  "name": "RuleLatched",
+  "inputs": [
+   {
+    "name": "index",
+    "type": "uint32",
+    "indexed": true,
+    "internalType": "uint32"
+   },
+   {
+    "name": "ruleId",
+    "type": "bytes32",
+    "indexed": true,
+    "internalType": "bytes32"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
+  "name": "StepBudgetShort",
+  "inputs": [
+   {
+    "name": "step",
+    "type": "uint8",
+    "indexed": false,
+    "internalType": "uint8"
+   },
+   {
+    "name": "needed",
+    "type": "uint256",
+    "indexed": false,
+    "internalType": "uint256"
+   },
+   {
+    "name": "available",
+    "type": "uint256",
+    "indexed": false,
+    "internalType": "uint256"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "error",
+  "name": "BadGenesis",
+  "inputs": [
+   {
+    "name": "code",
+    "type": "uint8",
+    "internalType": "uint8"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "BatchTooLarge",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "BudgetShort",
+  "inputs": [
+   {
+    "name": "step",
+    "type": "uint8",
+    "internalType": "uint8"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "DelayNotElapsed",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "EndpointsTooLong",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "Inconsistent",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "Locked",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "NotCancellable",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "NotGovernor",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "NotOwner",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "NotSelf",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "NotSource",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "NotSystemCaller",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "PreconditionFailed",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "QueueRefused",
+  "inputs": [
+   {
+    "name": "code",
+    "type": "uint8",
+    "internalType": "uint8"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "RegistrationRefused",
+  "inputs": [
+   {
+    "name": "code",
+    "type": "uint8",
+    "internalType": "uint8"
+   }
+  ]
+ },
+ {
+  "type": "error",
+  "name": "StepFailed",
+  "inputs": []
+ }
+]

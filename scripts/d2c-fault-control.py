@@ -13,9 +13,10 @@ from pathlib import Path
 
 
 ROOT = Path.cwd()
-ETH_BASE = 18545
-ENGINE_BASE = 18551
-P2P_BASE = 30401
+LANE_PORT_OFFSET = int(os.environ.get('LANE_PORT_OFFSET', '0'))   # the lane slot (scripts/lib/lane-slot.sh)
+ETH_BASE = 18545 + LANE_PORT_OFFSET
+ENGINE_BASE = 18551 + LANE_PORT_OFFSET
+P2P_BASE = 30401 + LANE_PORT_OFFSET
 SCENARIO, CERTIFIED, LAST_ROUND = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
 
 
@@ -48,19 +49,37 @@ def stop(kind, i, sig):
     raise RuntimeError(f"{kind}{i} process {pid} did not exit after SIG{sig}")
 
 
-def start_reth(i):
+def reth_pin_flags(helper):
+    # Use the paired launcher's flag policy for execution clients restarted by the fault harness.
+    return subprocess.check_output(
+        ["bash", "-c", 'source scripts/lib/reth-pin.sh && "$1"', "d2c-reth", helper],
+        cwd=ROOT, text=True,
+    ).split()
+
+
+def reth_args(i, chain):
     home = Path(f"test-nodes/reth{i}")
     jwt = f"test-nodes/evm{i}/jwt.hex"
     threshold = os.environ.get("D2C_PERSISTENCE_THRESHOLD", "64")
-    fee_collector = os.environ["URETH_PIN_FEE_COLLECTOR"]
-    args = [os.environ["URETH_BIN"], "node", "--chain", "test-nodes/evm-genesis-finalized-funded.json",
+    vr_lane = os.environ.get("VR_LANE") == "1"
+    if vr_lane:
+        unicity_flags = reth_pin_flags("urethPinUnicityFlags")
+        gas_limit = os.environ.get("URETH_BUILDER_GASLIMIT", "30000000")
+    else:
+        unicity_flags = ["--unicity.fee-collector", os.environ["URETH_PIN_FEE_COLLECTOR"]]
+        gas_limit = "30000000"
+    return [os.environ["URETH_BIN"], "node", "--chain", str(chain),
             "--datadir", str(home / "dd"), "--authrpc.jwtsecret", jwt,
             "--authrpc.addr", "127.0.0.1", "--authrpc.port", str(ENGINE_BASE + i - 1),
             "--http", "--http.addr", "127.0.0.1", "--http.port", str(ETH_BASE + i - 1),
-            "--http.api", "eth,net,web3,admin,debug", "--rpc.eth-proof-window", "64",
+            "--http.api", "eth,net,web3,admin,debug", *reth_pin_flags("urethPinStateProofFlags"),
             "--port", str(P2P_BASE + i - 1), "--disable-discovery", "--ipcdisable",
-            "--engine.persistence-threshold", threshold, "--builder.gaslimit", "30000000",
-            "--unicity.fee-collector", fee_collector]
+            "--engine.persistence-threshold", threshold, "--builder.gaslimit", gas_limit, *unicity_flags]
+
+
+def start_reth(i):
+    home = Path(f"test-nodes/reth{i}")
+    args = reth_args(i, "test-nodes/evm-genesis-finalized-funded.json")
     with open(home / "reth.log", "a") as log:
         process = subprocess.Popen(args, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
     (home / "pid").write_text(f"{process.pid}\n")
@@ -76,7 +95,7 @@ def start_reth(i):
 
 
 def start_shard(i):
-    command = ("source helper.sh; rootBoot=$(boot_node test-nodes/root1 26662); "
+    command = ("source helper.sh; rootBoot=$(boot_node test-nodes/root1 \"$rootPortStart\"); "
                f"start_one_evm_validator {i} 4 8 \"$rootBoot\" engine-api")
     subprocess.run(["bash", "-c", command], cwd=ROOT, check=True, env=os.environ.copy())
 
@@ -723,12 +742,7 @@ elif SCENARIO == "wrong-genesis":
     spec["config"]["chainId"] = 31338
     wrong = Path("test-nodes/wrong-restart-genesis.json")
     wrong.write_text(json.dumps(spec))
-    args = [os.environ["URETH_BIN"], "node", "--chain", str(wrong), "--datadir", "test-nodes/reth1/dd",
-            "--authrpc.jwtsecret", "test-nodes/evm1/jwt.hex", "--authrpc.addr", "127.0.0.1",
-            "--authrpc.port", str(ENGINE_BASE), "--http", "--http.addr", "127.0.0.1", "--http.port", str(ETH_BASE),
-            "--http.api", "eth,net,web3,admin,debug", "--port", str(P2P_BASE), "--disable-discovery", "--ipcdisable",
-            "--engine.persistence-threshold", os.environ.get("D2C_PERSISTENCE_THRESHOLD", "64"),
-            "--builder.gaslimit", "30000000", "--unicity.fee-collector", os.environ["URETH_PIN_FEE_COLLECTOR"]]
+    args = reth_args(1, wrong)
     with open("test-nodes/reth1/reth.log", "a") as log:
         proc = subprocess.Popen(args, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
     (Path("test-nodes/reth1/pid")).write_text(f"{proc.pid}\n")

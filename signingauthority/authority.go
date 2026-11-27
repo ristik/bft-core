@@ -8,13 +8,16 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"github.com/unicitynetwork/bft-core/activationproof"
 	"math"
 	"sync"
+	"time"
 
 	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
+	"github.com/unicitynetwork/bft-core/vrrules"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -52,6 +55,11 @@ type Authority struct {
 	generation uint64
 	// state latches faulted on a detected inconsistency and never recovers within this lifetime.
 	state health
+	// Signing activity is for monitoring. It is never consulted by an admission or signing decision.
+	signatures        uint64
+	sessionIssuedAt   time.Time
+	sessionLastSign   time.Time
+	sessionSignatures uint64
 	// rec is the one reservation this authority holds.
 	rec          record
 	scopeVersion uint64
@@ -67,6 +75,116 @@ type Authority struct {
 	irBase      uint64
 	irBaseKnown bool
 	irAckSeen   bool
+
+	// lineage is the authority's own authenticated root history (#1085): nil for an authority enrolled without a lineage pin, which
+	// advances only by the operator-trusted AdvanceEpoch. With a pin, AdvanceWithProof is the advance and AdvanceEpoch is a recovery
+	// route admitted only when uncheckedAdvance was configured. Guarded by mu; replaced, never mutated.
+	lineage          *activationproof.Lineage
+	uncheckedAdvance bool
+	// retired fences signing and sessions when an authenticated activation drops this node or changes its key.
+	// recovery remembers the primary exclusion only when its committed K still names this authority and key. Guarded by mu.
+	retired  bool
+	recovery *recoveryExclusion
+	// sessionIssued is whether a session was issued since the last scope change: an advance fences the client, and the operator's
+	// single advance operation issues the next session only when this is false (a crash between the two is then repaired by a rerun).
+	sessionIssued bool
+	// advancing serialises proof advances: verification runs outside mu (so signing is not held up by it), and a second proof
+	// advance meanwhile is refused rather than queued.
+	advancing sync.Mutex
+	// advanceHook, when set (WithAdvanceHook), is called once a proof advance has taken its snapshot and before it verifies anything,
+	// outside every lock: the seam fault-injection tests pause verification at.
+	advanceHook func()
+	// registration is the operator's registration policy (WithRegistrationPolicy); nil: this authority signs no registration.
+	registration *RegistrationPolicy
+	// pos is the pinned scope of the P85 possession signatures (WithPosPolicy, SetPosPolicy); nil: SignPosPoP is refused.
+	pos *PosPolicy
+	// requirePos refuses every P85 possession signature until pos is set (WithRequirePosPolicy).
+	requirePos bool
+	// latePos allows the operator channel to pin the election at run time (WithLatePosPolicy): development only.
+	latePos bool
+	// fence refuses to sign for, or advance to, a root epoch >= E of an effective activation-schedule rule this binary lacks (WithFence).
+	fence *vrrules.Gate
+	// fencePending is the pre-genesis enrollment mode (WithFencePending): the authority serves key and enrollment operations only and signs
+	// nothing, and advances nothing, until ProvisionFence gives it its fence. Guarded by mu.
+	fencePending bool
+}
+
+// WithFence makes the authority refuse, with vrrules.ErrUpgradeRequired, to authenticate (and so reserve or sign) a request for a root
+// epoch >= E of an effective rule of the committed activation schedule that this binary lacks, and to advance into such an epoch (design
+// 7.4). A source failure with nothing known for the epoch refuses too. A nil gate fences nothing.
+func WithFence(g *vrrules.Gate) Option {
+	return func(a *Authority) error { a.fence = g; return nil }
+}
+
+// ErrFencePending is a signing or advance request to an authority that is still waiting for its activation fence (WithFencePending).
+var ErrFencePending = errors.New("signing-fence-pending")
+
+// WithFencePending starts the authority in the pre-genesis enrollment mode of a VR generation: its key and enrollment are available (the
+// shard configuration is generated from the key), but the generation's profile, execution genesis and activation source are not known
+// yet, so it signs nothing until ProvisionFence supplies the gate. The CLI starts it so only when the fence inputs are to be provisioned.
+func WithFencePending() Option {
+	return func(a *Authority) error { a.fencePending = true; return nil }
+}
+
+// ProvisionFence ends the pre-genesis mode: it gives the authority its fence, once, and enables signing and advance.
+func (a *Authority) ProvisionFence(g *vrrules.Gate) error {
+	if g == nil {
+		return errors.New("signingauthority: no fence to provision")
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.fencePending {
+		return errors.New("signingauthority: this authority is not waiting for its fence")
+	}
+	a.fence, a.fencePending = g, false
+	return nil
+}
+
+// fenceGate is the fence every signing and advance operation consults, or ErrFencePending while it is not provisioned.
+func (a *Authority) fenceGate() (*vrrules.Gate, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.fencePending {
+		return nil, fmt.Errorf("%w: this authority waits for its activation fence (profile, execution genesis, activation source) and signs nothing until then", ErrFencePending)
+	}
+	return a.fence, nil
+}
+
+// WithAdvanceHook calls hook at the start of every proof verification, outside the authority's locks. It changes no decision; it exists
+// so that a test can hold a verification in progress and observe what stays available meanwhile.
+func WithAdvanceHook(hook func()) Option {
+	return func(a *Authority) error {
+		a.advanceHook = hook
+		return nil
+	}
+}
+
+// Option configures an authority at New.
+type Option func(*Authority) error
+
+// WithLineage pins the authority's root lineage to the deployment's genesis root trust base (utb: the chain is a UTB chain). The
+// authority then advances by AdvanceWithProof, verifying every activation itself from this pin.
+func WithLineage(genesis *types.RootTrustBaseV1, utb bool) Option {
+	return func(a *Authority) error {
+		l, err := activationproof.NewLineage(genesis, utb)
+		if err != nil {
+			return err
+		}
+		if l.Network() != a.enroll.NetworkID {
+			return fmt.Errorf("the lineage pin is for network %d, the authority is enrolled for %d", l.Network(), a.enroll.NetworkID)
+		}
+		a.lineage = l
+		return nil
+	}
+}
+
+// WithUncheckedAdvance admits the operator-trusted AdvanceEpoch on an authority with a lineage pin: a recovery policy, stated
+// explicitly when the authority is started, never a default.
+func WithUncheckedAdvance() Option {
+	return func(a *Authority) error {
+		a.uncheckedAdvance = true
+		return nil
+	}
 }
 
 // irEpochAdmitted is the rule above for an input-record epoch against the enrolled shard epoch.
@@ -121,7 +239,7 @@ func (s Session) Generation() uint64 { return s.generation }
 // configuration that names this key cannot exist before the key does. The public key is available
 // at once, the configuration is stated afterwards with CompleteEnrollment, and every other field is
 // fixed here.
-func New(enroll Enrollment, trust TrustBases) (*Authority, error) {
+func New(enroll Enrollment, trust TrustBases, opts ...Option) (*Authority, error) {
 	if len(enroll.SigningKeyFingerprint) != 0 {
 		return nil, errors.New("signingauthority: enrollment names a signing key, and this profile has no key-import path: it generates a key per authority lifetime")
 	}
@@ -146,7 +264,13 @@ func New(enroll Enrollment, trust TrustBases) (*Authority, error) {
 	fingerprint := sha256.Sum256(pub)
 	enroll = enroll.clone()
 	enroll.SigningKeyFingerprint = fingerprint[:]
-	return &Authority{enroll: enroll, trust: trust, signer: signer, instance: instance}, nil
+	a := &Authority{enroll: enroll, trust: trust, signer: signer, instance: instance}
+	for _, opt := range opts {
+		if err := opt(a); err != nil {
+			return nil, fmt.Errorf("signingauthority: %w", err)
+		}
+	}
+	return a, nil
 }
 
 // Enrollment returns a copy of the immutable scope this authority signs for.
@@ -204,6 +328,9 @@ func (a *Authority) ReplaceSession() (Session, error) {
 		// for. Issuing a session first would hand out a credential for work that is refused anyway.
 		return Session{}, fmt.Errorf("%w: no session is issued before the shard configuration is stated", ErrEnrollmentIncomplete)
 	}
+	if a.retired {
+		return Session{}, fmt.Errorf("%w: the successor configuration does not name this authority's key", ErrRetired)
+	}
 	if a.generation == math.MaxUint64 {
 		// Exhaustion disables admission rather than wrapping: a wrapped generation would admit a
 		// token that was fenced long ago (§5).
@@ -211,6 +338,10 @@ func (a *Authority) ReplaceSession() (Session, error) {
 		return Session{}, fmt.Errorf("%w: the generation space is exhausted", ErrStateUntrusted)
 	}
 	a.generation++
+	a.sessionIssued = true
+	a.sessionIssuedAt = time.Now()
+	a.sessionLastSign = time.Time{}
+	a.sessionSignatures = 0
 	return Session{authority: a.instance, generation: a.generation}, nil
 }
 
@@ -315,12 +446,23 @@ type Status struct {
 	ResponseRetained bool
 	Faulted          bool
 	KeyLost          bool
+	// LineagePinned says the authority verifies its advances itself (AdvanceWithProof); LineageEpoch is the last root epoch its own
+	// lineage holds (zero without a pin). Retired is the latched non-signing state of a removed validator; SessionIssued whether a session
+	// was issued since the last scope change.
+	LineagePinned bool
+	LineageEpoch  uint64
+	Retired       bool
+	SessionIssued bool
 }
 
 // Status reports what this authority is holding.
 func (a *Authority) Status() Status {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	return a.statusLocked()
+}
+
+func (a *Authority) statusLocked() Status {
 	return Status{
 		RootEpoch:        pinnedRootEpoch(a.enroll.RootEpoch),
 		ShardEpoch:       a.enroll.ShardEpoch,
@@ -330,6 +472,10 @@ func (a *Authority) Status() Status {
 		ResponseRetained: a.rec.releasable,
 		Faulted:          a.state != healthActive,
 		KeyLost:          a.signer == nil,
+		LineagePinned:    a.lineage != nil,
+		LineageEpoch:     a.lineageEpochLocked(),
+		Retired:          a.retired,
+		SessionIssued:    a.sessionIssued,
 	}
 }
 
@@ -359,6 +505,9 @@ func (a *Authority) admitLocked(s Session) error {
 	}
 	if s.generation == 0 || s.generation != a.generation {
 		return fmt.Errorf("%w: session %d, current generation is %d", ErrFenced, s.generation, a.generation)
+	}
+	if a.retired {
+		return fmt.Errorf("%w: this authority signs nothing further", ErrRetired)
 	}
 	return nil
 }
@@ -497,7 +646,33 @@ func (a *Authority) Sign(s Session) error {
 		return fmt.Errorf("%w: the signed record would be %d bytes, limit is %d", ErrRequestTooLarge, size, MaxRecordBytes)
 	}
 	a.rec = candidate
+	a.signatures++
+	a.sessionSignatures++
+	a.sessionLastSign = time.Now()
 	return nil
+}
+
+// SigningActivity is a single diagnostic snapshot of the authority and its current client session.
+type SigningActivity struct {
+	Status
+	Enrolled          bool
+	Signatures        uint64
+	SessionIssuedAt   time.Time
+	SessionLastSign   time.Time
+	SessionSignatures uint64
+}
+
+// Activity returns signing counters and times without exposing signed data. The package function keeps the authority's method surface unchanged.
+func Activity(a *Authority) SigningActivity {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	s := SigningActivity{Status: a.statusLocked(), Enrolled: a.enroll.complete(), Signatures: a.signatures}
+	if s.SessionIssued {
+		s.SessionIssuedAt = a.sessionIssuedAt
+		s.SessionLastSign = a.sessionLastSign
+		s.SessionSignatures = a.sessionSignatures
+	}
+	return s
 }
 
 // RetainResponse makes the signed response replayable before any of it can leave.
@@ -567,13 +742,21 @@ replayed but genuine authorization passes here every time, and the signing recor
 refuses it. Keeping the two apart is the point of the split, because authenticity is not freshness.
 */
 func (a *Authority) Authenticate(ctx context.Context, req Request) (*Authorization, error) {
+	fence, err := a.fenceGate()
+	if err != nil {
+		return nil, err
+	}
 	a.mu.Lock()
 	enroll, trust, hasKey, scopeVersion := a.enroll.clone(), a.trust, a.signer != nil, a.scopeVersion
 	irBase, irBaseKnown, irAckSeen := a.irBase, a.irBaseKnown, a.irAckSeen
+	retired := a.retired
 	a.mu.Unlock()
 
 	if !hasKey {
 		return nil, fmt.Errorf("%w: this authority has no key for %s", ErrKeyLost, enroll.NodeID)
+	}
+	if retired {
+		return nil, fmt.Errorf("%w: the successor configuration does not name this authority's key", ErrRetired)
 	}
 	if !enroll.complete() {
 		return nil, fmt.Errorf("%w: no shard configuration has been stated, so no certificate's configuration can be checked", ErrEnrollmentIncomplete)
@@ -640,6 +823,10 @@ func (a *Authority) Authenticate(ctx context.Context, req Request) (*Authorizati
 
 	// Authentication against the authority's own trust, for the root epoch the certificate names.
 	// An unknown epoch is a refusal rather than a reason to trust the certificate's own claim.
+	// the activation schedule's fence: nothing is authenticated, reserved or signed for an epoch >= E of a rule this binary lacks
+	if err := fence.Check(ctx, own.UC.GetRootEpoch()); err != nil {
+		return nil, fmt.Errorf("signing for root epoch %d: %w", own.UC.GetRootEpoch(), err)
+	}
 	tb, err := trust.GetByEpoch(ctx, own.UC.GetRootEpoch())
 	if err != nil {
 		return nil, fmt.Errorf("%w: root epoch %d: %w", ErrUnauthenticated, own.UC.GetRootEpoch(), err)

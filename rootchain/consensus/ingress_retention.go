@@ -39,9 +39,10 @@ const (
 func (x *ConsensusManager) judgeRetained(req *drctypes.IRChangeReq) (retainedVerdict, error) {
 	round := x.pacemaker.GetCurrentRound() + 1
 	if err := x.refuseFrozenIR(req); err != nil {
-		return retainedRefused, err
+		return frozenVerdict(err), err
 	}
-	if x.viewResolver == nil {
+	resolver := x.resolver()
+	if resolver == nil {
 		_, err := x.irReqVerifier.VerifyRequest(round, req)
 		switch {
 		case err == nil:
@@ -51,12 +52,20 @@ func (x *ConsensusManager) judgeRetained(req *drctypes.IRChangeReq) (retainedVer
 		}
 		return retainedRefused, err
 	}
-	view, err := x.viewResolver.ResolveView(req.Partition, req.Shard, round, storage.PurposeCertify)
+	view, err := resolver.ResolveView(req.Partition, req.Shard, round, storage.PurposeCertify)
 	if err != nil {
 		return retainedUnknown, err
 	}
 	_, err = x.irReqVerifier.VerifyIRChangeReqView(view, req)
 	return viewVerdict(err), err
+}
+
+// frozenVerdict reads the handoff freeze check: only the freeze itself is a verdict on the request, a failed read of the frozen shard is not.
+func frozenVerdict(err error) retainedVerdict {
+	if errors.Is(err, storage.ErrHandoffFrozen) {
+		return retainedRefused
+	}
+	return retainedUnknown
 }
 
 // viewVerdict reads the view-aware verifier. A change pending in the pipeline, its own among them while it sits in an uncommitted proposal,
@@ -113,7 +122,13 @@ func sameRequest(a, b *drctypes.IRChangeReq) bool {
 }
 
 // forwardRetained is the round-change half of retention: drop what the verifier says is stale, send the rest toward the known next leader.
+// With the next leader unknown nothing can be sent, so nothing is judged: an unknown-leader round must stay cheap (#886), and the first round
+// with a known next leader judges every entry against the state of that round before it sends or buffers any. An unusable copy stays longer but
+// is not used, and a fresh request still replaces it, retainRequest judging the old one.
 func (x *ConsensusManager) forwardRetained(ctx context.Context) {
+	if _, err := x.leaderAfter(x.pacemaker.GetCurrentRound()); errors.Is(err, drctypes.ErrHistoryUnavailable) {
+		return
+	}
 	for key, entry := range x.retained {
 		verdict, err := x.judgeRetained(entry.msg.IrChangeReq)
 		if verdict == retainedRefused {

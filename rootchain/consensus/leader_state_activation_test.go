@@ -14,6 +14,7 @@ import (
 
 	"github.com/unicitynetwork/bft-core/internal/testutils/q3fixture"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/testutils"
 )
@@ -25,10 +26,44 @@ const phaseLockBlockRate = 454 * time.Millisecond
 // the sorted committee (TestEpochLeaderUnitWeightsReproduceTheLegacyHandoffSchedule). No node runs until started.
 func newPhaseLockLive(t *testing.T, timeout time.Duration) *q4bLive {
 	t.Helper()
-	f := q3fixture.New(t, q3fixture.Options{Assignment: true, Weights: []uint64{1, 1, 1, 1}})
+	return newEqualLive(t, timeout, "H", "a", "b", "c")
+}
+
+// newEqualLive is real managers, one per name, on a real epoch 2 of equal members. No node runs until started.
+func newEqualLive(t *testing.T, timeout time.Duration, names ...string) *q4bLive {
+	t.Helper()
+	return newEqualLiveOptions(t, timeout, q3fixture.Options{}, names...)
+}
+
+// newEqualLiveOptions is newEqualLive with the fixture's other options, its shards among them.
+func newEqualLiveOptions(t *testing.T, timeout time.Duration, o q3fixture.Options, names ...string) *q4bLive {
+	t.Helper()
+	return newEqualLiveOn(t, timeout, o, nil, names...)
+}
+
+// newEqualLiveOn is newEqualLiveOptions with setup called on the cluster before its nodes are attached, to put them on another network.
+func newEqualLiveOn(t *testing.T, timeout time.Duration, o q3fixture.Options, setup func(*q4bLive), names ...string) *q4bLive {
+	t.Helper()
+	return newEqualLiveRate(t, timeout, phaseLockBlockRate, o, setup, names...)
+}
+
+// newEqualLiveRate is newEqualLiveOn at another block rate: a round lasts at least half of it (the pacemaker's minimum round).
+func newEqualLiveRate(t *testing.T, timeout, blockRate time.Duration, o q3fixture.Options, setup func(*q4bLive), names ...string) *q4bLive {
+	t.Helper()
+	if o.Weights == nil {
+		o.Weights = make([]uint64, len(names))
+		for i := range o.Weights {
+			o.Weights[i] = 1
+		}
+	}
+	o.Assignment = true
+	f := q3fixture.New(t, o)
 	c := newQ4BBase(t, 2, f)
-	tune := func(p *Parameters) { p.BlockRate, p.LocalTimeout = phaseLockBlockRate, timeout }
-	for i, name := range []string{"H", "a", "b", "c"} {
+	if setup != nil {
+		setup(c)
+	}
+	tune := func(p *Parameters) { p.BlockRate, p.LocalTimeout = blockRate, timeout }
+	for i, name := range names {
 		r := newQ3Replica(t, f, f.NewNodes[i])
 		r.tune = tune
 		n := &q4bNode{name: name, weight: f.Members[i].Weight, r: r}
@@ -73,7 +108,7 @@ func TestLeaderRingStartsAtTheAnchorChild(t *testing.T) {
 	child := func(round uint64) *rctypes.BlockData {
 		return &rctypes.BlockData{Version: 3, Epoch: anchor.Epoch, Round: round, Anchor: anchor, Payload: &rctypes.Payload{Version: 3}}
 	}
-	store := c.replicas[0].manager.blockStore
+	store := c.replicas[0].manager.blockStore()
 	_, ring, sealed := store.LeaderHead()
 	require.Nil(t, ring, "the installed anchor holds no ring of the new epoch")
 	require.True(t, sealed, "and keeps the outgoing terminal control state")
@@ -85,7 +120,7 @@ func TestLeaderRingStartsAtTheAnchorChild(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, plain.ShardState.Leader, "another policy has no leaf")
 
-	other := c.replicas[1].manager.blockStore
+	other := c.replicas[1].manager.blockStore()
 	other.SetLeaderInputs(reputationInputs{committee: committee, reputation: true})
 	_, err = other.Add(child(anchor.Slot+1), c.replicas[1].manager.irReqVerifier)
 	require.NoError(t, err)
@@ -98,7 +133,7 @@ func TestLeaderRingStartsAtTheAnchorChild(t *testing.T) {
 	require.EqualValues(t, 20, early.ShardState.Leader.Lag, "4n+4 of the committee")
 	require.Equal(t, []rctypes.LeaderRecord{{Round: anchor.Slot}, {Round: anchor.Slot + 1}}, early.ShardState.Leader.Records)
 
-	third := c.replicas[2].manager.blockStore
+	third := c.replicas[2].manager.blockStore()
 	third.SetLeaderInputs(reputationInputs{committee: committee, reputation: true})
 	_, err = third.Add(child(anchor.Slot+40), c.replicas[2].manager.irReqVerifier)
 	require.NoError(t, err)
@@ -141,7 +176,7 @@ func TestUnknownLeaderRoundsAdvanceAtCertificateSpeed(t *testing.T) {
 	c.warm(3, c.all()...)
 	drop.Store(true)
 	head := func() uint64 {
-		round, _, _ := c.nodes[0].r.manager.blockStore.LeaderHead()
+		round, _, _ := c.nodes[0].r.manager.blockStore().LeaderHead()
 		return round
 	}
 	lag := uint64(4*len(c.nodes) + 4)
@@ -200,10 +235,10 @@ func TestStateRecoveryKeepsTheLeaderInputs(t *testing.T) {
 	c.start("c")
 	m := c.nodes[c.idx("c")].r.manager
 	require.Eventually(t, func() bool {
-		_, ring, _ := m.blockStore.LeaderHead()
+		_, ring, _ := m.blockStore().LeaderHead()
 		return ring != nil && len(ring.Records) > 3
 	}, 2*time.Minute, 50*time.Millisecond, "the recovered node goes on executing and committing blocks with a ring")
-	require.NotNil(t, m.blockStore.LeaderInputs())
+	require.NotNil(t, m.blockStore().LeaderInputs())
 
 	// and its selector reads the store the recovery put in place: beyond the bootstrap, at a cutoff no store before the recovery could
 	// answer, it names a peer's leader. The head compared is the recovered node's own, which every live peer has reached.
@@ -211,7 +246,7 @@ func TestStateRecoveryKeepsTheLeaderInputs(t *testing.T) {
 	lag := uint64(4*len(c.nodes) + 4)
 	start := m.epochAnchor.Slot + 1
 	require.Eventually(t, func() bool {
-		head, _, _ := m.blockStore.LeaderHead()
+		head, _, _ := m.blockStore().LeaderHead()
 		round := head + lag
 		if head < start || round < start+lag {
 			return false
@@ -256,9 +291,9 @@ func TestRecoveryRunFirstProposalCarriesNoTimeouts(t *testing.T) {
 			})
 			m.leaderSelector = recoveryRunLeader{constLeader: constLeader{leader: m.id, nodes: m.Validators()}, start: func(uint64) bool { return tc.start }}
 			ctx := context.Background()
-			high := m.blockStore.GetHighQc().GetRound()
+			high := m.blockStore().GetHighQc().GetRound()
 			m.pacemaker.startNewRound(ctx, high+1000) // far past every shard's T2, as after a stall
-			tcert := &rctypes.TimeoutCert{Timeout: rctypes.NewTimeout(high+999, m.trustBase.Load().Epoch, m.blockStore.GetHighQc())}
+			tcert := &rctypes.TimeoutCert{Timeout: rctypes.NewTimeout(high+999, m.trustBase.Load().Epoch, m.blockStore().GetHighQc())}
 			m.pacemaker.lastRoundTC = tcert
 			m.processNewRoundEvent(ctx)
 			select {
@@ -269,4 +304,68 @@ func TestRecoveryRunFirstProposalCarriesNoTimeouts(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Design gate 4: a node that signed and recorded its timeout for a round whose leader is unknown, and died before sending it, says the same
+// thing byte for byte after the restart: the B1 path goes through the same durable signing as a local timeout, and the stalled round then advances.
+func TestRestartInAnUnknownLeaderRoundResendsTheRecordedTimeout(t *testing.T) {
+	t.Parallel()
+	q4Slot(t)
+	c := newPhaseLockLive(t, 2*time.Second)
+	var drop atomic.Bool
+	base := c.net.filter
+	c.net.filter = func(from, to peer.ID, msg any) bool {
+		if drop.Load() {
+			switch msg.(type) {
+			case *abdrc.ProposalMsg, *abdrc.VoteMsg:
+				return true
+			}
+		}
+		return base(from, to, msg)
+	}
+	c.start(c.all()...)
+	c.warm(3, c.all()...)
+	drop.Store(true)
+	h := c.nodes[c.idx("H")]
+	lag := uint64(4*len(c.nodes) + 4)
+	head := func() uint64 {
+		round, _, _ := h.r.manager.blockStore().LeaderHead()
+		return round
+	}
+	require.Eventually(t, func() bool { return c.state("H").Round > head()+lag+1 }, 3*time.Minute, 20*time.Millisecond, "the covered rounds run out")
+
+	// c leaves first and H and a pass the last round it can have signed, so no timeout of c is left for the cut round: a and b are below the quorum, and the round can only
+	// advance with H's statement. Stopped after the cut, c's timeout could already be delivered, and the round advanced before H had resent anything.
+	c.stop("c")
+	stopped := c.state("c").Round // the last round c can have signed, read after it stops
+	require.Eventually(t, func() bool { return c.state("a").Round > stopped && c.state("H").Round > stopped }, q4bDeadline, 20*time.Millisecond, "H, a and b time the rounds out")
+	h.crash.arm(q4bCutSpec{Point: cutBeforeSend, Kind: storage.DecisionTimeout})
+	select {
+	case <-h.crash.fired:
+	case <-time.After(q4bDeadline):
+		require.FailNow(t, "the timeout was never signed")
+	}
+	c.stop("H")
+	h.crash.mu.Lock()
+	epoch, round, wantStatement, wantMessage := h.crash.epoch, h.crash.round, h.crash.statement, h.crash.msg
+	h.crash.mu.Unlock()
+	require.NotNil(t, wantMessage)
+	require.Greater(t, round, head()+lag, "the cut round's leader is unknown")
+	_, err := h.r.manager.leaderSelector.GetLeaderForRound(round)
+	require.ErrorIs(t, err, rctypes.ErrHistoryUnavailable)
+
+	c.restart("H")
+	require.Eventually(t, func() bool { return c.state("a").Round > round }, 2*time.Minute, 20*time.Millisecond, "the round advances with the recorded timeout")
+	drop.Store(false)
+	tr := c.finish()
+	author, sent := h.r.id().String(), 0
+	for _, ev := range tr {
+		if ev.Kind == "attempt" && ev.Msg.Class == q4Timeout && ev.Msg.Author == author && ev.Msg.Epoch == epoch && ev.Msg.Round == round {
+			require.Equal(t, wantStatement, ev.Msg.Statement, "the only statement of the author for the cut round is the recorded one")
+			if bytes.Equal(ev.Msg.Raw, wantMessage) {
+				sent++
+			}
+		}
+	}
+	require.Positive(t, sent, "the recorded timeout goes out after the restart, byte for byte")
 }

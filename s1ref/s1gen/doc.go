@@ -13,4 +13,11 @@
 //
 // Output is a JSON manifest (Manifest); a generator run is a pure function of
 // the seed and the vectors file.
+//
+// The post-term seal corpus (BuildPostTermCorpus, #1297) is the exception to
+// the independence rule, on purpose: it pins what a running root signs, so its
+// bytes come from the native paths (votesig, types.UnicitySeal,
+// types.RootTrustBaseV2, the in-memory secp256k1 signer, b1state), and its test
+// re-derives every byte with this package's CBOR writer and every signature
+// verdict with dcrd. The S1 vectors never use those paths.
 package s1gen

@@ -369,7 +369,7 @@ func TestArchiveReplicaSetDerivesFromValidators(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		others = append(others, randPeer(t))
 	}
-	got, digest, err := archiveReplicaSet(nil, self, others, 7)
+	got, digest, _, err := archiveReplicaSet(nil, self, others, 7)
 	require.NoError(t, err)
 	require.Len(t, got, 3)
 	require.NotEqual(t, [32]byte{}, digest)
@@ -379,28 +379,28 @@ func TestArchiveReplicaSetDerivesFromValidators(t *testing.T) {
 	require.NotContains(t, got, self)
 	// The order the validators are listed in does not matter; the epoch does (it is part of the digest).
 	shuffled := []peer.ID{others[2], others[0], others[3], others[1]}
-	again, sameDigest, err := archiveReplicaSet(nil, self, shuffled, 7)
+	again, sameDigest, _, err := archiveReplicaSet(nil, self, shuffled, 7)
 	require.NoError(t, err)
 	require.Equal(t, got, again)
 	require.Equal(t, digest, sameDigest)
-	_, otherDigest, err := archiveReplicaSet(nil, self, others, 8)
+	_, otherDigest, _, err := archiveReplicaSet(nil, self, others, 8)
 	require.NoError(t, err)
 	require.NotEqual(t, digest, otherDigest)
 
-	pair, _, err := archiveReplicaSet(nil, self, others[:2], 7)
+	pair, _, _, err := archiveReplicaSet(nil, self, others[:2], 7)
 	require.NoError(t, err)
 	require.Len(t, pair, 2)
 	for _, n := range []int{0, 1} {
-		got, _, err := archiveReplicaSet(nil, self, others[:n], 7)
+		got, _, _, err := archiveReplicaSet(nil, self, others[:n], 7)
 		require.ErrorIs(t, err, archivewiring.ErrConfig, "%d other validators", n)
 		require.Nil(t, got)
 	}
 
-	explicit, explicitDigest, err := archiveReplicaSet([]string{others[0].String(), others[1].String()}, self, others, 7)
+	explicit, explicitDigest, _, err := archiveReplicaSet([]string{others[0].String(), others[1].String()}, self, others, 7)
 	require.NoError(t, err)
 	require.Equal(t, []peer.ID{others[0], others[1]}, explicit)
 	require.Equal(t, [32]byte{}, explicitDigest, "an explicit pair is a legacy two-replica configuration")
-	_, _, err = archiveReplicaSet([]string{others[0].String()}, self, others, 7)
+	_, _, _, err = archiveReplicaSet([]string{others[0].String()}, self, others, 7)
 	require.ErrorIs(t, err, archivewiring.ErrConfig)
 }
 

@@ -426,6 +426,36 @@ func (j *Journal) Staged() ([]Activation, error) {
 	return out, nil
 }
 
+// StagedEpoch reads the one staged activation of an epoch directly by its key: a single bounded read, independent of how many epochs
+// the journal holds, without the journal's mutex (a stage record is written once, atomically, before any install step, and never
+// changed). The record is checked as load checks it (canonical, its own epoch, its identity the hash of its claim and bundle). ok is
+// false when the epoch has no stage. It serves untrusted readers (the activation mirror): what it returns is evidence the reader
+// verifies again from its own pin.
+func (j *Journal) StagedEpoch(ctx context.Context, epoch uint64) (a Activation, ok bool, err error) {
+	if err := ctx.Err(); err != nil {
+		return Activation{}, false, err
+	}
+	var raw []byte
+	found, err := j.cfg.DB.Read(key(epoch, "stage"), &raw)
+	if err != nil || !found {
+		return Activation{}, false, err
+	}
+	if len(raw) > MaxBundle+4096 {
+		return Activation{}, false, fmt.Errorf("%w: stage of epoch %d is oversized", ErrJournal, epoch)
+	}
+	d, err := decodeStage(raw)
+	if err != nil {
+		return Activation{}, false, err
+	}
+	if d.Epoch != epoch {
+		return Activation{}, false, fmt.Errorf("%w: stage under epoch %d names epoch %d", ErrJournal, epoch, d.Epoch)
+	}
+	if id := ActivationID(d.claim(), d.Bundle); !bytes.Equal(id[:], d.ID) {
+		return Activation{}, false, fmt.Errorf("%w: stage identity does not match its contents", ErrJournal)
+	}
+	return d.activation(), true, nil
+}
+
 // Recover is the startup pass. committed returns the verified history's record for an epoch. Every journaled epoch must be
 // one the history holds with exactly the journaled record and a bundle that still authenticates; an unfinished installation is
 // completed, a finished one must agree with every store. Any other outcome refuses startup. Nothing is erased on refusal.

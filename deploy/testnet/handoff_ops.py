@@ -49,6 +49,17 @@ sys.stdout.buffer.write(str(status).encode() + b'\n' + body)
 '''
 
 
+GET_HELPER = r'''
+import sys, urllib.request, urllib.error
+try:
+    with urllib.request.urlopen(urllib.request.Request(sys.argv[1], method='GET'), timeout=int(sys.argv[2])) as response:
+        status, body = response.status, response.read(1 << 20)
+except urllib.error.HTTPError as error:
+    status, body = error.code, error.read(1024)
+sys.stdout.buffer.write(str(status).encode() + b'\n' + body)
+'''
+
+
 class HandoffError(RuntimeError):
     pass
 
@@ -59,6 +70,7 @@ class HandoffLapsed(HandoffError):
 
 JOINER_OVERRIDE = 'compose.joiner.json'
 RESTORE_OVERRIDE = 'compose.joiner-restore.json'   # exists only while the joiner's shard node is being restored
+RECOVER_OVERRIDE = 'compose.recover.json'   # vr_recover.py (#1286): a recovered entity's authority, root and shard node on its fresh node slot
 
 
 def compose_files(generation):
@@ -66,7 +78,7 @@ def compose_files(generation):
     authority and execution client are then entities of every operation like the genesis ones)."""
     generation = Path(generation)
     files = ['-f', str(generation / 'compose.yaml')]
-    for name in (JOINER_OVERRIDE, RESTORE_OVERRIDE):
+    for name in (JOINER_OVERRIDE, RESTORE_OVERRIDE, RECOVER_OVERRIDE):
         if (generation / name).is_file():
             files += ['-f', str(generation / name)]
     return files
@@ -78,9 +90,10 @@ def load_compose(generation):
     compose = json.loads((generation / 'compose.yaml').read_text())
     if (generation / JOINER_OVERRIDE).is_file():
         compose['services'] = {**compose['services'], **json.loads((generation / JOINER_OVERRIDE).read_text())['services']}
-    if (generation / RESTORE_OVERRIDE).is_file():
-        for name, change in json.loads((generation / RESTORE_OVERRIDE).read_text())['services'].items():
-            compose['services'][name] = {**compose['services'][name], **change}
+    for override in (RESTORE_OVERRIDE, RECOVER_OVERRIDE):
+        if (generation / override).is_file():
+            for name, change in json.loads((generation / override).read_text())['services'].items():
+                compose['services'][name] = {**compose['services'][name], **change}
     return compose
 
 
@@ -107,6 +120,17 @@ class DockerTransport:
         # a one-node sidecar of that entity's namespace: read-only, no capabilities, no mounts, the helper script on stdin of python -c
         return ['docker', 'run', '--rm', '-i', '--network', f'container:{self.holder(i)}', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
                 '--user', '10001:10001', '--entrypoint', 'python3', self.image, '-c', HELPER, self.root_rpc + path, str(timeout)]
+
+    def shard_health(self, i, timeout=10):
+        """The shard node's own /api/v1/health of entity i (its published role, certified round, execution recovery), read inside its namespace."""
+        url = operator_rpc.common_urls(load_compose(self.generation))[1] + '/api/v1/health'
+        cmd = ['docker', 'run', '--rm', '--network', f'container:{self.holder(i)}', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
+               '--user', '10001:10001', '--entrypoint', 'python3', self.image, '-c', GET_HELPER, url, str(timeout)]
+        done = subprocess.run(cmd, capture_output=True, timeout=timeout + 30)
+        status, _, payload = done.stdout.partition(b'\n')
+        if done.returncode != 0 or status != b'200':
+            return None
+        return json.loads(payload)
 
     def post(self, i, path, body, timeout=10):
         done = subprocess.run(self.command(i, path, timeout), input=body, capture_output=True, timeout=timeout + 30)
@@ -282,6 +306,11 @@ def main():
     r.add_argument('flags', nargs=argparse.REMAINDER)
     a = p.parse_args()
     transport = DockerTransport(a.generation)
+    if a.action != 'abort':
+        import remote_entity   # an entity on another machine (remote_entity.py register): its root is reached through that machine's agent
+        remote = remote_entity.load(a.generation)
+        if remote:
+            transport = remote_entity.EntityTransport(transport, remote)
     if getattr(a, 'committee', None):
         transport.entities = sorted(int(x) for x in a.committee.split(','))
     if a.action == 'abort':

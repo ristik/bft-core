@@ -62,7 +62,7 @@ func withViewResolver(t *testing.T, cm *ConsensusManager, steady types.Partition
 	f := newFixture(t)
 	res := &partitionResolver{views: map[types.PartitionID]*storage.RequestRoundView{
 		steady: viewOf(t, f.infos, viewOpts{round: round, purpose: storage.PurposeTimeout, ucRound: 1, partition: steady})}}
-	cm.viewResolver = res
+	cm.SetViewResolver(res)
 	return res
 }
 
@@ -83,7 +83,7 @@ func TestLeaderFromTheEpochAnchorExcludesTheSwitchingShard(t *testing.T) {
 		first, err := c.replicas[0].manager.leaderSelector.GetLeaderForRound(anchor.Slot + 1)
 		require.NoError(t, err)
 		leader := c.byID(first)
-		set, err := leader.manager.blockStore.SwitchingShardsForBlock(anchor.Slot, anchor.Slot+1)
+		set, err := leader.manager.blockStore().SwitchingShardsForBlock(anchor.Slot, anchor.Slot+1)
 		require.NoError(t, err)
 		require.Contains(t, set, types.PartitionShardID{PartitionID: evm, ShardID: types.ShardID{}.Key()}, "premise: the EVM shard switches in the first successor block")
 		return leader, anchor
@@ -163,11 +163,13 @@ func TestLeaderFromAQCParentExcludesTheSwitchingShard(t *testing.T) {
 			Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 28, Epoch: 1}}}, ShardInfo: infos,
 			CommitQc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 29, ParentRoundNumber: 28, Epoch: 1, Timestamp: types.NewTimestamp()},
 				LedgerCommitInfo: &types.UnicitySeal{Hash: tree.RootHash(), PreviousHash: bytes.Repeat([]byte{1}, 32)}}}
-		cm.blockStore, err = storage.NewFromCheckpoint(crypto.SHA256, checkpoint, cm.blockStore.GetDB(), cm.orchestration, logger.New(t))
+		var newStore *storage.BlockStore
+		newStore, err = storage.NewFromCheckpoint(crypto.SHA256, checkpoint, cm.blockStore().GetDB(), cm.orchestration, logger.New(t))
 		require.NoError(t, err)
+		cm.storeRef.Store(newStore)
 		cm.leaderSelector = constLeader{leader: cm.id}
 		cm.pacemaker.Reset(context.Background(), 29, nil, nil)
-		set, err := cm.blockStore.SwitchingShardsForBlock(29, 30)
+		set, err := cm.blockStore().SwitchingShardsForBlock(29, 30)
 		require.NoError(t, err)
 		require.Equal(t, storage.ShardSet{{PartitionID: switching, ShardID: types.ShardID{}.Key()}: {}}, set, "premise: exactly one shard switches at round 30")
 		return cm, net, switching, steady

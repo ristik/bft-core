@@ -5,6 +5,7 @@
 //	utb-evidence fetch    --url U --out FILE                       the complete history as one tagged bundle (pages followed to the end)
 //	utb-evidence verify   --bundle FILE --pin 0x..                 every record verified from its predecessor; one line per record
 //	utb-evidence extract  --bundle FILE --epoch N --out FILE       the canonical signed bytes of one record
+//	utb-evidence members  --bundle FILE --epoch N                  the committee one record names: "member NODEID weight W key 0x.." lines, then its threshold
 //	utb-evidence client   --url U --store DB --genesis FILE --pin 0x..   a reference client with its own durable store: syncs the missing suffix
 //	utb-evidence ucresp   --file FILE --entry FILE                 a captured version 2 certification response whose attachment is exactly the entry
 //	utb-evidence uc-verify --token FILE --bundle FILE [--shard-conf FILE]  every certificate in a saved token verified under its own epoch's committee
@@ -47,6 +48,8 @@ func main() {
 		err = cmdVerify(os.Args[2:])
 	case "extract":
 		err = cmdExtract(os.Args[2:])
+	case "members":
+		err = cmdMembers(os.Args[2:])
 	case "client":
 		err = cmdClient(os.Args[2:])
 	case "ucresp":
@@ -97,12 +100,12 @@ func fetchRange(base string, from uint64) ([][]byte, error) {
 		if resp.StatusCode != http.StatusOK {
 			return nil, fmt.Errorf("GET %s: HTTP %d: %s", base, resp.StatusCode, strings.TrimSpace(string(body)))
 		}
-		r, _, err := gettrustbase.DecodeResponse(body, gettrustbase.PageLimits)
+		r, _, err := types.DecodeTrustBaseResponse(body, types.TrustBasePageLimits)
 		if err != nil {
 			return nil, fmt.Errorf("page %d: %w", page, err)
 		}
-		if r.Status != gettrustbase.StatusOK {
-			if r.Status == gettrustbase.StatusNotYetAvailable && len(raw) == 0 {
+		if r.Status != types.TrustBaseStatusOK {
+			if r.Status == types.TrustBaseStatusNotYetAvailable && len(raw) == 0 {
 				return nil, nil // the server holds nothing at or after `from`
 			}
 			return nil, fmt.Errorf("page %d: status %s", page, r.Status)
@@ -133,24 +136,24 @@ func cmdFetch(args []string) error {
 	if len(raw) == 0 {
 		return errors.New("the endpoint returned no entries")
 	}
-	bundle, err := gettrustbase.EncodeBundle(raw)
+	bundle, err := types.EncodeTrustBaseBundle(raw)
 	if err != nil {
 		return err
 	}
 	if err := os.WriteFile(*out, bundle, 0o644); err != nil {
 		return err
 	}
-	b, _ := gettrustbase.DecodeBundle(bundle, gettrustbase.BundleLimits{MaxBytes: len(bundle), MaxEntries: len(raw)})
+	b, _ := types.DecodeTrustBaseBundle(bundle, types.TrustBaseLimits{MaxBytes: len(bundle), MaxEntries: len(raw)})
 	fmt.Printf("fetched %d entries: epochs %d..%d (%d bytes)\n", len(raw), b.Entries[0].Epoch, b.Tip().Epoch, len(bundle))
 	return nil
 }
 
-func readBundle(path string) (*gettrustbase.Bundle, error) {
+func readBundle(path string) (*types.TrustBaseBundle, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	return gettrustbase.DecodeBundle(data, gettrustbase.BundleLimits{MaxBytes: len(data), MaxEntries: len(data)/16 + 1})
+	return types.DecodeTrustBaseBundle(data, types.TrustBaseLimits{MaxBytes: len(data), MaxEntries: len(data)/16 + 1})
 }
 
 func cmdVerify(args []string) error {
@@ -166,7 +169,7 @@ func cmdVerify(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := gettrustbase.VerifyBundle(b, pin); err != nil {
+	if err := types.VerifyTrustBaseBundle(b, pin); err != nil {
 		return err
 	}
 	gid, _ := b.Entries[0].EntryID()
@@ -212,6 +215,30 @@ func cmdExtract(args []string) error {
 		if e.Epoch == *epoch {
 			return os.WriteFile(*out, b.Raw[i], 0o644)
 		}
+	}
+	return fmt.Errorf("the bundle holds no epoch %d", *epoch)
+}
+
+func cmdMembers(args []string) error {
+	fs := flag.NewFlagSet("members", flag.ExitOnError)
+	path := fs.String("bundle", "", "bundle file")
+	epoch := fs.Uint64("epoch", 0, "epoch")
+	_ = fs.Parse(args)
+	b, err := readBundle(*path)
+	if err != nil {
+		return err
+	}
+	for _, e := range b.Entries {
+		if e.Epoch != *epoch {
+			continue
+		}
+		nodes := append([]*types.NodeInfo(nil), e.RootNodes...)
+		sort.Slice(nodes, func(i, j int) bool { return nodes[i].NodeID < nodes[j].NodeID })
+		for _, n := range nodes {
+			fmt.Printf("member %s weight %d key 0x%x\n", n.NodeID, n.Stake, n.SigKey)
+		}
+		fmt.Printf("epoch %d start %d threshold %d members %d\n", e.Epoch, e.EpochStart, e.QuorumThreshold, len(nodes))
+		return nil
 	}
 	return fmt.Errorf("the bundle holds no epoch %d", *epoch)
 }
@@ -448,17 +475,23 @@ func cmdUCVerify(args []string) error {
 		if err := verifyUnderConfs(uc, quorumweight.Checked(e), partition, pdrs, hashes); err != nil {
 			return fmt.Errorf("certificate %d (epoch %d, seal round %d) does not verify under its epoch's committee: %w", i, epoch, round, err)
 		}
-		var signed uint64
-		for _, m := range e.RootNodes {
-			if _, ok := uc.UnicitySeal.Signatures[m.NodeID]; ok {
-				signed += m.Stake
-			}
-		}
+		signed := signedWeight(e, uc.UnicitySeal)
 		id, _ := e.EntryID()
 		fmt.Printf("certificate %d: epoch %d seal round %d verified under entry 0x%x: signers %d signed-weight %d threshold %d, activation interval ok\n",
 			i, epoch, round, id, len(uc.UnicitySeal.Signatures), signed, e.QuorumThreshold)
 	}
 	return nil
+}
+
+// signedWeight is the weight the seal rule counted: the verified signatures of members, not the member IDs present in the witness map (a slot
+// holding junk, an unknown ID and any signature that does not recover to its member's key count zero).
+func signedWeight(e *types.RootTrustBaseV2, seal *types.UnicitySeal) uint64 {
+	sigBytes, err := seal.SigBytes()
+	if err != nil {
+		return 0
+	}
+	w, _ := quorumweight.VerifySealSigned(e, sigBytes, seal.Signatures)
+	return w
 }
 
 func readPDR(path string) (*types.PartitionDescriptionRecord, error) {

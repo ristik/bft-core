@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -16,11 +17,14 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ainvaltin/httpsrv"
 	"github.com/ethereum/go-ethereum/common"
 	libp2ppeer "github.com/libp2p/go-libp2p/core/peer"
+	libp2ppeerstore "github.com/libp2p/go-libp2p/core/peerstore"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
@@ -28,16 +32,19 @@ import (
 
 	"github.com/unicitynetwork/bft-go-base/types"
 
+	"github.com/unicitynetwork/bft-core/monitoring"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/zkverifier"
 
 	"github.com/unicitynetwork/bft-core/archive"
 	"github.com/unicitynetwork/bft-core/archivepolicy"
 	"github.com/unicitynetwork/bft-core/archivewiring"
+	"github.com/unicitynetwork/bft-core/b1paired"
 	"github.com/unicitynetwork/bft-core/b1state"
 	"github.com/unicitynetwork/bft-core/certifiedstore"
 	"github.com/unicitynetwork/bft-core/configuredadmission"
 	"github.com/unicitynetwork/bft-core/configuredprogress"
 	"github.com/unicitynetwork/bft-core/engineapi"
+	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/frontier"
 	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-core/handoffdelivery"
@@ -48,14 +55,18 @@ import (
 	"github.com/unicitynetwork/bft-core/q3delivery"
 	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/q3shard"
+	"github.com/unicitynetwork/bft-core/recordsfeed"
 	"github.com/unicitynetwork/bft-core/registrygenesis"
 	"github.com/unicitynetwork/bft-core/registryproof"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
+	"github.com/unicitynetwork/bft-core/rootchain/vrstate"
 	"github.com/unicitynetwork/bft-core/rootinput"
 	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-core/shardnode/executortest"
 	"github.com/unicitynetwork/bft-core/signingauthority"
+	"github.com/unicitynetwork/bft-core/utbmirror"
 	"github.com/unicitynetwork/bft-core/utbprofile"
 	"github.com/unicitynetwork/bft-core/utbstore"
 )
@@ -287,8 +298,10 @@ type shardNodeRunFlags struct {
 	Executor string // "fake" or "engine-api"
 
 	// engine-api executor only — see engineapi.Config.
-	EngineURL           string
-	EthURL              string
+	EngineURL string
+	EthURL    string
+	// ActivationSourceURL is the optional VR endpoint of the activation schedule's fence (newActivationGate).
+	ActivationSourceURL string
 	JWTSecret           string
 	EngineFeeCollector  string
 	ExpectedGenesisHash string
@@ -314,11 +327,16 @@ type shardNodeRunFlags struct {
 	JournalBytes         int64
 	ArchiveStore         string
 	ArchiveReplicas      []string
+	ArchivePublicReads   bool // serve archive reads to non-validators under a separate budget
+	UCRelayAfter         time.Duration
+	BlockInterval        time.Duration // best-effort minimum interval between blocks (bft-core#1167); 0 = one per certification round trip
+	FollowSources        []string      // non-root bootstrap peers; set, roots are refused while this node is not active
 	ArchivePrune         bool
 	TrustHistoryProfile2 bool
 	UTBGenesisFile       string // enables the signed trust-base entry (UTB) profile: the canonical genesis entry (trust-base utb-genesis)
 	UTBGenesisID         string // its EntryID, the pin
 	UTBEntriesDBFile     string
+	PairedActivationRPC  string
 	Q3Lane               bool // the Q3 acceptance lane: this node's own verified V3 runtime from the pinned genesis
 	Q3JournalDB          string
 	Restore              bool
@@ -356,6 +374,8 @@ type shardNodeRunFlags struct {
 	RPCServerAddress string // exposes /api/v1/metrics and /api/v1/health when set
 	// OperatorAllowedSources lists the addresses and CIDR prefixes whose requests the operator endpoints answer (default loopback only)
 	OperatorAllowedSources string
+	// OperatorAllowedHosts are the host names, besides IP literals and localhost, the operator endpoints accept in a request's Host header
+	OperatorAllowedHosts string
 
 	shardNodeSigningFlags
 }
@@ -396,6 +416,7 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 
 	cmd.Flags().StringVar(&flags.Executor, "executor", "fake",
 		"which Executor to run: \"fake\" (deterministic in-memory, no external process) or \"engine-api\" (drives an Ethereum execution client)")
+	cmd.Flags().StringVar(&flags.ActivationSourceURL, "activation-source-url", "", activationSourceUsage)
 	cmd.Flags().StringVar(&flags.EngineURL, "engine-url", "http://127.0.0.1:8551",
 		"engine-api executor only: URL of the execution client's authenticated Engine API endpoint")
 	cmd.Flags().StringVar(&flags.EthURL, "eth-url", "http://127.0.0.1:8545",
@@ -436,12 +457,22 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 		"maximum retained hot journal bytes with --execution-journal; pruning requires --archive-prune")
 	cmd.Flags().StringVar(&flags.ArchiveStore, "archive-store", "",
 		"local certified archive directory; requires --execution-journal. Replicas are derived from the shard's validators (the next three after this node in peer-ID order, any two sufficing) unless exactly two --archive-replica peer IDs are given")
+	cmd.Flags().DurationVar(&flags.UCRelayAfter, "uc-relay-after", time.Second,
+		"with no adopted certificate for this long, ask two active shard peers for the certificate they hold (verified like a root's response); 0 disables")
+	cmd.Flags().DurationVar(&flags.BlockInterval, "target-block-interval", 0,
+		"best-effort minimum interval between this validator's blocks: the leader delays building until it has passed since its previous block, and a follower waits that much longer for it. "+
+			"Not part of block validity; peers and replay never check it. 0 (the default) builds one block per certification round trip. The shard conf's T2 must cover it (see 'shard-node doctor')")
+	cmd.Flags().BoolVar(&flags.ArchivePublicReads, "archive-public-reads", false,
+		"serve archive reads (never writes) to peers that are not validators, such as root-free followers, under a separate bounded budget")
+	cmd.Flags().StringSliceVar(&flags.FollowSources, "follow-source", nil,
+		"libp2p multiaddress of a non-root peer (shard validator or archive replica) to bootstrap from while this node is not an active validator; with it set, root connections are refused until activation")
 	cmd.Flags().StringSliceVar(&flags.ArchiveReplicas, "archive-replica", nil,
 		"explicit replica peer ID; set exactly twice with --archive-store to replace the derived replica set with this fixed pair (both required)")
 	cmd.Flags().BoolVar(&flags.ArchivePrune, "archive-prune", false,
 		"advance the certified frontier and prune acknowledged journal history; requires --archive-store")
 	cmd.Flags().BoolVar(&flags.TrustHistoryProfile2, "trust-history-profile-2", false,
 		"verify old-set handoff commit proofs before admitting successor trust epochs; requires --execution-journal")
+	cmd.Flags().StringVar(&flags.PairedActivationRPC, "paired-activation-rpc", "", "receive verified-activation availability hints from the paired loopback root")
 	cmd.Flags().BoolVar(&flags.Q3Lane, "q3-lane", false,
 		"run the Q3 acceptance lane: follow V3 root epochs through this node's own verified runtime (requires --trust-history-profile-2)")
 	cmd.Flags().StringVar(&flags.Q3JournalDB, "q3-journal-db", "",
@@ -477,11 +508,112 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 	cmd.Flags().StringVar(&flags.RPCServerAddress, "rpc-server-address", "",
 		`address for the metrics/health HTTP server, in the form "host:port". Not started if empty.`)
 	cmd.Flags().StringVar(&flags.OperatorAllowedSources, "operator-allowed-sources", defaultOperatorSources, operatorSourcesUsage)
+	cmd.Flags().StringVar(&flags.OperatorAllowedHosts, "operator-allowed-hosts", "", operatorHostsUsage)
 	flags.addSigningAuthorityFlags(cmd)
 
 	return cmd
 }
 
+// A fresh invocation may create stores only in fresh paths. Only a journal
+// bearing this exact request's checkpoint can reopen existing restore paths.
+// anchor is the recovery anchor of a journal whose archive restore has already
+// completed (nil otherwise); restoreStartup decides what such a journal starts as.
+func checkRestorePaths(flags *shardNodeRunFlags) (checkpoint configuredprogress.RestoreCheckpoint, anchor *configuredprogress.RestoreAnchor, err error) {
+	checkpoint, anchor, err = configuredprogress.ReadArchiveRestoreState(flags.ExecutionJournal)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+	case err != nil:
+		return checkpoint, nil, fmt.Errorf("restore requires a fresh BFT data directory or a matching checkpoint at %s: %w", flags.ExecutionJournal, err)
+	case anchor != nil:
+		return checkpoint, anchor, nil
+	case checkpoint == (configuredprogress.RestoreCheckpoint{}):
+		return checkpoint, nil, fmt.Errorf("restore requires a fresh BFT data directory or a matching checkpoint: %s already exists", flags.ExecutionJournal)
+	}
+	paths := []string{flags.PathWithDefault(flags.LUCStoreFile, lucStoreFileName)}
+	if checkpoint == (configuredprogress.RestoreCheckpoint{}) {
+		paths = append(paths, flags.ExecutionJournal+".trust")
+	}
+	if checkpoint == (configuredprogress.RestoreCheckpoint{}) || !flags.TrustHistoryProfile2 {
+		paths = append(paths, flags.ExecutionJournal+".handoffs")
+	}
+	for _, path := range paths {
+		if _, err := os.Lstat(path); err == nil {
+			return checkpoint, nil, fmt.Errorf("restore requires a fresh BFT data directory: %s already exists", path)
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return checkpoint, nil, fmt.Errorf("checking fresh BFT path %s: %w", path, err)
+		}
+	}
+	if checkpoint != (configuredprogress.RestoreCheckpoint{}) {
+		return checkpoint, nil, nil
+	}
+	entries, err := os.ReadDir(flags.ArchiveStore)
+	if err == nil && len(entries) != 0 {
+		return checkpoint, nil, fmt.Errorf("restore archive directory %s is not empty; supply a fresh directory", flags.ArchiveStore)
+	}
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return checkpoint, nil, fmt.Errorf("checking restore archive directory: %w", err)
+	}
+	return checkpoint, nil, nil
+}
+
+// restoreStart is how `shard-node restore` starts. A fresh or interrupted restore restores from the pin (the effective flags are the
+// caller's). A journal whose restore has completed under THIS pin (its checkpoint's pin ID covers the UC, the TR, the trust BodyID and the
+// paths, and the checkpoint names the installed anchor) starts as `shard-node run` (effective flags with Restore false, no pin): its
+// stores have been an ordinary node's since, possibly into later root epochs, and replaying the old pin would authenticate it under the
+// node's current epoch (the restart of bft-core#1309: "certificate root epoch 1, current 3"). A supervisor may therefore repeat the same
+// restore command on every start, as the validator container does until its node is active. Anything else is refused: a completed
+// restore without a checkpoint (its pin was later than the genesis epoch, so nothing recorded which pin it was) cannot be matched to this
+// pin and is started with `shard-node run` by the operator.
+type restoreStartup struct {
+	flags      *shardNodeRunFlags
+	checkpoint configuredprogress.RestoreCheckpoint
+	uc         *types.UnicityCertificate
+	tr         *certification.TechnicalRecord
+	scope      [32]byte
+	completed  bool
+}
+
+func restoreStart(flags *shardNodeRunFlags) (restoreStartup, error) {
+	out := restoreStartup{flags: flags}
+	if flags.Executor != "engine-api" || flags.ExecutionJournal == "" || flags.ArchiveStore == "" || !flags.ArchivePrune ||
+		flags.SigningAuthoritySocket == "" || flags.RestoreTipUC == "" || flags.RestoreTipTR == "" || flags.RestoreTrustBodyID == "" {
+		return out, errors.New("restore requires --executor engine-api, --execution-journal, --archive-store, --archive-prune, a surviving --signing-authority-socket, --tip-uc, --tip-tr and --trust-body-id; local-key restore is refused")
+	}
+	checkpoint, anchor, err := checkRestorePaths(flags)
+	if err != nil {
+		return out, err
+	}
+	if anchor != nil {
+		if checkpoint == (configuredprogress.RestoreCheckpoint{}) {
+			return out, fmt.Errorf("the archive restore of %s completed without a restore checkpoint (its pin is later than the genesis epoch), "+
+				"so this pin cannot be matched to it: start the node with `shard-node run`", flags.ExecutionJournal)
+		}
+		if !checkpoint.Finalizing || checkpoint.Target != anchor.Hash || checkpoint.VerifiedHeight != anchor.Height {
+			return out, fmt.Errorf("the restore checkpoint of %s does not name its installed restore anchor", flags.ExecutionJournal)
+		}
+	}
+	if checkpoint != (configuredprogress.RestoreCheckpoint{}) {
+		uc, tr, err := loadRestorePin(flags.RestoreTipUC, flags.RestoreTipTR)
+		if err != nil {
+			return out, err
+		}
+		scope, err := restoreResumeScope(flags)
+		if err != nil {
+			return out, err
+		}
+		pin, err := archivewiring.RestorePinID(uc, tr, scope)
+		if err != nil || pin != checkpoint.Pin {
+			return out, fmt.Errorf("existing BFT restore checkpoint belongs to another pin or restore path")
+		}
+		out.checkpoint, out.uc, out.tr, out.scope = checkpoint, uc, tr, scope
+	}
+	if anchor != nil {
+		run := *flags
+		run.Restore = false
+		return restoreStartup{flags: &run, completed: true}, nil
+	}
+	return out, nil
+}
 func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(string) bool) error {
 	operatorLog := slog.Default() // (a unit test drives this function with no base flags)
 	if flags.baseFlags != nil {
@@ -490,28 +622,41 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	if err := configureOperatorSources(operatorLog, flags.OperatorAllowedSources); err != nil {
 		return err
 	}
+	if err := configureOperatorHosts(flags.OperatorAllowedHosts); err != nil {
+		return err
+	}
 	if flags.baseFlags != nil { // (a unit test drives this function with none)
 		if err := utbprofile.Check(utbprofile.Inputs{Role: utbprofile.Shard, GenesisFile: flags.UTBGenesisFile, GenesisID: flags.UTBGenesisID,
 			EntriesDB: flags.PathWithDefault(flags.UTBEntriesDBFile, shardUTBEntriesDBFileName)}); err != nil {
 			return err
 		}
 	}
+	var restoreCheckpoint configuredprogress.RestoreCheckpoint
+	var restoreScope [32]byte
+	var restoreUC *types.UnicityCertificate
+	var restoreTR *certification.TechnicalRecord
 	var readOperatorStatus func(context.Context) (archivewiring.OperatorStatus, error)
 	if flags.Restore {
-		if flags.Executor != "engine-api" || flags.ExecutionJournal == "" || flags.ArchiveStore == "" || !flags.ArchivePrune ||
-			flags.SigningAuthoritySocket == "" || flags.RestoreTipUC == "" || flags.RestoreTipTR == "" || flags.RestoreTrustBodyID == "" {
-			return errors.New("restore requires --executor engine-api, --execution-journal, --archive-store, --archive-prune, a surviving --signing-authority-socket, --tip-uc, --tip-tr and --trust-body-id; local-key restore is refused")
+		start, err := restoreStart(flags)
+		if err != nil {
+			return err
 		}
-		for _, path := range []string{flags.ExecutionJournal, flags.ExecutionJournal + ".trust", flags.ExecutionJournal + ".handoffs", flags.PathWithDefault(flags.LUCStoreFile, lucStoreFileName)} {
-			if _, err := os.Lstat(path); err == nil {
-				return fmt.Errorf("restore requires a fresh BFT data directory: %s already exists", path)
-			} else if !errors.Is(err, fs.ErrNotExist) {
-				return fmt.Errorf("checking fresh BFT path %s: %w", path, err)
-			}
+		if start.completed {
+			operatorLog.Info("the archive restore of this BFT data directory is complete: starting it as `shard-node run`",
+				"executionJournal", flags.ExecutionJournal)
 		}
+		flags, restoreCheckpoint, restoreUC, restoreTR, restoreScope = start.flags, start.checkpoint, start.uc, start.tr, start.scope
 	}
 	if flags.TrustHistoryProfile2 && flags.ExecutionJournal == "" {
 		return errors.New("--trust-history-profile-2 requires --execution-journal")
+	}
+	if flags.PairedActivationRPC != "" {
+		if !flags.Q3Lane {
+			return errors.New("--paired-activation-rpc requires --q3-lane")
+		}
+		if err := validatePairedActivationOrigin(flags.PairedActivationRPC); err != nil {
+			return err
+		}
 	}
 	if flags.Q3Lane && !flags.TrustHistoryProfile2 {
 		return errors.New("--q3-lane requires --trust-history-profile-2")
@@ -550,6 +695,13 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	shardConf, err := loadRunShardConf(flags, changed)
 	if err != nil {
 		return err
+	}
+	// A block interval the shard's T2 cannot cover turns every paced round into a root-chain timeout: refuse it before anything starts.
+	if err := shardnode.CheckBlockInterval(flags.BlockInterval, shardConf.T2Timeout, consensus.BlockRate*time.Millisecond); err != nil {
+		return fmt.Errorf("--target-block-interval: %w (regenerate the shard conf with a larger --t2-timeout, or lower the interval)", err)
+	}
+	if err := shardnode.CheckInactivityMargin(flags.BlockInterval, shardConf.T2Timeout, consensus.BlockRate*time.Millisecond, flags.InactivityTimeout); err != nil {
+		flags.observe.Logger().Warn("--target-block-interval is close to --inactivity-timeout", "reason", err.Error())
 	}
 
 	// How certification requests are signed is decided once, here, before anything is built: with the
@@ -610,13 +762,49 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		Count: flags.BootstrapConnectRetryCount,
 		Delay: flags.BootstrapConnectRetryDelay,
 	}
-	peerConf, err := network.NewPeerConfiguration(flags.Address, flags.AnnounceAddresses, authKeyPair, bootNodes, bootstrapConnectRetry)
+	followSources, err := getBootStrapNodes(flags.FollowSources)
+	if err != nil {
+		return fmt.Errorf("follow sources parameter error: %w", err)
+	}
+	// A root-free follower bootstraps from its follow sources only and keeps every known root closed while it is not active (the role is
+	// read on each connection: activation opens the roots without a restart). The roots' addresses are still learned, for that moment.
+	follower := newRootFreeRole(len(followSources) != 0, trustBases)
+	if utbEntries != nil {
+		// every authenticated UTB entry retained before a restart names a root committee, whether or not its activation followed: learned
+		// here, before any follower networking opens (OnEntry fires only for entries appended from now on)
+		if err := seedRootsFromUTB(follower, utbEntries); err != nil {
+			return err
+		}
+	}
+
+	peerBoot := bootNodes
+	if follower.enabled {
+		peerBoot = followSources
+	}
+	peerConf, err := network.NewPeerConfiguration(flags.Address, flags.AnnounceAddresses, authKeyPair, peerBoot, bootstrapConnectRetry)
 	if err != nil {
 		return fmt.Errorf("creating peer configuration: %w", err)
 	}
+	peerConf.Gater = &network.RoleGater{Deny: follower.deny}
 	peer, err := network.NewPeer(ctx, peerConf, flags.observe.Logger(), flags.observe.PrometheusRegisterer())
 	if err != nil {
 		return fmt.Errorf("creating peer: %w", err)
+	}
+	var utbFollower *utbmirror.Follower
+	if utbEntries != nil {
+		// this node mirrors the finalized trust-base entries it holds; a root-free follower extends its own chain from the mirrors
+		peer.RegisterProtocolHandler(utbmirror.Protocol, utbmirror.NewServer(utbEntries).Handler)
+		if len(followSources) != 0 {
+			utbFollower = &utbmirror.Follower{Store: utbEntries, Host: peer, Mirrors: follower.mirrorPeers, Log: flags.observe.Logger(),
+				// an authenticated successor's committee is a root committee from the moment it authenticates, before its Q3 activation
+				OnEntry: func(e *types.RootTrustBaseV2) { follower.addRootNodes(e.RootNodes) }}
+		}
+	}
+	follower.setRevoke(func() { peer.RevokeDenied() })
+	if follower.enabled {
+		for _, root := range bootNodes {
+			peer.Network().Peerstore().AddAddrs(root.ID, root.Addrs, libp2ppeerstore.PermanentAddrTTL)
+		}
 	}
 
 	shardNet, err := network.NewShardNetwork(peer, flags.observe, network.DefaultShardNetworkOptions)
@@ -697,6 +885,43 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	if closer, ok := executor.(interface{ Close() }); ok {
 		defer closer.Close()
 	}
+	// On a VR generation (the b1 profile carries the VR hook measurement) the fence is mandatory and reads the shard's own execution
+	// client, checked against the profile's pinned registry code hash; --activation-source-url may name another endpoint.
+	fenceGen := vrFence{}
+	sourceURL := flags.ActivationSourceURL
+	if flags.B1Profile != "" {
+		_, pf, perr := readB1ProfileFile(flags.B1Profile)
+		if perr != nil {
+			return perr
+		}
+		if pf.VRHookMeasurement != nil {
+			fenceGen = vrFence{VR: true, CodeHash: &pf.VRHookMeasurement.RegistryCodeHash}
+			switch { // the generation: the verified genesis origin's block 0, or the operator's pinned genesis hash
+			case origin.Valid():
+				gh := [32]byte(origin.BlockHash())
+				fenceGen.GenesisHash = &gh
+			case flags.ExpectedGenesisHash != "":
+				h, herr := hexToHash(flags.ExpectedGenesisHash)
+				if herr != nil {
+					return herr
+				}
+				gh := [32]byte(h)
+				fenceGen.GenesisHash = &gh
+			}
+			// the read is made at this node's own certified, committed EVM block (the engine's finalized block, which Commit moves only for a
+			// block a UC certified), never the engine's `latest` and never whatever head the endpoint serves
+			fenceGen.Anchor = func(ctx context.Context) ([32]byte, uint64, error) { return committedAnchor(ctx, executor) }
+
+			if sourceURL == "" {
+				sourceURL = flags.EthURL
+			}
+		}
+	}
+	activationGate, closeGate, err := newActivationGate(ctx, operatorLog, sourceURL, fenceGen)
+	if err != nil {
+		return err
+	}
+	defer closeGate()
 	var executionID [32]byte
 	var handoffFollower *shardnode.HandoffFollower
 	var q3rt *q3active.Runtime
@@ -720,6 +945,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		}
 		defer historyDB.Close()
 		var historyOpts []shardnode.HistoryOption
+		historyOpts = append(historyOpts, shardnode.WithFence(gateCheckpoint(activationGate)))
 		if flags.UTBGenesisFile != "" { // the V2 handoffs this shard follows were committed by a UTB root: their certificates are version 3, also when the store reopens
 			historyOpts = append(historyOpts, shardnode.WithUTBProfile())
 		}
@@ -744,14 +970,16 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if closer, ok := b1Journal.(io.Closer); ok {
 				defer closer.Close()
 			}
-			b1rt, jErr := q3active.New(q3active.Config{DB: b1Journal, Genesis: trustBases[0], UTBGenesis: flags.UTBGenesisFile != ""})
+			b1rt, jErr := q3active.New(q3active.Config{DB: b1Journal, Genesis: trustBases[0], UTBGenesis: flags.UTBGenesisFile != "", MemberCeiling: evmassign.B1MaxValidators})
 			if jErr != nil {
 				return fmt.Errorf("b1 authority runtime: %w", jErr)
 			}
 			if verifierContext.B1, jErr = newB1PairConfig(b1Profile, b1rt, flags.EthURL, 10*time.Second); jErr != nil {
 				return jErr
 			}
-			attachRecordsFeed(verifierContext.B1, peer, bootNodes)
+			if jErr = attachShardRecordsFeed(verifierContext.B1, peer, bootNodes, follower, flags.ExecutionJournal, flags.observe.Logger()); jErr != nil {
+				return jErr
+			}
 			// The execution client is the paired ureth: every build and import carries the pair binding its own gate compares.
 			if q3Admit, jErr = wireQ3Pair(executor, b1rt, uint64(shardConf.NetworkID), origin.Valid(), [32]byte(origin.BlockHash())); jErr != nil {
 				return jErr
@@ -767,13 +995,20 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if closer, ok := journalDB.(io.Closer); ok {
 				defer closer.Close()
 			}
-			if q3rt, jErr = q3active.New(q3active.Config{DB: journalDB, Genesis: trustBases[0], UTBGenesis: flags.UTBGenesisFile != ""}); jErr != nil {
+			q3Ceiling := 0 // a deployment that carries the B1 registry cannot import a committee above its 16 members
+			if flags.B1Profile != "" {
+				q3Ceiling = evmassign.B1MaxValidators
+			}
+			if q3rt, jErr = q3active.New(q3active.Config{DB: journalDB, Genesis: trustBases[0], UTBGenesis: flags.UTBGenesisFile != "", MemberCeiling: q3Ceiling}); jErr != nil {
 				return fmt.Errorf("q3 runtime: %w", jErr)
+			}
+			if activationGate != nil {
+				q3rt.SetFence(gateCheckpoint(activationGate))
 			}
 			if q3Admit, jErr = wireQ3Pair(executor, q3rt, uint64(shardConf.NetworkID), origin.Valid(), [32]byte(origin.BlockHash())); jErr != nil {
 				return jErr
 			}
-			q3Trust = q3shard.NewQ3TrustStore(historical, q3rt)
+			q3Trust = q3shard.NewQ3TrustStore(ctx, historical, q3rt)
 			trustBaseStore, epochTrust = q3Trust, q3Trust
 			verifierContext.TrustBases = q3Trust
 			verifierContext.EpochAuthority = q3Trust
@@ -781,7 +1016,9 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				if verifierContext.B1, jErr = newB1PairConfig(b1Profile, q3rt, flags.EthURL, 10*time.Second); jErr != nil {
 					return jErr
 				}
-				attachRecordsFeed(verifierContext.B1, peer, bootNodes)
+				if jErr = attachShardRecordsFeed(verifierContext.B1, peer, bootNodes, follower, flags.ExecutionJournal, flags.observe.Logger()); jErr != nil {
+					return jErr
+				}
 			}
 		}
 	}
@@ -799,6 +1036,31 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	if err != nil {
 		return fmt.Errorf("deriving the shard peers: %w", err)
 	}
+	// the published role: active only once the activation naming this node has completed; revoked at once by an assignment without it
+	var runtimeEpoch func() uint64
+	if q3rt != nil {
+		runtimeEpoch = q3rt.ActiveEpoch
+	}
+	role := newShardRole(trustBases[0].GetEpoch(), activePeers.Member(), runtimeEpoch)
+	follower.setRole(role.active)
+	role.subscribe(follower.changed)
+	// prewarmed member channels (phase 2): the shard peers of the installed and the staged assignment are kept connected; once the role is
+	// active, the current root committee too. A non-active node never dials a root (the gater refuses it), so roots are warmed at promotion.
+	// Each set is reconciled whole (astra on #1054): members of a dropped assignment or committee are unprotected.
+	warm := newMemberPrewarm(peer)
+	warm.shard(ctx, activePeers.Peers())
+	activePeers.OnStage(func([]libp2ppeer.ID) { warm.shard(ctx, append(activePeers.Peers(), activePeers.StagedPeers()...)) }) // the successor's peers, before its activation
+	role.subscribe(func() {
+		var committee *types.RootTrustBaseV1
+		if role.active() && q3rt != nil && q3Trust != nil {
+			if tb, err := q3Trust.Verified().GetByEpoch(ctx, q3rt.ActiveEpoch()); err == nil {
+				committee = tb
+			}
+		}
+		warm.roots(ctx, committee) // the active epoch's committee once active; none (all unprotected) otherwise
+	})
+	follower.setMirrors(q3MirrorPeers(activePeers, followSourceIDs(followSources)))
+	var headFollower *archivewiring.HeadFollower
 	// Every shard-membership consumer (block dissemination, the archive and journal servers, the journal suffix and evidence providers)
 	// follows this set: the genesis validators until a verified assignment step is installed, then the active assignment's.
 	disseminator, err := buildDisseminator(peer, flags.observe, shardConf.Validators, activePeers, flags.TrustHistoryProfile2)
@@ -853,6 +1115,35 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	if err != nil {
 		return fmt.Errorf("creating shard node: %w", err)
 	}
+	// the UC relay (phase 2): this node serves the pair it holds to its shard peers, and when the roots give no useful progress for
+	// --uc-relay-after it asks two active peers for theirs; a relayed pair is verified and admitted exactly like a root's response
+	peer.RegisterProtocolHandler(shardnode.UCRelayProtocol, shardnode.NewUCRelayServer(node.HeldPair, activePeers.Allowed).Handler)
+	if flags.UCRelayAfter > 0 {
+		// with a block interval, a certificate is not expected sooner than the interval after the previous one: the relay waits that long on top
+		node.SetRelay(peer, activePeers.Peers, flags.UCRelayAfter+flags.BlockInterval)
+	}
+	if follower.enabled {
+		// a root-free follower: while this node is not a validator of the installed assignment it takes certificates from its follow
+		// sources only, executes what is certified, and never builds, signs or sends anything to a root
+		if flags.ExecutionJournal == "" || flags.ArchiveStore == "" {
+			return errors.New("--follow-source requires --execution-journal and --archive-store")
+		}
+	}
+	if follower.enabled || q3rt != nil {
+		node.SetRole(role)
+		role.subscribe(node.RoleChanged) // a published promotion subscribes to the roots at once
+		// the health role is the live lease, read at every report: a restart's replay completes the activation before the runtime has
+		// completed its epoch, and the runtime's completion notifies nobody (bft-core#1061)
+		node.Health().SetRoleSource(role.published)
+	}
+	// the evidence the health report is about (bft-core#1057): this node, its network and shard, the installed configuration and the verified
+	// activation history, read at every report (never a stale notification, bft-core#1061)
+	bindingSource := shardBindingSource{self: peer.ID(), shard: shardConf, installed: activePeers.Installed, confHash: node.ShardConfForEpoch}
+	if q3rt != nil {
+		bindingSource.history = q3rt.HistoryEntries
+	}
+	node.Health().SetBindingSource(bindingSource.binding)
+
 	// The adapter authenticates certificates under the same per-epoch configuration set as the admission, not under a scan of every
 	// installed assignment. Set before Run.
 	verifierContext.SetConfForEpoch(node.ShardConfForEpoch)
@@ -870,6 +1161,17 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			return fmt.Errorf("opening execution journal: %w", openErr)
 		}
 		defer journalStore.Close()
+		if flags.Restore {
+			checkpoint, err := journalStore.RestoreCheckpoint()
+			if err != nil {
+				return err
+			}
+			if checkpoint != restoreCheckpoint {
+				return errors.New("BFT restore checkpoint changed during startup")
+			}
+		} else if err := journalStore.CheckArchiveRestoreComplete(); err != nil {
+			return err
+		}
 		recordCtx := certifiedstore.Context{NetworkID: shardConf.NetworkID, PartitionID: shardConf.PartitionID, ShardID: shardConf.ShardID, FullShardConfHash: confHash, Registry: origin.ProofContext(), TrustBases: trustBaseStore}
 		journalCtx := configuredprogress.Context{Origin: origin, ExecutionConfigV2: executionID, Observation: rootinput.ObservationContextV2{NetworkID: shardConf.NetworkID, PartitionID: shardConf.PartitionID, ShardID: shardConf.ShardID, ShardConfHash: confHash, ConfForEpoch: node.ShardConfForEpoch, RootEpoch: trustBases[0].GetEpoch(), TrustBases: trustBaseStore}, Record: recordCtx}
 		if flags.TrustHistoryProfile2 {
@@ -881,19 +1183,15 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		var archiveHost shardnode.EvidenceHost
 		var archiveReplicas []libp2ppeer.ID
 		var archiveDigest [32]byte // digest of the derived archive policy; zero with an explicit replica pair (legacy 2-of-2 records)
+		var archivePolicyEncoded []byte
+		// The versioned policy every archive consumer follows (bft-core#1030). Derived from the genesis set here; re-derived from the
+		// installed assignment after the replay and on every activation (refreshArchivePolicy). An explicit pair never switches.
+		var replicaPolicy *archivewiring.ReplicaPolicy
+		var archivePolicyLive atomic.Bool
 		var archiveAllowed []libp2ppeer.ID
 		var publisher *archivewiring.Publisher
 		archiveTransportLimits := archivewiring.DefaultLimits()
 		if flags.ArchiveStore != "" {
-			if flags.Restore {
-				entries, readErr := os.ReadDir(flags.ArchiveStore)
-				if readErr == nil && len(entries) != 0 {
-					return fmt.Errorf("restore archive directory %s is not empty; supply a fresh directory", flags.ArchiveStore)
-				}
-				if readErr != nil && !errors.Is(readErr, fs.ErrNotExist) {
-					return fmt.Errorf("checking restore archive directory: %w", readErr)
-				}
-			}
 			adapter, ok := executor.(*engineapi.Adapter)
 			if !ok || !origin.Valid() {
 				return archivewiring.ErrConfig
@@ -915,9 +1213,15 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				return e
 			}
 			// Structure only: membership is checked against the installed set after the replay (admitArchivePeers).
-			archiveReplicas, archiveDigest, e = archiveReplicaSet(flags.ArchiveReplicas, peer.ID(), archiveAllowed, trustBases[0].GetEpoch())
+			archiveReplicas, archiveDigest, archivePolicyEncoded, e = archiveReplicaSet(flags.ArchiveReplicas, peer.ID(), archiveAllowed, trustBases[0].GetEpoch())
 			if e != nil {
 				return e
+			}
+			if replicaPolicy, e = archivewiring.NewReplicaPolicy(archiveReplicas, archiveDigest, archivePolicyEncoded, 0); e != nil {
+				return e
+			}
+			if !flags.ArchivePrune {
+				replicaPolicy.Untracked() // no frontier worker owns storage obligations: a switch grants no retired peer archive access
 			}
 			archiveHost, e = archivewiring.NewPeerGatedHost(peer, archiveTransportLimits.PerPeer)
 			if e != nil {
@@ -927,7 +1231,10 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if !ok {
 				return errors.New("receipt-complete archive requires an EVM adapter")
 			}
-			archiveServer, e := archivewiring.NewServer(archiveLocal, archiveSubject, archivewiring.JournalVerifier(journalStore, journalCtx, limits, archiveSubject, receiptSource), archiveAllowed, archiveTransportLimits)
+			archiveServer, e := archivewiring.NewServer(archiveLocal, archiveSubject, archivewiring.ChainVerifiers(
+				archivewiring.JournalVerifier(journalStore, journalCtx, limits, archiveSubject, receiptSource),
+				// the verified historical import: another representation of a block this node holds authenticated (its restored history)
+				archivewiring.HistoryVerifier(archiveLocal, archivewiring.CertifiedBinding{Context: journalCtx, Subject: archiveSubject})), archiveAllowed, archiveTransportLimits)
 			if e != nil {
 				return fmt.Errorf("starting archive replica: %w", e)
 			}
@@ -939,10 +1246,80 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				archiveServer.SetBundleVerifier(archivewiring.BundleAdmission(historicalTrust, node.ShardConfForEpoch))
 			}
 			// Who may fetch from and publish to this node's archive is the validator set of the ACTIVE assignment, not the genesis one:
-			// a joiner must be able to restore before it can acknowledge, and a retired validator must not keep access.
-			archiveServer.SetPeerAuthorizer(activePeers.Allowed)
+			// a joiner must be able to restore before it can acknowledge, and a retired validator must not keep access. The one
+			// exception is archive-only: a retired replica that still holds copies this node promised (a retained holder of the
+			// replica policy) keeps this service until the current replicas hold them; it gets no journal, evidence or consensus access.
+			archiveServer.SetPeerAuthorizer(func(id libp2ppeer.ID) bool { return activePeers.AllowedInstalled(id) || replicaPolicy.Holder(id) })
+			archiveServer.SetReadOnlyAuthorizer(activePeers.AllowedStagedOnly) // a staged joiner fetches to catch up; it publishes nothing before its assignment installs
 			archiveServer.SetLogger(flags.observe.Logger())
+			if flags.ArchivePublicReads {
+				// non-active followers read (never write) under their own budget, apart from the validators' slots
+				if e := archiveServer.SetPublicReads(archivewiring.Limits{Deadline: archiveTransportLimits.Deadline, Pending: 4, PerPeer: 2}); e != nil {
+					return fmt.Errorf("archive public reads: %w", e)
+				}
+			}
 			archiveServer.Register(ctx, peer)
+		}
+		// refreshArchivePolicy re-derives the replicas from the installed assignment and switches the versioned policy when they changed.
+		// It is in-memory only and never fails an activation: the frontier worker adopts a switch durably before it plans under it. Before
+		// the persisted replay has finished (archivePolicyLive) the installed set is still being rebuilt, and it does nothing.
+		refreshArchivePolicy := func() {
+			if replicaPolicy == nil || len(flags.ArchiveReplicas) != 0 || !archivePolicyLive.Load() {
+				return
+			}
+			epoch := activePeers.Epoch()
+			derived, err := archivepolicy.Select(peer.ID(), append(activePeers.Peers(), peer.ID()), epoch)
+			if err != nil {
+				flags.observe.Logger().Warn("archive replica policy kept: the installed assignment derives none", "shardEpoch", epoch, "err", err)
+				return
+			}
+			encoded, err := derived.Encode()
+			if err != nil {
+				flags.observe.Logger().Error("archive replica policy kept: encoding the derived policy", "err", err)
+				return
+			}
+			switched, err := replicaPolicy.Switch(derived.Replicas, sha256.Sum256(encoded), encoded, epoch)
+			if err != nil {
+				flags.observe.Logger().Error("archive replica policy kept", "err", err)
+				return
+			}
+			if switched {
+				flags.observe.Logger().Info("archive replica policy switched to the installed assignment", "shardEpoch", epoch, "replicas", derived.Replicas)
+			} else {
+				kept := replicaPolicy.Snapshot()
+				flags.observe.Logger().Debug("archive replica policy kept: the installed assignment derives the same replicas", "checkedShardEpoch", epoch,
+					"policyShardEpoch", kept.Epoch, "version", kept.Version, "replicas", derived.Replicas)
+			}
+		}
+		// seedArchivePolicy, after the journal is open and before the first refresh: a policy a previous run adopted keeps its digest.
+		seedArchivePolicy := func(ctx context.Context) error {
+			if replicaPolicy == nil || len(flags.ArchiveReplicas) != 0 || !flags.ArchivePrune {
+				return nil
+			}
+			m, ok, err := journalStore.LoadArchiveMigration(ctx, journalCtx, limits)
+			if err != nil || !ok {
+				return err
+			}
+			persisted, err := archivepolicy.Decode(m.Policy)
+			if err != nil || persisted.Writer != peer.ID() {
+				return fmt.Errorf("%w: the persisted archive policy is not this node's", archivewiring.ErrConfig)
+			}
+			return replicaPolicy.Seed(persisted.Replicas, m.Digest, m.Policy, persisted.Epoch)
+		}
+		// An explicit pair is validated against the installed set; a derived policy is re-derived from it instead (deriveArchivePolicy, after
+		// each admission), so a retired replica never refuses a restart.
+		var explicitArchiveReplicas []libp2ppeer.ID
+		if len(flags.ArchiveReplicas) != 0 {
+			explicitArchiveReplicas = archiveReplicas
+		}
+		// deriveArchivePolicy runs after the admission ended the startup hold: it seeds a persisted policy and derives the installed one.
+		deriveArchivePolicy := func(ctx context.Context) error {
+			if err := seedArchivePolicy(ctx); err != nil {
+				return err
+			}
+			archivePolicyLive.Store(true)
+			refreshArchivePolicy()
+			return nil
 		}
 		restoringHandoffHistory := flags.TrustHistoryProfile2
 		var restoredHandoffTerminals []handoffTerminalCertificate
@@ -1036,7 +1413,8 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					if err := historicalTrust.ActivateHandoff(bundle.Body.Epoch); err != nil {
 						return err
 					}
-					flags.observe.Logger().Info("handoff activated", "rootEpoch", bundle.Body.Epoch)
+					flags.observe.Logger().Info("handoff activated", "rootEpoch", bundle.Body.Epoch, monitoring.Event(monitoring.EvShardHandoffActive))
+					refreshArchivePolicy()
 					return nil
 				}}
 			if archiveLocal != nil {
@@ -1089,7 +1467,12 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				},
 				Transition: verifierContext.InstallVerifiedTransition,
 				InstallAssignment: func(view handoffdelivery.Bundle, step handoff.AssignmentStep) error {
-					return installVerifiedAssignment(node, activePeers, view, step)
+					if err := installVerifiedAssignment(node, activePeers, view, step); err != nil {
+						return err
+					}
+					role.assignmentInstalled(activePeers.Member())
+					warm.shard(ctx, append(activePeers.Peers(), activePeers.StagedPeers()...)) // the install clears the staged set
+					return nil
 				},
 				NoteJoiner: func(view handoffdelivery.Bundle, step handoff.AssignmentStep) error {
 					if err := noteJoinerStep(signing, view, step, node.ShardConfForEpoch); err != nil {
@@ -1099,9 +1482,16 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					return bindLiveJoinerKey(signing)
 				},
 				InstallEVMTransition: executor.(*engineapi.Adapter).InstallEpochTransition,
+				Begin:                q3Trust.BeginQ3,
 				Activate:             q3Trust.ActivateQ3,
 				Log: func(epoch uint64) {
-					flags.observe.Logger().Info("handoff activated", "rootEpoch", epoch, "q3", true)
+					flags.observe.Logger().Info("handoff activated", "rootEpoch", epoch, "q3", true, monitoring.Event(monitoring.EvShardHandoffActive))
+					if tb, tbErr := q3Trust.Verified().GetByEpoch(ctx, epoch); tbErr == nil {
+						follower.addRoots(tb)
+					}
+					// the activation is complete: publish its role (it opens only once the runtime has completed the epoch too)
+					role.activationCompleted(epoch, activePeers.Member())
+					refreshArchivePolicy()
 				},
 			}
 			apply := installer.Apply
@@ -1112,10 +1502,20 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if err := q3rt.Attach(q3active.Participants{Root: sink, Safety: q3rt.Trust(nil), Shard: q3Trust.Guarded(), Authority: q3rt.Trust(nil)}); err != nil {
 				return fmt.Errorf("q3 runtime: %w", err)
 			}
-			q3Follower = &q3shard.Q3Follower{Runtime: q3rt, AnchorEpoch: trustBases[0].GetEpoch(), CurrentRoots: currentRoots,
-				Fetch: func(ctx context.Context, id libp2ppeer.ID, epoch uint64) (q3active.Bundle, error) {
+			// This node mirrors the activations its journal staged, for non-active parties that must not ask the roots (phase 1 follower).
+			mirror, mirrorErr := q3delivery.NewServer(q3shard.MirrorProvider{Runtime: q3rt})
+			if mirrorErr != nil {
+				return fmt.Errorf("q3 activation mirror: %w", mirrorErr)
+			}
+			mirror.Register(peer)
+			mirrorPeers := q3MirrorPeers(activePeers, append(followSourceIDs(followSources), archiveReplicas...))
+			// a node whose published role is not active is a non-active party: mirrors only
+			q3Follower = shardQ3Follower(notifyingActivator{Q3Activator: q3rt, role: role}, trustBases[0].GetEpoch(), currentRoots, mirrorPeers,
+				func() bool { return !role.active() },
+				knownRoots(trustBases[0].GetEpoch(), q3rt.ActiveEpoch, q3Trust.Verified().GetByEpoch),
+				func(ctx context.Context, id libp2ppeer.ID, epoch uint64) (q3active.Bundle, error) {
 					return q3delivery.Request(ctx, peer, id, epoch)
-				}}
+				})
 			catcher = q3Follower
 		}
 		var restoreLineage func(context.Context) error
@@ -1167,15 +1567,36 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		}
 		// Frontier enablement is part of the archive setup that follows the replica validation: it runs from this one action after the
 		// persisted replay on a plain run, and after CatchUp and before the archive replay on a restore.
+		// the terminal repair's archive: local, then (verified downstream) the node's non-root archive sources (#1050: a follower that
+		// installed an epoch from its mirrors holds no terminal body of it)
+		terminalArchive := func() handoffArchiveReader {
+			if archiveLocal == nil {
+				return nil
+			}
+			return remoteFallbackArchive{local: archiveLocal,
+				sources: func() []libp2ppeer.ID {
+					return follower.nonRoot(append(append(followSourceIDs(followSources), readableArchiveReplicas(replicaPolicy, archiveReplicas)...), activePeers.Peers()...))
+				},
+				fetch: func(id libp2ppeer.ID, q archive.Request) (*archive.Record, error) {
+					return archivewiring.Fetch(ctx, archiveHost, id, q, archiveTransportLimits)
+				}}
+		}
 		enableArchiveFrontier := func(ctx context.Context) error {
 			if archiveLocal == nil || !flags.ArchivePrune {
 				return nil
 			}
-			policy := frontier.Policy{Context: archiveSubject, Binding: archivewiring.CertifiedBinding{Context: journalCtx, Subject: archiveSubject}, Availability: archivewiring.ReplicaAvailability{Context: ctx, Host: archiveHost, Replicas: archiveReplicas, Limits: archiveTransportLimits}}
+			journalStore.SetLogger(flags.observe.Logger())
+			if archiveDigest != ([32]byte{}) {
+				// the derived policy of the installed assignment, adopted durably with its lineage before the frontier is authenticated
+				if _, e := archivewiring.EnableDerivedFrontier(ctx, journalStore, journalCtx, limits, archiveSubject, archiveHost, archiveTransportLimits, replicaPolicy, replicaPolicy.Snapshot()); e != nil {
+					return fmt.Errorf("authenticating certified frontier: %w", e)
+				}
+				return nil
+			}
+			policy := frontier.Policy{Context: archiveSubject, Binding: archivewiring.CertifiedBinding{Context: journalCtx, Subject: archiveSubject}, Availability: archivewiring.ReplicaAvailability{Context: ctx, Host: archiveHost, Replicas: archiveReplicas, Limits: archiveTransportLimits, ReadBacks: replicaPolicy.ReadBacks()}}
 			if e := setFrontierReplicas(&policy, archiveReplicas, archiveDigest); e != nil {
 				return e
 			}
-			journalStore.SetLogger(flags.observe.Logger())
 			if e := journalStore.EnableFrontier(ctx, journalCtx, limits, policy); e != nil {
 				return fmt.Errorf("authenticating certified frontier: %w", e)
 			}
@@ -1184,7 +1605,10 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		if !flags.Restore {
 			// The persisted verified steps are replayed into the set (OnInstalled): the configured replicas are validated against the
 			// rebuilt set, and only then may serving start (the hold ends) and the frontier use them.
-			if err := admitArchivePeers(activePeers, archiveReplicas, archiveLocal != nil, flags.TrustHistoryProfile2); err != nil {
+			if err := admitArchivePeers(activePeers, explicitArchiveReplicas, archiveLocal != nil, flags.TrustHistoryProfile2); err != nil {
+				return err
+			}
+			if err := deriveArchivePolicy(ctx); err != nil {
 				return err
 			}
 			if err := enableArchiveFrontier(ctx); err != nil {
@@ -1192,21 +1616,32 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			}
 			// The terminal repair runs only now, against the authenticated frontier and restore base: a terminal they already discharge
 			// is skipped, not resurrected into the hot journal (the frontier cannot be enabled any earlier, as it needs the validated set).
-			if err := repairUndischargedHandoffTerminals(ctx, journalStore, archiveLocal, archiveSubject, journalCtx, limits, restoredHandoffTerminals); err != nil {
+			if err := repairUndischargedHandoffTerminals(ctx, journalStore, terminalArchive(), archiveSubject, journalCtx, limits, restoredHandoffTerminals); err != nil {
 				flags.observe.Logger().Error("profile2 handoff terminal repair failed", "error", err)
 				return fmt.Errorf("repairing saved handoff observations: %w", err)
 			}
 		}
 		if flags.Restore {
-			uc, tr, pinErr := loadRestorePin(flags.RestoreTipUC, flags.RestoreTipTR)
-			if pinErr != nil {
-				return pinErr
+			if restoreUC == nil {
+				var pinErr error
+				restoreUC, restoreTR, pinErr = loadRestorePin(flags.RestoreTipUC, flags.RestoreTipTR)
+				if pinErr != nil {
+					return pinErr
+				}
+				restoreScope, pinErr = restoreResumeScope(flags)
+				if pinErr != nil {
+					return pinErr
+				}
 			}
+			uc, tr := restoreUC, restoreTR
 			catchUpHistory := func(ctx context.Context) error {
 				if !flags.TrustHistoryProfile2 {
 					// No handoff history to install: the installed set is the genesis one, and the replicas are validated against it
 					// before the archive replay.
-					return admitArchivePeers(activePeers, archiveReplicas, archiveLocal != nil, false)
+					if err := admitArchivePeers(activePeers, explicitArchiveReplicas, archiveLocal != nil, false); err != nil {
+						return err
+					}
+					return deriveArchivePolicy(ctx)
 				}
 				if err := peer.BootstrapConnect(ctx, flags.observe.Logger()); err != nil {
 					return fmt.Errorf("restore bootstrap connect: %w", err)
@@ -1216,7 +1651,10 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				}
 				// Every step up to the pinned epoch is verified and installed: the set is rebuilt. The configured replicas are validated
 				// against it before the hold ends; a failed catch-up or validation never releases the hold.
-				if err := admitArchivePeers(activePeers, archiveReplicas, archiveLocal != nil, true); err != nil {
+				if err := admitArchivePeers(activePeers, explicitArchiveReplicas, archiveLocal != nil, true); err != nil {
+					return err
+				}
+				if err := deriveArchivePolicy(ctx); err != nil {
 					return err
 				}
 				if err := finishJoinerKey(signing); err != nil {
@@ -1234,16 +1672,16 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					return fmt.Errorf("reading restore genesis identity: %w", genesisErr)
 				}
 				restorer := &archivewiring.ArchiveRestore{Journal: journalStore, Context: journalCtx, JournalLimits: limits,
-					Archive: archiveLocal, Subject: archiveSubject, Replicas: archiveReplicas, Host: archiveHost,
+					Archive: archiveLocal, Subject: archiveSubject, Replicas: readableArchiveReplicas(replicaPolicy, archiveReplicas), Host: archiveHost,
 					Limits: archiveTransportLimits, Adapter: executor.(*engineapi.Adapter), Genesis: genesis, TipUC: uc, TipTR: tr,
-					Log: flags.observe.Logger()}
+					Log: flags.observe.Logger(), ResumeScope: restoreScope}
 				return restorer.Restore(ctx)
 			}
 			var repairRestoredHandoffs func(context.Context) error
 			if flags.TrustHistoryProfile2 {
 				repairRestoredHandoffs = func(ctx context.Context) error {
 					restoringHandoffHistory = false
-					return repairUndischargedHandoffTerminals(ctx, journalStore, archiveLocal,
+					return repairUndischargedHandoffTerminals(ctx, journalStore, terminalArchive(),
 						archiveSubject, journalCtx, limits, restoredHandoffTerminals)
 				}
 			}
@@ -1287,6 +1725,11 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		// `shard-node restore` (D-M2-1) is unchanged and independent of it.
 		freshness := &configuredadmission.Freshness{Opener: peer, TrustBase: trustBases[0], Logger: flags.observe.Logger()}
 		freshness.Signing = freshnessSigning(q3rt, flags.UTBGenesisFile != "", trustBases[0])
+		// a node that follows the archive heads while non-active asks no root quorum for a bootstrap receipt then either
+		archiveFollower := followsArchiveHeads(follower.enabled, q3rt != nil, archiveLocal != nil)
+		if follower.enabled || archiveFollower {
+			freshness.RootFree = func() bool { return !role.active() }
+		}
 		coordinator := &configuredadmission.ExecutionRecovery{Freshness: freshness, Store: journalStore, Context: journalCtx, JournalLimits: limits, Executor: recoveryExecutor, Gate: node.FinalityGate(), Log: flags.observe.Logger(), Genesis: genesis, Limits: configuredadmission.DefaultRecoveryLimits()}
 		server, serverErr := shardnode.NewJournalServer(configuredadmission.JournalProvider{Store: journalStore, Context: journalCtx, Limits: limits}, shardnode.DefaultJournalTransportLimits())
 		if serverErr != nil {
@@ -1296,10 +1739,44 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		server.SetPeerAuthorizer(activePeers.Allowed)
 		server.Register(peer)
 		coordinator.Host, coordinator.ProviderSource, coordinator.TransportLimits = peer, activePeers, shardnode.DefaultJournalTransportLimits()
+		coordinator.Prefetch = recordsPrefetch(verifierContext)
 		var archiveCatchUp *archivewiring.CatchUp // a gap longer than one recovery is paged in from the archive (#769) once the frontier worker exists
 		if archiveLocal != nil {
 			source := &archivewiring.RecoverySource{Context: journalCtx, Subject: archiveSubject, Local: archiveLocal, Host: archiveHost,
-				Replicas: archiveReplicas, Limits: archiveTransportLimits, MaxBlocks: configuredadmission.DefaultRecoveryLimits().Blocks, Log: flags.observe.Logger()}
+				Replicas: archiveReplicas, Policy: replicaPolicy, Limits: archiveTransportLimits, MaxBlocks: configuredadmission.DefaultRecoveryLimits().Blocks, Log: flags.observe.Logger()}
+			if follower.enabled {
+				source.Followed = func() []libp2ppeer.ID { return follower.nonRoot(followSourceIDs(followSources)) }
+			} else if archiveFollower {
+				// the blocks of a followed head come from the same non-root set the heads do (the installed validators after the replicas),
+				// while this node is not active; an active node's recovery reads the replicas as before
+				source.Followed = func() []libp2ppeer.ID {
+					if role.active() {
+						return nil
+					}
+					return follower.nonRoot(activePeers.Peers())
+				}
+			}
+			if archiveFollower {
+				// the root-free certificate source: the newest verified archive head, offered while this node is not active. A Q3 node
+				// that is not active never subscribes to the roots (its role lease makes it a follower), with or without --follow-source:
+				// a joiner restored from a seed pin, or a validator the installed assignment no longer names, takes its certificates from
+				// the shard's archive replicas and installed validators, verified against its own history from the pin (bft-core#1309:
+				// without it, such a node advanced only to the terminal certificate of each handoff it installed)
+				headFollower = &archivewiring.HeadFollower{Binding: archivewiring.CertifiedBinding{Context: journalCtx, Subject: archiveSubject},
+					Host: archiveHost, Limits: archiveTransportLimits, Active: role.active, Offer: node.FollowCertificate, Accepted: node.Holds,
+					// a fresh journal begins with the bootstrap certificate: taken from the sources' first record, never from a root quorum
+					NeedsBootstrap: func() bool {
+						st, _, err := journalStore.Load(ctx, journalCtx)
+						if err != nil {
+							return false
+						}
+						_, observed := st.Observed()
+						return !observed
+					}, Log: flags.observe.Logger(),
+					Sources: func() []libp2ppeer.ID {
+						return follower.nonRoot(append(append(followSourceIDs(followSources), readableArchiveReplicas(replicaPolicy, archiveReplicas)...), activePeers.Peers()...))
+					}}
+			}
 			archiveCatchUp = &archivewiring.CatchUp{Source: source}
 			coordinator.FetchArchive = func(ctx context.Context, after shardnode.BlockRef, target []byte) ([]shardnode.JournalFetchEntry, error) {
 				entries, fetchErr := source.FetchSuffix(ctx, after, target)
@@ -1326,7 +1803,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if e != nil {
 				return e
 			}
-			publisher = &archivewiring.Publisher{Journal: journalStore, Context: journalCtx, JournalLimits: limits, Archive: archiveLocal, Subject: archiveSubject, Host: archiveHost, Replicas: archiveReplicas, Limits: archiveTransportLimits, Log: flags.observe.Logger(), Metrics: metrics, ReceiptSource: executor.(*engineapi.Adapter)}
+			publisher = &archivewiring.Publisher{Journal: journalStore, Context: journalCtx, JournalLimits: limits, Archive: archiveLocal, Subject: archiveSubject, Host: archiveHost, Replicas: archiveReplicas, Policy: replicaPolicy, Limits: archiveTransportLimits, Log: flags.observe.Logger(), Metrics: metrics, ReceiptSource: executor.(*engineapi.Adapter)}
 			if flags.TrustHistoryProfile2 {
 				publisher.BundleVerifier = archivewiring.BundleAdmission(historicalTrust, node.ShardConfForEpoch)
 			}
@@ -1338,8 +1815,17 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			archiveDone := make(chan struct{})
 			go func() { defer close(archiveDone); _ = publisher.Run(archiveCtx) }()
 			defer func() { cancelArchive(); <-archiveDone; _ = metrics.Close() }()
+			migrationDone := make(chan struct{})
+			go func() {
+				defer close(migrationDone)
+				_ = (&archivewiring.LayoutMigration{Archive: archiveLocal, Log: flags.observe.Logger()}).Run(archiveCtx)
+			}()
+			defer func() { cancelArchive(); <-migrationDone }()
 			if flags.ArchivePrune {
-				worker := &archivewiring.FrontierWorker{Journal: journalStore, Context: journalCtx, Limits: limits, Archive: archiveLocal, Subject: archiveSubject, Replicas: archiveReplicas, PolicyDigest: archiveDigest, Host: archiveHost, TransportLimits: archiveTransportLimits, Log: flags.observe.Logger(), Finalized: recoveryExecutor.Finalized}
+				worker := &archivewiring.FrontierWorker{Journal: journalStore, Context: journalCtx, Limits: limits, Archive: archiveLocal, Subject: archiveSubject, Replicas: archiveReplicas, PolicyDigest: archiveDigest, Policy: replicaPolicy, Host: archiveHost, TransportLimits: archiveTransportLimits, Log: flags.observe.Logger(), Finalized: recoveryExecutor.Finalized}
+				if flags.TrustHistoryProfile2 {
+					worker.BundleVerifier = archivewiring.BundleAdmission(historicalTrust, node.ShardConfForEpoch)
+				}
 				if archiveCatchUp != nil {
 					// without the frontier pruning the journal behind it, a catch-up would only fill the journal: it is wired only here
 					archiveCatchUp.Frontier = worker
@@ -1380,8 +1866,16 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					authority.RootEpoch, authority.ShardEpoch, authority.ReservedRound = status.RootEpoch, status.ShardEpoch, status.ReservedRound
 				}
 			}
-			return archivewiring.ReadOperatorStatus(statusCtx, journalStore, journalCtx, limits,
-				archiveLocal, archiveSubject, archiveReplicas, rootEpoch, activated, progress, authority)
+			replicas := archiveReplicas
+			var policyReport *archivewiring.PolicyReport
+			if replicaPolicy != nil {
+				snap := replicaPolicy.Snapshot()
+				replicas, policyReport = snap.Replicas, archivewiring.PolicyReportOf(snap)
+			}
+			status, statusErr := archivewiring.ReadOperatorStatus(statusCtx, journalStore, journalCtx, limits,
+				archiveLocal, archiveSubject, replicas, rootEpoch, activated, progress, authority)
+			status.Policy = policyReport
+			return status, statusErr
 		}
 	}
 
@@ -1392,6 +1886,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	// every deployment ran the 5s default whatever its T2 was.
 	awaitTimeout := shardnode.AwaitTimeoutForT2(shardConf.T2Timeout)
 	node.SetAwaitTimeout(awaitTimeout)
+	node.SetBlockInterval(flags.BlockInterval)
 
 	// The certified-block record (#14): nothing is constructed unless a store path is configured, and then
 	// the record is reloaded and reported without changing voting. See startCertifiedRecord.
@@ -1422,6 +1917,20 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		return fmt.Errorf("creating metrics: %w", err)
 	}
 	node.SetMetrics(metrics)
+	if activationGate != nil {
+		if flags.baseFlags != nil {
+			if err := activationGate.RegisterMetric(flags.observe.Meter("shardnode")); err != nil {
+				return fmt.Errorf("creating the upgrade metric: %w", err)
+			}
+		}
+		go activationGate.Watch(ctx, activationWatchInterval, func() uint64 {
+			if q3rt != nil {
+				return q3rt.ActiveEpoch()
+			}
+			return trustBases[0].GetEpoch()
+		})
+	}
+	registerShardMonitoring(ctx, flags, flags.observe.Logger(), peer, node, executor, func() []libp2ppeer.ID { return activePeers.Peers() }, nil)
 
 	if err := peer.BootstrapConnect(ctx, flags.observe.Logger()); err != nil {
 		return fmt.Errorf("bootstrap connect: %w", err)
@@ -1429,11 +1938,12 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 
 	flags.observe.Logger().Info("shard node starting",
 		"nodeID", peer.ID().String(), "partitionID", shardConf.PartitionID, "executor", flags.Executor,
-		"t2Timeout", shardConf.T2Timeout, "leaderAwaitTimeout", awaitTimeout, "certificationSigning", signing.describe)
+		"t2Timeout", shardConf.T2Timeout, "leaderAwaitTimeout", awaitTimeout, "blockInterval", flags.BlockInterval, "certificationSigning", signing.describe)
 
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return node.Run(gctx) })
 	var laneEndpoints []func(*http.ServeMux)
+	laneEndpoints = append(laneEndpoints, vrStagedEndpoint{stage: activePeers.StageGeneration}.register) // the paired root's staged VR successor (VT-09b)
 	if q3rt != nil {
 		laneEndpoints = append(laneEndpoints, (&shardQ3Staging{cfg: q3rt.ProtocolConfig, self: peer.ID().String(), onStaged: activePeers.Stage, tip: func() (uint64, uint64, [32]byte, error) {
 			h := q3rt.History()
@@ -1449,7 +1959,38 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		g.Go(func() error { return handoffFollower.Run(gctx) })
 	}
 	if q3Follower != nil {
+		if flags.PairedActivationRPC != "" {
+			updates := newPairedActivation(flags.PairedActivationRPC)
+			client := pairedActivationHTTP(time.Second)
+			defer client.CloseIdleConnections()
+			q3Follower.Wake = updates.wake
+			q3Follower.LocalTip = updates.tip.Load
+			q3Follower.Local = func(ctx context.Context, epoch uint64) (q3active.Bundle, error) {
+				if updates.tip.Load() < epoch {
+					return q3active.Bundle{}, q3shard.ErrQ3Unavailable
+				}
+				raw, err := fetchPairedActivationBundle(ctx, client, updates.origin, epoch, q3format.MaxEnvelopeBytes)
+				if err != nil {
+					return q3active.Bundle{}, err
+				}
+				bundle, envelope, err := q3active.DecodeBundle(raw)
+				if err != nil {
+					return q3active.Bundle{}, err
+				}
+				if envelope.Links[len(envelope.Links)-1].Claim.Epoch != epoch {
+					return q3active.Bundle{}, q3shard.ErrQ3Unavailable
+				}
+				return bundle, nil
+			}
+			g.Go(func() error { updates.run(gctx); return nil })
+		}
 		g.Go(func() error { return q3Follower.Run(gctx) })
+	}
+	if headFollower != nil {
+		g.Go(func() error { return headFollower.Run(gctx) })
+	}
+	if utbFollower != nil {
+		g.Go(func() error { return utbFollower.Run(gctx) })
 	}
 	return g.Wait()
 }
@@ -1535,20 +2076,28 @@ func archiveFlagsValid(store, journal string, replicas []string) bool {
 // the next three after this node in circular peer-ID order, any two of which make a block durable) and the returned digest binds the frontier
 // records to that policy. An explicit pair keeps the previous two-replica behaviour and returns a zero digest. others is the shard's other
 // validators; the installed set is checked later (admitArchivePeers).
-func archiveReplicaSet(raws []string, self libp2ppeer.ID, others []libp2ppeer.ID, epoch uint64) ([]libp2ppeer.ID, [32]byte, error) {
+func archiveReplicaSet(raws []string, self libp2ppeer.ID, others []libp2ppeer.ID, epoch uint64) ([]libp2ppeer.ID, [32]byte, []byte, error) {
 	if len(raws) != 0 {
 		replicas, err := parseArchiveReplicas(raws, self)
-		return replicas, [32]byte{}, err
+		return replicas, [32]byte{}, nil, err
 	}
 	policy, err := archivepolicy.Select(self, append(slices.Clone(others), self), epoch)
 	if err != nil {
-		return nil, [32]byte{}, fmt.Errorf("%w: deriving archive replicas: %v", archivewiring.ErrConfig, err)
+		return nil, [32]byte{}, nil, fmt.Errorf("%w: deriving archive replicas: %v", archivewiring.ErrConfig, err)
 	}
-	digest, err := policy.Digest()
+	encoded, err := policy.Encode()
 	if err != nil {
-		return nil, [32]byte{}, fmt.Errorf("%w: archive policy: %v", archivewiring.ErrConfig, err)
+		return nil, [32]byte{}, nil, fmt.Errorf("%w: archive policy: %v", archivewiring.ErrConfig, err)
 	}
-	return policy.Replicas, digest, nil
+	return policy.Replicas, sha256.Sum256(encoded), encoded, nil
+}
+
+// readableArchiveReplicas is the replicas a restore reads from: the policy's current ones and its retained holders, else the configured ones.
+func readableArchiveReplicas(policy *archivewiring.ReplicaPolicy, configured []libp2ppeer.ID) []libp2ppeer.ID {
+	if policy == nil {
+		return configured
+	}
+	return policy.Snapshot().Readable()
 }
 
 // setFrontierReplicas names the replicas in the frontier policy: the eligible set bound to the derived policy digest, or the legacy pair.
@@ -1787,12 +2336,22 @@ func buildExecutor(ctx context.Context, flags *shardNodeRunFlags, shardConf *typ
 			return nil, fmt.Errorf("parsing JWT secret %q: %w", jwtPath, err)
 		}
 
+		registry, registryCode, vr, err := vrstate.PinsFromPDR(shardConf)
+		if err != nil {
+			return nil, err
+		}
+		var resolveCollector engineapi.FeeCollectorResolver
+		if vr {
+			resolveCollector = vrFeeCollectorResolver(registry, registryCode)
+		}
+
 		adapter := engineapi.NewAdapter(engineapi.Config{
-			EngineURL:    flags.EngineURL,
-			EthURL:       flags.EthURL,
-			Secret:       secret,
-			FeeCollector: [20]byte(common.HexToAddress(flags.EngineFeeCollector)),
-			Verifier:     verifier,
+			EngineURL:        flags.EngineURL,
+			EthURL:           flags.EthURL,
+			Secret:           secret,
+			FeeCollector:     [20]byte(common.HexToAddress(flags.EngineFeeCollector)),
+			ResolveCollector: resolveCollector,
+			Verifier:         verifier,
 		}, flags.observe.Logger())
 
 		// The build path now runs through the seal siblings, so a client that lacks them fails
@@ -1864,7 +2423,16 @@ func buildExecutor(ctx context.Context, flags *shardNodeRunFlags, shardConf *typ
 		// adapter does not call. eth_config (EIP-7910) is the standard read for it. Last, so that a
 		// mispairing or a wrong genesis is reported as that rather than as a profile difference.
 		if flags.B1Profile != "" {
-			adapter.ExpectUnicityPrecompiles()
+			// The native set the execution client must implement is the one the profile's execution revision commits (bft-core#1199), not a
+			// constant of this binary: a profile of another generation, or without a revision, is refused here and by readB1Profile before
+			// the node can vote, and a client of another generation is refused as having an unexpected or missing precompile.
+			b1p, err := readB1Profile(flags.B1Profile)
+			if err != nil {
+				return nil, fmt.Errorf("engine-api executor cannot read the b1 profile for its execution revision: %w", err)
+			}
+			if err := adapter.ExpectUnicityPrecompiles(b1p.ExecutionRevision); err != nil {
+				return nil, fmt.Errorf("engine-api executor refuses the b1 profile's execution revision: %w", err)
+			}
 		}
 		if _, err := adapter.CheckExecutionProfile(ctx, wantChainID); err != nil {
 			return nil, fmt.Errorf("engine-api executor failed its startup execution-profile check "+
@@ -1989,4 +2557,123 @@ func freshnessSigning(q3rt *q3active.Runtime, utb bool, anchor *types.RootTrustB
 		return func(uint64) (votesig.Config, error) { return cfg, nil }
 	}
 	return nil
+}
+
+// q3MirrorPeers lists the non-root holders of activation evidence: the installed assignment's other validators, then the archive replicas.
+func q3MirrorPeers(active *shardnode.ActivePeers, replicas []libp2ppeer.ID) func() []libp2ppeer.ID {
+	fixed := append([]libp2ppeer.ID(nil), replicas...)
+	return func() []libp2ppeer.ID {
+		return append(active.Peers(), fixed...)
+	}
+}
+
+// knownRoots names every root identity this node knows from authenticated committee data: the committee of every verified epoch from the
+// anchor to the active one. A bootnode is not a root by being a bootnode (generated joiners list incumbent shard nodes there). The set is
+// rebuilt only when the active epoch moves, so a lookup is a map read.
+func knownRoots(anchor uint64, active func() uint64, trust func(context.Context, uint64) (*types.RootTrustBaseV1, error)) func(libp2ppeer.ID) bool {
+	var mu sync.Mutex
+	var builtAt uint64
+	set := map[libp2ppeer.ID]struct{}{}
+	return func(id libp2ppeer.ID) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		if top := active(); top != builtAt || len(set) == 0 {
+			set = map[libp2ppeer.ID]struct{}{}
+			for e := anchor; e <= max(top, anchor); e++ {
+				tb, err := trust(context.Background(), e)
+				if err != nil || tb == nil {
+					continue
+				}
+				for _, n := range tb.RootNodes {
+					if n == nil {
+						continue
+					}
+					if pid, err := libp2ppeer.Decode(n.NodeID); err == nil {
+						set[pid] = struct{}{}
+					}
+				}
+			}
+			builtAt = top
+		}
+		_, ok := set[id]
+		return ok
+	}
+}
+
+// shardQ3Follower is the shard node's activation follower. bootLocators are the configured bootnodes, which may mix roots and shard peers:
+// only those isRoot authenticates are treated as roots, so an incumbent shard listed as a bootnode remains a mirror a non-active node asks.
+func shardQ3Follower(rt q3shard.Q3Activator, anchor uint64, bootLocators []libp2ppeer.ID, mirrors func() []libp2ppeer.ID, nonActive func() bool,
+	isRoot func(libp2ppeer.ID) bool, fetch func(context.Context, libp2ppeer.ID, uint64) (q3active.Bundle, error)) *q3shard.Q3Follower {
+	return &q3shard.Q3Follower{Runtime: rt, AnchorEpoch: anchor, CurrentRoots: bootLocators, Mirrors: mirrors, NonActive: nonActive, IsRoot: isRoot, Fetch: fetch}
+}
+
+// openRecordCuts opens the durable store of verified root-record cuts and records next to the execution journal (nil without a journal).
+// It is opened where the records feed is attached, after the restore checks, so that nothing is written before them. A store that cannot
+// be opened is an error: the node does not silently fall back to the volatile cache.
+func openRecordCuts(journal string) (recordsfeed.CutStore, error) {
+	if journal == "" {
+		return nil, nil
+	}
+	db, err := boltdb.New(journal + ".cuts")
+	if err != nil {
+		return nil, fmt.Errorf("opening the root-record store %s: %w", journal+".cuts", err)
+	}
+	return recordsfeed.KVCutStore{DB: db}, nil
+}
+
+// recordsPrefetch tells the pair's root-record source which origins a fetched suffix's verification will ask for (bft-core#1071): the
+// cut of each entry's authorizing certificate is fetched ahead, several at a time, instead of one round trip per block while the entries
+// are verified one by one. Nil without a records feed.
+func recordsPrefetch(vc *engineapi.VerifierContext) func(context.Context, []shardnode.JournalFetchEntry) func() {
+	if vc == nil {
+		return nil
+	}
+	return func(ctx context.Context, entries []shardnode.JournalFetchEntry) func() {
+		if vc.B1 == nil {
+			return func() {}
+		}
+		source, ok := vc.B1.Records.(interface {
+			Prefetch(context.Context, []recordsfeed.CutKey) func()
+		})
+		if !ok {
+			return func() {}
+		}
+		keys := make([]recordsfeed.CutKey, 0, len(entries))
+		for _, e := range entries {
+			if key, ok := recordsfeed.KeyOfCertificate(e.AuthorizingUC); ok {
+				keys = append(keys, key)
+			}
+		}
+		return source.Prefetch(ctx, keys)
+	}
+}
+
+// attachShardRecordsFeed is attachRecordsFeed with the shard node's durable store and its failure reporting.
+func attachShardRecordsFeed(cfg *b1paired.Config, host recordsfeed.Libp2p, roots []libp2ppeer.AddrInfo, role *rootFreeRole, journal string, log *slog.Logger) error {
+	cuts, err := openRecordCuts(journal)
+	if err != nil {
+		return err
+	}
+	return attachRecordsFeed(cfg, host, roots, role, cuts, func(err error) {
+		log.Error("root-record retention failed: this node no longer mirrors its full record history", "error", err)
+	})
+}
+
+// committedAnchor is the shard's verified committed block: the executor's finalized block. An error or an identity that is not a block
+// hash is an error (never a conversion of an empty reference).
+func committedAnchor(ctx context.Context, executor shardnode.Executor) ([32]byte, uint64, error) {
+	f, ok := executor.(interface {
+		Finalized(context.Context) (shardnode.BlockRef, error)
+	})
+	if !ok {
+		return [32]byte{}, 0, errors.New("the executor reports no committed block")
+	}
+	ref, err := f.Finalized(ctx)
+	if err != nil {
+		return [32]byte{}, 0, err
+	}
+	if len(ref.Hash) != 32 {
+		return [32]byte{}, 0, fmt.Errorf("the executor's committed block has a %d-byte hash", len(ref.Hash))
+	}
+	return [32]byte(ref.Hash), ref.Number, nil
 }

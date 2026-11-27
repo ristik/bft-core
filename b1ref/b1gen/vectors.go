@@ -117,7 +117,7 @@ func (g *gen) certificates(seed string) {
 	f := newFixture(seed, 4)
 	pre := f.pre()
 	q := f.vals[:3] // threshold 4-(4-1)/3 = 3
-	cs := f.build("a", f.round, q, false)
+	cs := f.build("a", f.round, q, true)
 	u := cs.get(1, "")
 
 	seal := u.seal
@@ -132,17 +132,17 @@ func (g *gen) certificates(seed string) {
 	g.ok("cert.unsorted.ok", fam, "claims in no particular order: input order is accepted as supplied", req(claimsOf(all[3], all[0], all[2], all[1])...), pre, "", &seal, nil)
 
 	// repeated IR: the same IR certified again at a later root round.
-	rep := f.build("a", f.round+3, q, false).get(1, "")
+	rep := f.build("a", f.round+3, q, true).get(1, "")
 	g.ok("cert.repeat-ir.ok", fam, "repeat UC: identical input record under a later seal", req(claimOf(rep)), pre, "", &rep.seal, nil)
 
 	// distinct valid quorum subsets of the same statement: different complete seals, each its own quorum group.
-	subA := f.build("a", f.round, f.vals[:3], false).get(1, "")
-	subB := f.build("a", f.round, f.vals[1:], false).get(1, "")
+	subA := f.build("a", f.round, f.vals[:3], true).get(1, "")
+	subB := f.build("a", f.round, f.vals[1:], true).get(1, "")
 	g.ok("cert.subset-a.ok", fam, "quorum subset {0,1,2}", req(claimOf(subA)), pre, "", &subA.seal, nil)
 	g.ok("cert.subset-b.ok", fam, "quorum subset {1,2,3}", req(claimOf(subB)), pre, "", &subB.seal, nil)
 	g.ok("cert.mixed-subsets.ok", fam, "claims whose seals carry different quorum subsets: two seal groups, both valid",
-		req(claimOf(subA), claimOf(cs.get(2, "0")), claimOf(f.build("a", f.round, f.vals[1:], false).get(3, ""))), pre, "", nil, nil)
-	full4 := f.build("a", f.round, f.vals, false)
+		req(claimOf(subA), claimOf(cs.get(2, "0")), claimOf(f.build("a", f.round, f.vals[1:], true).get(3, ""))), pre, "", nil, nil)
+	full4 := f.build("a", f.round, f.vals, true)
 	g.ok("cert.sigcount-3-4.ok", fam, "seals with 3 then 4 signatures: two groups, Q = 7",
 		req(claimOf(subA), claimOf(full4.get(3, ""))), pre, "", nil, nil)
 
@@ -150,7 +150,7 @@ func (g *gen) certificates(seed string) {
 	reseal := func(mod func(*sealSpec)) ucSpec {
 		x := u
 		mod(&x.seal)
-		x.seal.signWith(q, false)
+		x.seal.signWith(q, true)
 		return x
 	}
 	bad := func(id, desc, want string, c claimSpec) { g.ok(id, fam, desc, req(c), pre, want, nil, nil) }
@@ -186,12 +186,12 @@ func (g *gen) certificates(seed string) {
 	bad("cert.neg.epoch", "seal epoch below the genesis epoch, re-signed", "ErrEpochBeforeGenesis", claimOf(x))
 	x = u
 	x.seal.timestamp++
-	bad("cert.neg.signed-byte", "one signed seal byte changed after signing", "ErrSigInvalid", claimOf(x))
+	bad("cert.neg.signed-byte", "one signed seal byte changed after signing: no signature recovers the member's key, no quorum", "ErrQuorum", claimOf(x))
 	x = u
 	x.seal.sigs = append([]entry{}, u.seal.sigs...)
 	other := makeValidator(seed, "intruder-key")
-	x.seal.sigs[0] = entry{u.seal.sigs[0].key, other.sign(u.seal.sigBytes(), false)}
-	bad("cert.neg.signer-key", "a signature made by a key other than the named member's", "ErrSigInvalid", claimOf(x))
+	x.seal.sigs[0] = entry{u.seal.sigs[0].key, other.sign(u.seal.sigBytes(), true)}
+	bad("cert.neg.signer-key", "a signature made by a key other than the named member's: it counts zero, one signer short", "ErrQuorum", claimOf(x))
 	rawReq := rawConcatRequest(f, cs, q)
 	g.ok("cert.neg.raw-concat-fold", fam, "shard fold computed as raw SHA256(left||right) instead of CBOR operands", rawReq, pre, "ErrTreeRoot", nil, nil)
 }
@@ -217,6 +217,6 @@ func rawConcatRequest(f *fixture, cs *certSet, q []validator) []byte {
 	root := imtBuild(leaves)
 	u.seal.root = root.hash
 	u.steps = root.path(key)
-	u.seal.signWith(q, false)
+	u.seal.signWith(q, true)
 	return req(claimOf(u))
 }

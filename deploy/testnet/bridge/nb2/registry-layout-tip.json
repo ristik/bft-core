@@ -1,0 +1,12 @@
+{
+  "address": "0xff00000000000000000000000000000000000002",
+  "format": 2,
+  "native": {
+    "crates/unicity/b1/src/registry.rs": "529b00711213a768cebf626c4c8dbf0a5dc866e18800d46898cd8dec162a33fd"
+  },
+  "sources": {
+    "b1registry/seal-registry.json": "df52dd8c34fb938a7ff9040f51f0107b2ead35748bef5fe73ad4fb83abedfff4",
+    "b1state/storage_spec.go": "8f3f03538401950e4a85fba73bf37c8d98733bbfecfc5df1dffb05e19a20b712",
+    "docs/design/f4a-seal-registry-contract.md": "01765b3573cb789dfcfad63e59f1cc5990caf62c6de9f55408f61566f1daacfd"
+  }
+}

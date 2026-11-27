@@ -372,7 +372,8 @@ p85_handoff() {
 
 p85_install_activation() {
   H3_ROOTS="1 2 3 4 5"
-  q3_install_n 2 || return 1
+  # every root switches into epoch 2 in process (bft-core#1086): the genesis members 1-4 at their own commit, the joiner 5 from an activation a member serves
+  Q3_EXPECT_SWITCHED=${P85_EXPECT_SWITCHED_2-1 2 3 4 5} q3_install_n 2 || return 1
   Q3_COMMIT_SCHEME=1 Q3_TOTAL_WEIGHT=4 Q3_ROOT_QUORUM=3 q3_activation_n 1 2 || return 1   # epoch 2's Commit is the genesis K's (legacy scheme 1, W=4, quorum 3)
   # activated, not acknowledged: the registry has not moved, and custody's last acknowledged assignment is still K's
   h3_registry_is 0 1 || h3_registry_is 0 2 || { echo "the registry moved before J was acknowledged" >&2; return 1; }
@@ -427,7 +428,9 @@ p85_recovery_attempt_loop() {
   h3_retry_handoff 2 p85_recovery_attempt || return 1
   cp "$Q3_DIR/candidate-config-2.json" "$Q3_DIR/recovery-config.json" 2>/dev/null || true
   H3_ROOTS="1 2 3 4 5"
-  q3_install_n 3 || return 1
+  # the staying members of the recovery (K: 1-4) switch into epoch 3 in process at their own commit (bft-core#1086), and so does the leaver (5), into
+  # Following(3): it signs nothing there
+  Q3_EXPECT_SWITCHED=${P85_EXPECT_SWITCHED-1 2 3 4 5} q3_install_n 3 || return 1
   H3_ROOTS="1 2 3 4"
   Q3_TOTAL_WEIGHT=5 Q3_ROOT_QUORUM=4 q3_activation_n 2 3 || return 1   # epoch 3's Commit is J's (W=5, quorum 4)
   local i back="1 2 3"
@@ -801,20 +804,15 @@ p85_run_lane() {
   echo "=== P85 recovery lane: PoS genesis (K = 4 entities) -> primary J = K + joiner -> J stalls -> derived recovery to K ==="
   echo "NOTE: every validator signs through its own signing authority, including the P85 EVM possession proofs (SignElectionPoP) and the delegation possession (SignDelegationPossession)."
   if [ "${ANYAGE_LANE:-0}" = 1 ]; then
-    # the any-age final lane (briefs/anyage-final-lane-plan.md): the same P85 steps with the bridge checkpoints between them
+    # the any-age final lane (briefs/anyage-final-lane-plan.md): the same P85 steps with the registry checkpoints between them (the protocol 6/7
+    # bridge checkpoints L1a/L1b/L1c, the consolidated and the long-history redemptions were removed with that bridge, bft-core#1106)
     source scripts/lib/agg-lib.sh; source scripts/lib/anyage-lib.sh
-    P85_STEPS="p85_baseline anyage_step_setup p85_joiner_nodes p85_joiner_onboard p85_election_reserved p85_proofs anyage_step_l1b p85_handoff p85_install_activation anyage_step_frozen p85_j_stalls p85_recovery p85_resolved anyage_step_l2 anyage_step_l1c p85_restarts p85_epoch_switches"
+    P85_STEPS="p85_baseline anyage_step_setup p85_joiner_nodes p85_joiner_onboard p85_election_reserved p85_proofs p85_handoff p85_install_activation anyage_step_frozen p85_j_stalls p85_recovery p85_resolved anyage_step_l2 p85_restarts p85_epoch_switches"
     if [ "${UTB_LANE:-0}" = 1 ]; then
       # the combined UTB lane (scripts/utb-lane.sh, design 11.4): the same steps with the signed trust-base entry checkpoints between them
       source scripts/lib/utb-lib.sh
-      P85_STEPS="p85_baseline anyage_step_setup utb_step_u1 p85_joiner_nodes p85_joiner_onboard p85_election_reserved p85_proofs anyage_step_l1b utb_step_s1 p85_handoff utb_step_s2 p85_install_activation utb_step_u2 anyage_step_frozen utb_step_u3a p85_j_stalls p85_recovery p85_resolved utb_step_u3b anyage_step_l2 utb_step_u4 utb_step_u4b anyage_step_l1c utb_step_u5 p85_restarts p85_epoch_switches utb_step_final"
+      P85_STEPS="p85_baseline anyage_step_setup utb_step_u1 p85_joiner_nodes p85_joiner_onboard p85_election_reserved p85_proofs utb_step_s1 p85_handoff utb_step_s2 p85_install_activation utb_step_u2 anyage_step_frozen utb_step_u3a p85_j_stalls p85_recovery p85_resolved utb_step_u3b anyage_step_l2 utb_step_u4 utb_step_u4b utb_step_u5 p85_restarts p85_epoch_switches utb_step_final"
     fi
-  fi
-  # a multi-shard aggregator (DNB_AGG_SHARDS=2): one more token over the shards, redeemed through the SDK's consolidation (#526 step 4), right after L1b
-  if [ "${ANYAGE_LANE:-0}" = 1 ] && [ "${aggShards:-1}" -gt 1 ]; then P85_STEPS=${P85_STEPS/anyage_step_l1b/anyage_step_l1b anyage_step_consolidated}; fi
-  # B7 PR 3: the long-history redemption (above every former bridge bound; underfunded first, then funded), right after the consolidated one
-  if [ "${ANYAGE_LANE:-0}" = 1 ] && [ "${B7_LONG_HISTORY:-0}" = 1 ]; then
-    case " $P85_STEPS " in *" anyage_step_consolidated "*) P85_STEPS=${P85_STEPS/anyage_step_consolidated/anyage_step_consolidated anyage_step_long_history} ;; *) P85_STEPS=${P85_STEPS/anyage_step_l1b/anyage_step_l1b anyage_step_long_history} ;; esac
   fi
   # ureth with transaction gossip (ristik/ureth#34): a transaction submitted to one validator only is included by the validator whose turn comes first, before the submitter's own
   if [ "${GOSSIP_LANE:-0}" = 1 ]; then

@@ -45,10 +45,15 @@ func TestMeasureArchiveCountsBytesAndStopsAtDirectoryLimit(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "chunk-00"), []byte("123"), 0600))
 	}
 	require.NoError(t, os.Mkdir(filepath.Join(root, "not-an-archive-record"), 0700))
+	// a packed record (bft-core#1049) is one file in its fan-out directory; a temporary file beside it is not a record
+	packed := filepath.Join(root, "records", "cc")
+	require.NoError(t, os.MkdirAll(packed, 0700))
+	require.NoError(t, os.WriteFile(filepath.Join(packed, "v2-"+strings.Repeat("c", 64)), []byte("1234567"), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(packed, ".writing-1"), []byte("partial"), 0600))
 	complete := measureArchive(root, 3)
-	require.True(t, complete.Complete)
-	require.Equal(t, uint64(2), complete.Records)
-	require.Equal(t, uint64(16), complete.Bytes)
+	require.True(t, complete.Complete, complete.Error)
+	require.Equal(t, uint64(3), complete.Records)
+	require.Equal(t, uint64(23), complete.Bytes)
 	bounded := measureArchive(root, 1)
 	require.False(t, bounded.Complete)
 	require.Equal(t, uint64(1), bounded.Records)
@@ -139,4 +144,27 @@ func TestApplyMetricsMarksMissingRequiredMeasurementsIncomplete(t *testing.T) {
 	applyMetrics(&out, first, last, 2)
 	require.False(t, out.Complete)
 	require.NotEmpty(t, out.Errors)
+}
+
+// §49: the report tool samples up to 256 nodes (a resource bound), and not one more.
+func TestLoadConfigAcceptsExactly256Nodes(t *testing.T) {
+	t.Parallel()
+	cfg := func(n int) string {
+		nodes := make([]string, n)
+		for i := range nodes {
+			nodes[i] = fmt.Sprintf(`{"name":"n%03d","status_url":"http://localhost:%d","metrics_url":"http://localhost:%d","archive_dir":"/tmp/n%03d"}`, i, 10000+i, 10000+i, i)
+		}
+		return `{"nodes":[` + strings.Join(nodes, ",") + `],"samples":2,"interval":"0s"}`
+	}
+	require.Equal(t, 256, maxNodes)
+	dir := t.TempDir()
+	ok := filepath.Join(dir, "ok.json")
+	require.NoError(t, os.WriteFile(ok, []byte(cfg(256)), 0600))
+	got, err := loadConfig(ok)
+	require.NoError(t, err)
+	require.Len(t, got.Nodes, 256)
+	over := filepath.Join(dir, "over.json")
+	require.NoError(t, os.WriteFile(over, []byte(cfg(257)), 0600))
+	_, err = loadConfig(over)
+	require.ErrorContains(t, err, "between 1 and 256")
 }

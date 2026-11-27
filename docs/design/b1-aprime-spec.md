@@ -81,7 +81,7 @@ agree byte-for-byte. SHA256(Update) is the proposed root-input field.
 no BFT provenance or authenticated parent state.
 
 The executable profile commitment is SHA256 of a core deterministic 28-item
-array: the domain `UNICITY_B1_PROFILE`; network, W, deltaEV, deltaHold,
+array (the hook-less form shown; bft-core#1199 inserted the execution revision, so the array is one longer than before): the domain `UNICITY_B1_PROFILE_V2`; the execution revision (unsigned integer, `CurrentExecutionRevision` = 2); network, W, deltaEV, deltaHold,
 systemGas, forcedGas, maxGas, ordinaryCapacity, restGas, companionBytes,
 otherCompanionBytes, K, C_max, token_max; rootGenesisID, executionChainID,
 runtimeHash, compilerHash (executionChainID is u64; the other three are bstr32); seven bounds (64,128,16384,16,262144,24576,32768);
@@ -163,3 +163,26 @@ experimental relation, not an A′ authority source. B1's pruned window cannot
 serve arbitrary historical voting evidence; S1 needs a separately accepted
 committed source and retention horizon before integration. No ambient archive
 lookup or fallback to current keys is introduced.
+
+## Execution revision (bft-core#1199 and #1294)
+
+The profile commits the execution revision: the version of the native EVM semantics the execution client implements. Revision 1 is the post-#1189
+semantics: the pinned Cancun envelope; native `unicity-b1-cert-batch-v2` at 0x0100, `unicity-b1-membership` at 0x0102 and `unicity-b2-sdk3` at 0x0104;
+no 0x0101, 0x0103 or 0x0105; the native validation, gas and hook semantics of ureth b8a50547. A future consensus-affecting change takes a new
+revision even if names and addresses are unchanged. It is not a build SHA.
+
+- Field: `b1state.Profile.ExecutionRevision` (uint64) and `executionRevision` in the profile file, never omitted or defaulted. `Profile.Validate`
+  requires exactly `CurrentExecutionRevision`; zero (legacy or absent) and every other value are refused, as are `bindB1Profile` and the profile readers.
+- Hash: the domain `UNICITY_B1_PROFILE_V2` and the revision right after it. The profile hash flows into `Record.B1ProfileHash`, the genesis commitment,
+  the PDR's `seal_registry_genesis`, the full shard-conf hash and the registry's `b1.profileHash` word, so the genesis block and origin identity change.
+  No registry layout, Update wire format or outer genesis-record domain change.
+- The revision-to-native-set table is one definition, `b1state.ExecutionRevisionNatives`; `engineapi.Adapter.ExpectUnicityPrecompiles(rev)` derives
+  its exact `eth_config` equality check from it, before the node can vote (`shard-node run --b1-profile`).
+- Old binaries: the strict profile reader of a pre-#1199 binary refuses `executionRevision` as an unknown field; with the field stripped it derives the
+  V1 profile hash, which matches nothing in a new generation's genesis, PDR or storage. The new binary refuses a legacy profile outright, and adding
+  revision 1 to a legacy profile cannot make the legacy genesis or PDR match. The generation boundary is enforced from the new side; the frozen product
+  (`scripts/ci/lane-pins.json`, pinned mode) is an unmodified historical binary with its own profile, ureth and contracts.
+- Revision 2 implements [B1 certificate admission at the imported tip](b1-imported-tip.md). Ureth reports
+  `unicity-b1-cert-batch-v2-tip` at 0x0100. The exact precompile map distinguishes revisions 1 and 2 in both directions.
+  The release pins the binaries independently of the map reported at startup.
+- This is a consensus format change: a fresh generation, not an in-place upgrade.

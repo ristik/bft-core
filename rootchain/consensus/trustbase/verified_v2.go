@@ -54,6 +54,7 @@ func (s *TrustBaseStore) InstallV2Projection(projected *types.RootTrustBaseV1) (
 		return nil, err
 	}
 	s.cache[projected.Epoch] = projected
+	s.bumpVerifyGeneration()
 	return projected, nil
 }
 

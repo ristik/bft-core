@@ -374,3 +374,29 @@ func newQuorumCertificate(t *testing.T, voteInfo *drctypes.RoundInfo, commitHash
 		Signatures:       map[string]hex.Bytes{},
 	}, nil
 }
+
+// The timeout weight is summed as signers are added (#982); it must equal a recount of the certificate's signers after every insertion,
+// refused ones (a repeat, a stranger, an overflow) included, for unit counts and for stake weights.
+func TestTimeoutWeightIsTheRecountOfTheCertificate(t *testing.T) {
+	members := []*types.NodeInfo{{NodeID: "a", Stake: 5}, {NodeID: "b", Stake: 1}, {NodeID: "c", Stake: 2}, {NodeID: "d", Stake: 7}}
+	huge := []*types.NodeInfo{{NodeID: "a", Stake: ^uint64(0)}, {NodeID: "b", Stake: 1}}
+	for name, quorum := range map[string]QuorumInfo{
+		"unit":     weightedQuorum{members: members},
+		"weighted": profile2QuorumInfo{QuorumInfo: weightedQuorum{members: members}},
+		"overflow": profile2QuorumInfo{QuorumInfo: weightedQuorum{members: huge}},
+	} {
+		register := NewVoteRegister()
+		for _, author := range []string{"b", "a", "b", "stranger", "c", "a", "d"} {
+			vote := NewDummyTimeoutVote(nil, 4, author)
+			_, weight, err := register.InsertTimeoutVote(vote, quorum)
+			recount, rerr := signedTimeoutWeight(register.timeoutCert.Signatures, quorum)
+			require.NoError(t, rerr, "%s: the certificate holds only counted signers", name)
+			require.Equal(t, recount, register.timeoutWeight.Weight(), "%s after %s", name, author)
+			if err == nil {
+				require.Equal(t, recount, weight, "%s after %s", name, author)
+			}
+		}
+		register.Reset()
+		require.Zero(t, register.timeoutWeight.Weight())
+	}
+}

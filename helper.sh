@@ -1,6 +1,7 @@
 #!/bin/bash
 
-rootPortStart=26662
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scripts/lib/lane-slot.sh" || return 2   # LANE_SLOT (bft-core#1218): every port below is shifted into the lane's slot
+rootPortStart=$((26662+LANE_PORT_OFFSET))
 
 # generate logger configuration file
 function generate_log_configuration() {
@@ -95,11 +96,16 @@ function collect_shard_conf_args() {
   done
 }
 
+# port_listening <port>: something accepts a TCP connection on the port. No lsof needed (the Linux test host has none: an lsof-based wait never ends).
+function port_listening() {
+  (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null || (exec 3<>"/dev/tcp/localhost/$1") 2>/dev/null
+}
+
 function start_root_nodes() {
   # use root node 1 as bootstrap node
   local bootNode=""
   local p2pPort=$rootPortStart
-  local rpcPort=25866
+  local rpcPort=$((25866+LANE_PORT_OFFSET))
   local rpcHost=localhost
   if [ "${M2_PROFILE2:-0}" = 1 ]; then rpcHost=127.0.0.1; fi
 
@@ -119,15 +125,23 @@ function start_root_nodes() {
         # Q3 #50: the coupled runtime from genesis, and the PoA genesis committee's identity records the first coupled handoff names as K
         if [ "${P85_LANE:-0}" = 1 ]; then
           profileArgs+=(--q3-lane)   # the genesis committee's records are the contracts' (--pos-genesis-identities below)
+        elif [ "${VR_LANE:-0}" = 1 ]; then
+          # a VR generation (scripts/lib/vr-lib.sh): the genesis committee is the plan's (StakingID = the VR id), and VR-mode services wired
+          source scripts/lib/vr-lib.sh
+          profileArgs+=(--q3-lane $(vr_root_flags "$i" "http://127.0.0.1:$(( ${rethEthBase:-(18545+LANE_PORT_OFFSET)} + i - 1 ))"))
         else
           [ -s test-nodes/genesis-identities.json ] || q3_prepare_genesis_identities || exit 1
           profileArgs+=(--q3-lane --genesis-identities test-nodes/genesis-identities.json)
         fi
+        # the shards of a B1 deployment (--b1-profile) refuse a committee above the registry's 16 members; the roots admit the handoff with the same bound
+        [ -z "${EVM_B1_PROFILE:-}" ] || profileArgs+=(--b1-registry)
+        # a lane that exercises the install restart itself keeps it from the genesis roots on (bft-core#1086; m2_start_root does the same)
+        [ -z "${M2_IN_PROCESS_SWITCH:-}" ] || profileArgs+=(--in-process-epoch-switch="$M2_IN_PROCESS_SWITCH")
       fi
       if [ "${P85_LANE:-0}" = 1 ]; then
         # proof of stake (briefs/p85-recovery-lane.md): the coupled runtime, the P85 control executor and the genesis committee as K
         source scripts/lib/p85-lib.sh
-        profileArgs+=($(p85_root_flags "$i" "http://127.0.0.1:${rethEthBase:-18545}"))
+        profileArgs+=($(p85_root_flags "$i" "http://127.0.0.1:${rethEthBase:-$((18545+LANE_PORT_OFFSET))}"))
       fi
       if [ "${UTB_LANE:-0}" = 1 ]; then
         # the signed trust-base entry profile from the first voting epoch (scripts/utb-lane.sh): the generated genesis entry and its pin, read from the files
@@ -140,6 +154,10 @@ function start_root_nodes() {
       collect_shard_conf_args
       profileArgs+=(${shardConfArgs[@]+"${shardConfArgs[@]}"})
     fi
+    # ROOT_DEBUG_ROOTS="1 2": those roots log at debug whatever ROOT_LOG_LEVEL says (one root's round/leader lines without 128 debug logs)
+    local rootLogLevel="${ROOT_LOG_LEVEL:-debug}"
+    case " ${ROOT_DEBUG_ROOTS:-} " in *" $i "*) rootLogLevel=debug ;; esac
+    lane_port_preflight "$p2pPort" "root$i p2p" && lane_port_preflight "$rpcPort" "root$i rpc" || exit 1
     UBFT_Q4_SHIM_DIR="${Q4_SHIM_DIR:+$Q4_SHIM_DIR/root$i}" ${Q4_ROOT_BIN:-build/ubft} root-node run \
                     --home test-nodes/root$i \
                     --address "/ip4/127.0.0.1/tcp/$p2pPort" \
@@ -147,17 +165,24 @@ function start_root_nodes() {
                     --trust-base test-nodes/trust-base.json \
                     --rpc-server-address "$rpcHost:$rpcPort" \
                     --log-format text \
-                    --log-level debug \
+                    --log-level "$rootLogLevel" \
                     --metrics prometheus \
                     ${profileArgs[@]+"${profileArgs[@]}"} \
                     >> test-nodes/root$i/debug.log 2>&1 &
     nodePID=$!
     echo "$nodePID" > "test-nodes/root$i/pid"
     # wait until node starts listening on RPC port OR exits because of some error
-    until lsof -i:$rpcPort >/dev/null || ! ps -p $nodePID >/dev/null
+    # bounded (ROOT_START_WAIT_S, default 120): a port that never opens must fail the start, not hang it
+    local waited=0
+    until port_listening "$rpcPort" || ! ps -p $nodePID >/dev/null
     do
       echo -n "."
       sleep 0.200
+      waited=$((waited + 1))
+      if [ "$waited" -ge $(( ${ROOT_START_WAIT_S:-120} * 5 )) ]; then
+        echo "root$i RPC port $rpcPort not listening after ${ROOT_START_WAIT_S:-120} s" >&2
+        exit 1
+      fi
     done
 
     if ! ps -p $nodePID >/dev/null; then
@@ -192,9 +217,10 @@ function start_root_nodes() {
 # them.
 # ============================================================================
 
-evmValidatorPortStart=28111
-evmDisseminationPortStart=28211
-evmRPCPortStart=28311
+evmValidatorPortStart=$((28111+LANE_PORT_OFFSET))
+if [ "${VR_POS16:-0}" = 1 ]; then evmValidatorPortStart=$(lane_port 28030); fi
+evmDisseminationPortStart=$((28211+LANE_PORT_OFFSET))
+evmRPCPortStart=$((28311+LANE_PORT_OFFSET))
 
 # evm_validator_rpc_addr - this validator's metrics/health address, for
 # scripts/chaos-evm.sh's post-restart health checks.
@@ -232,7 +258,29 @@ function init_evm_authorities() {
     chmod 700 "$home"
     nodeID=$(evm_validator_id "$i") || return 1
     build/ubft signing-authority credential --out "$home/operator.cred" || return 1
-    build/ubft signing-authority run --home "$home" \
+    # VR lane under SIGNING=authority: the root member signs the handoff possession proof through the authority's own socket (a credential of its own), and
+    # the authority may sign the one registration or binding the lane's validator command needs (scripts/vr-authority-policy.py)
+    local -a vrArgs=()
+    if [ "${VR_LANE:-0}" = 1 ]; then
+      build/ubft signing-authority credential --out "$home/pop.cred" || return 1
+      if [ "$i" -le "${VR_INCUMBENTS:-4}" ]; then
+        python3 scripts/vr-authority-policy.py "$home/registration-policy.json" binding "$i" "${VR_INCUMBENTS:-4}" || return 1
+      else
+        python3 scripts/vr-authority-policy.py "$home/registration-policy.json" register "$i" || return 1
+      fi
+      vrArgs=(--pop-socket "$home/pop.sock" --pop-credential "$home/pop.cred" --registration-policy "$home/registration-policy.json")
+      # The activation-schedule fence is mandatory on a VR generation (design 7.4), but this authority starts first: the shard configuration and the
+      # genesis are generated from its key. It therefore starts in the pre-genesis enrollment mode (it signs and advances nothing) and enables signing when
+      # provision_authority_fence writes its fence file from the generated b1 profile and execution genesis hash. It verifies its own activation proofs
+      # from the deployment's genesis trust base (advance-with-proof, authority_advance_scope).
+      vrArgs+=(--lineage-genesis-trust-base "$trustBase" --fence-provision-file "$home/fence.json")
+      [ "${UTB_LANE:-0}" != 1 ] || vrArgs+=(--lineage-utb-genesis)
+    fi
+    # the PoS lane pins the election after the genesis (DEVELOPMENT opt-in; production gives --pos-policy at startup and --require-pos-policy)
+    [ "${VR_POS:-0}" != 1 ] || vrArgs+=(--dev-allow-late-pos-policy)
+    # MONITORING=1 (VT-12): the authority serves its read-only status gauges (unicity_authority_*) on loopback, port MON_AUTH_PORT_BASE+i-1
+    [ "${MONITORING:-0}" != 1 ] || vrArgs+=(--metrics-address "127.0.0.1:$(( ${MON_AUTH_PORT_BASE:-29301} + i - 1 ))")
+    build/ubft signing-authority run --home "$home" ${vrArgs[@]+"${vrArgs[@]}"} \
       --client-socket "$home/client.sock" --operator-socket "$home/operator.sock" \
       --operator-credential "$home/operator.cred" --authority-id "paired-evm-$i" \
       --node-id "$nodeID" --network-id 3 --partition-id "$partitionID" --shard-id 0x80 \
@@ -254,9 +302,48 @@ function init_evm_authorities() {
       grep -q 'signing authority running' "$home/authority.log" 2>/dev/null && break
       sleep 0.1
     done
+    # an authority started after the genesis exists (a joiner's) is provisioned at once; the first ones, before it, by the lane once it is generated
+    if [ "${VR_LANE:-0}" = 1 ] && [ -s test-nodes/execution-genesis-hash ]; then provision_authority_fence "$i" || return 1; fi
     build/ubft signing-authority node-info --operator-socket "$home/operator.sock" \
       --operator-credential "$home/operator.cred" --out "$home/node-info.json" || return 1
   done
+}
+
+# provision_authority_fence i - give authority i the fence inputs of the generated VR generation: its b1 profile, the execution genesis hash taken from the
+# generation's own genesis artifacts (test-nodes/execution-genesis-hash, written from `engine-api genesis`, never read back from the endpoint it checks)
+# and its own validator's ureth as the activation source. Signing is enabled once the authority has read the file.
+function provision_authority_fence() {
+  local i=$1 home="test-nodes/auth$1" gen
+  gen=$(cat test-nodes/execution-genesis-hash 2>/dev/null) && [ -n "$gen" ] || { echo "authority $i: no execution genesis hash to provision" >&2; return 1; }
+  printf '{"b1Profile":"%s","activationSourceUrl":"http://127.0.0.1:%s","executionGenesisHash":"%s"}\n' \
+    "${EVM_B1_PROFILE:-test-nodes/b1-profile.json}" "$(lane_reth_eth_port "$i")" "$gen" >"$home/fence.json.tmp" && mv "$home/fence.json.tmp" "$home/fence.json" || return 1
+  for _ in $(seq 1 100); do
+    grep -q 'fence provisioned' "$home/authority.log" 2>/dev/null && return 0
+    sleep 0.1
+  done
+  echo "authority $i did not enable signing after its fence was provisioned" >&2
+  return 1
+}
+
+# authority_advance_scope i rootEpoch trustBaseFile shardConf - move authority i into root epoch rootEpoch. A VR generation's authority verifies the root's
+# activation bundles itself (advance-with-proof) and decides its activation fence from their checkpoints, so it is handed the bundles of every epoch from 2
+# (the ones it holds are replays); other lanes keep the operator-trusted advance-epoch.
+function authority_advance_scope() {
+  local i=$1 epoch=$2 trustFile=$3 conf=$4 home="test-nodes/auth$1" e r roots="" f
+  local -a proofs=()
+  if [ "${VR_LANE:-0}" != 1 ]; then
+    build/ubft signing-authority advance-epoch --operator-socket "$home/operator.sock" --operator-credential "$home/operator.cred" \
+      --trust-base "$trustFile" --shard-conf "$conf"
+    return
+  fi
+  for r in ${H3_ROOTS:-1 2 3}; do roots="${roots:+$roots,}http://127.0.0.1:$(m2_rpc_port "$r")"; done
+  for e in $(seq 2 "$epoch"); do
+    f="$home/bundle-epoch$e.bin"
+    build/ubft q3 proof-envelope --root-rpc "$roots" --epoch "$e" --out "$f" || return 1
+    proofs+=(--proof "$f")
+  done
+  build/ubft signing-authority advance-with-proof --operator-socket "$home/operator.sock" --operator-credential "$home/operator.cred" \
+    --client-socket "$home/client.sock" --out "$home/client.cred" "${proofs[@]}"
 }
 
 # Optional $3/$4 enroll first..n against another configuration (default: validators 1..n against the genesis shard configuration).
@@ -517,6 +604,8 @@ function archive_replicas_of() {
 function start_one_evm_validator() {
   local i=$1 n=$2 partitionID=$3 rootBoot=$4 executor=$5 exposeRPC=${6:-}
   local port=$((evmValidatorPortStart + i - 1))
+  lane_port_preflight "$port" "shard node $i p2p" || return 1
+  [ "${6:-}" != rpc ] || lane_port_preflight "$((evmRPCPortStart + i - 1))" "shard node $i rpc" || return 1
 
   local bootnodes="$rootBoot"
   if [ "$#" -ge 7 ]; then
@@ -579,6 +668,10 @@ function start_one_evm_validator() {
   local rpcArgs=()
   if [ "$exposeRPC" == "rpc" ]; then
     rpcArgs=(--rpc-server-address "$(evm_validator_rpc_addr "$i")")
+    # Both VT-07 schedule checks and VT-12 monitoring scrape this shard RPC address.
+    if [ "${VR_SCHEDULE:-0}" != 0 ] || [ "${MONITORING:-0}" = 1 ]; then
+      rpcArgs+=(--metrics prometheus)
+    fi
   fi
 
   local signingArgs=()
@@ -622,6 +715,7 @@ function start_one_evm_validator() {
     ${executorArgs[@]+"${executorArgs[@]}"} ${rpcArgs[@]+"${rpcArgs[@]}"} \
     ${signingArgs[@]+"${signingArgs[@]}"} \
     ${profileArgs[@]+"${profileArgs[@]}"} ${layoutArgs[@]+"${layoutArgs[@]}"} \
+    ${EVM_EXTRA_ARGS:-} \
     >> "test-nodes/evm$i/debug.log" 2>&1 &
   echo $! > "test-nodes/evm$i/pid"
 }
@@ -662,6 +756,18 @@ function owned_pids() {
     owned_pid "$p" "$1" && echo "$p"
   done
   return 0
+}
+
+# reth_node_pattern [binary] matches the node subcommand of a resolved client. A supervisor
+# that did not resolve its children's executables can match stock and commit-pinned clients.
+function reth_node_pattern() {
+  local binary=${1:-}
+  if [ -n "$binary" ]; then
+    binary=$(printf '%s' "$binary" | sed 's/[][(){}.^$*+?|\\]/\\&/g')
+    printf '(^|[[:space:]])%s[[:space:]]+node([[:space:]]|$)\n' "$binary"
+  else
+    printf '(^|[[:space:]/])(reth|unicity-reth(-[0-9a-f]{40}-[[:alnum:]_-]+)?)[[:space:]]+node([[:space:]]|$)\n'
+  fi
 }
 
 # stop_pidfile <pidfile> <command-regex> [signal] signals the process a pid file records only if it

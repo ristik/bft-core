@@ -197,7 +197,7 @@ func (f *fixture) setParent(shardRound uint64, pdr *types.PartitionDescriptionRe
 		Timestamp: 1000, Epoch: si.TR.Epoch}
 	si.LastCR = &certification.CertificationResponse{Partition: 1, Technical: si.TR, UC: types.UnicityCertificate{Version: 1, InputRecord: ir,
 		UnicityTreeCertificate: &types.UnicityTreeCertificate{Version: 1, Partition: 1},
-		UnicitySeal:            &types.UnicitySeal{Version: 1, NetworkID: fxNetwork, RootChainRoundNumber: 10, Timestamp: 1000, Hash: []byte{4}}}}
+		UnicitySeal:            &types.UnicitySeal{Version: 1, NetworkID: fxNetwork, RootChainRoundNumber: 10, Epoch: fxRootEp, Timestamp: 1000, Hash: []byte{4}}}}
 	require.NoError(f.t, si.LastCR.SetTechnicalRecord(si.TR))
 	require.NoError(f.t, si.LastCR.IsValid(), "premise: the last response is one a rejection can carry")
 	f.si, f.parentID = si, bytes.Repeat([]byte{0x9D, byte(shardRound)}, 16)
@@ -521,9 +521,9 @@ func TestCollectionOnlyViewNeverCertifies(t *testing.T) {
 	v := f.view()
 	co := collectionOnly{v}
 	ctx := context.Background()
-	require.NoError(t, f.node.collectUnderView(ctx, f.request(1, v, 9, nil), co))
+	require.NoError(t, f.node.collectUnderView(ctx, f.request(1, v, 9, nil), co, nil, &heldOrigin{}, 0))
 	require.Equal(t, 1, f.counted(), "requests are counted under a collection-only view")
-	require.NoError(t, f.node.collectUnderView(ctx, f.request(0, v, 9, nil), co), "the quorum is reached")
+	require.NoError(t, f.node.collectUnderView(ctx, f.request(0, v, 9, nil), co, nil, &heldOrigin{}, 0), "the quorum is reached")
 	require.Empty(t, f.certs(), "but a collection-only view is never a certification capability")
 	require.Zero(t, f.counted(), "the decided outcome was not kept")
 	// from the activation round on the same requests are counted and certified

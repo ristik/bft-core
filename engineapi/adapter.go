@@ -45,6 +45,8 @@ var (
 	ErrCompanionUnauthenticated = errors.New("engineapi: seal companion failed VerifyCompanionWitnesses")
 	// ErrParentWitnessUnavailable means the exact certified parent's local RPC proof is not available.
 	ErrParentWitnessUnavailable = errors.New("engineapi: v2 parent registry witness unavailable")
+	// ErrFeeProofUnavailable means the local endpoint did not provide authenticated parent fees.
+	ErrFeeProofUnavailable = errors.New("engineapi: parent fee proof unavailable")
 )
 
 // Adapter implements shardnode.Executor by driving reth over the Engine
@@ -52,12 +54,13 @@ var (
 // everything else (types.go, client.go, params.go, codec.go) is pure
 // Engine-API-facing machinery Adapter composes.
 type Adapter struct {
-	// unicityPrecompiles: the execution profile check expects the B1/B2 native precompiles (ExpectUnicityPrecompiles).
-	unicityPrecompiles bool
+	// unicityPrecompiles: the native precompiles of the B1 profile's execution revision the profile check expects (ExpectUnicityPrecompiles); nil means none.
+	unicityPrecompiles map[string]string
 	engine             *Client
 	eth                *EthClient
 	log                *slog.Logger
 	feeCollector       [20]byte
+	resolveCollector   FeeCollectorResolver
 	sealPinMu          sync.Mutex
 	sealPinned         bool
 	sealID             [32]byte
@@ -84,6 +87,7 @@ type Adapter struct {
 // on rather than from anything ureth returns.
 type buildContext struct {
 	payloadID    data
+	collector    [20]byte
 	b1Update     []byte
 	b1Records    []byte
 	b1Input      []byte
@@ -96,11 +100,15 @@ type buildContext struct {
 	technicalRecord *certification.TechnicalRecord
 }
 
+// FeeCollectorResolver authenticates the collector for a child of the certified parent.
+type FeeCollectorResolver func(context.Context, *EthClient, shardnode.BlockRef) ([20]byte, error)
+
 type Config struct {
-	EngineURL    string // authenticated engine_* endpoint, e.g. http://localhost:8551
-	EthURL       string // plain eth_* endpoint, e.g. http://localhost:8545
-	Secret       Secret
-	FeeCollector [20]byte // configured execution fee recipient; must match the client's fee collector
+	EngineURL        string // authenticated engine_* endpoint, e.g. http://localhost:8551
+	EthURL           string // plain eth_* endpoint, e.g. http://localhost:8545
+	Secret           Secret
+	FeeCollector     [20]byte             // configured genesis fee recipient
+	ResolveCollector FeeCollectorResolver // nil uses the fixed collector on pre-VR generations
 
 	// Verifier is the derivation context Adapter.Build authenticates the authorizing certificate
 	// against. It is required to build through the seal siblings and is deliberately nil for an
@@ -261,13 +269,14 @@ func (a *Adapter) HistoricalContext(ctx context.Context) context.Context {
 
 func NewAdapter(cfg Config, log *slog.Logger) *Adapter {
 	a := &Adapter{
-		engine:       NewClient(cfg.EngineURL, cfg.Secret),
-		eth:          NewEthClient(cfg.EthURL),
-		log:          log,
-		feeCollector: cfg.FeeCollector,
-		verifier:     cfg.Verifier,
-		pair:         cfg.Pair,
-		pending:      make(map[shardnode.BuildID]buildContext),
+		engine:           NewClient(cfg.EngineURL, cfg.Secret),
+		eth:              NewEthClient(cfg.EthURL),
+		log:              log,
+		feeCollector:     cfg.FeeCollector,
+		resolveCollector: cfg.ResolveCollector,
+		verifier:         cfg.Verifier,
+		pair:             cfg.Pair,
+		pending:          make(map[shardnode.BuildID]buildContext),
 	}
 	return a
 }
@@ -574,6 +583,13 @@ func (a *Adapter) Commit(ctx context.Context, hash shardnode.Hash) (shardnode.St
 
 // deriveV2 authenticates the bound observation before reading a parent witness.
 // The parent subject is always the certified BlockRef supplied by the round.
+// sourceUnavailable reports an error caused by a source that is not available yet (recordsfeed.ErrUnavailable says Unavailable()):
+// the block is not judged, it is not invalid.
+func sourceUnavailable(err error) bool {
+	var u interface{ Unavailable() bool }
+	return errors.As(err, &u) && u.Unavailable()
+}
+
 func (a *Adapter) deriveV2(ctx context.Context, p shardnode.RoundParams, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) (rootinput.ResultV2, error) {
 	rootEpoch := a.verifier.RootEpoch
 	a.transitionMu.RLock()
@@ -618,6 +634,14 @@ func (a *Adapter) deriveV2(ctx context.Context, p shardnode.RoundParams, uc *typ
 	}
 	if err != nil {
 		return rootinput.ResultV2{}, err
+	}
+	if !historical && p.Activation.Epoch != 0 {
+		authority, ok := a.verifier.EpochAuthority.(interface {
+			RootActivationGate() *shardnode.RootActivationGate
+		})
+		if !ok || authority.RootActivationGate().Current() != p.Activation {
+			return rootinput.ResultV2{}, shardnode.ErrRootActivationSuperseded
+		}
 	}
 	var snapshot registryproof.Snapshot
 	var proof shardnode.ProofEvidence
@@ -694,12 +718,31 @@ func (a *Adapter) PrepareBuild(ctx context.Context, p shardnode.RoundParams) (fu
 	if err != nil {
 		return nil, fmt.Errorf("engineapi: deriving root input for round %d: %w", p.Round, err)
 	}
+	collector, err := a.collectorFor(ctx, p.Parent)
+	if err != nil {
+		return nil, fmt.Errorf("%w: resolving parent fee state: %w", shardnode.ErrBuildUnavailable, err)
+	}
 	return func(runCtx context.Context) (shardnode.BuildID, error) {
-		return a.buildDerived(runCtx, p, derived)
+		return a.buildDerived(runCtx, p, derived, collector)
 	}, nil
 }
 
-func (a *Adapter) buildDerived(ctx context.Context, p shardnode.RoundParams, derived rootinput.ResultV2) (shardnode.BuildID, error) {
+func (a *Adapter) collectorFor(ctx context.Context, parent shardnode.BlockRef) ([20]byte, error) {
+	if a.resolveCollector == nil {
+		return a.feeCollector, nil
+	}
+	collector, err := a.resolveCollector(ctx, a.eth, parent)
+	if err != nil {
+		// Local proof acquisition and validation cannot decide the validity of a candidate.
+		if a.log != nil {
+			a.log.WarnContext(ctx, "local parent fee proof unavailable", "parent", fmt.Sprintf("%x", parent.Hash), "error", err)
+		}
+		return [20]byte{}, fmt.Errorf("%w: %w", ErrFeeProofUnavailable, err)
+	}
+	return collector, nil
+}
+
+func (a *Adapter) buildDerived(ctx context.Context, p shardnode.RoundParams, derived rootinput.ResultV2, collector [20]byte) (shardnode.BuildID, error) {
 	parentHash32, err := toData32(p.Parent.Hash)
 	if err != nil {
 		return "", fmt.Errorf("engineapi: build: %w", err)
@@ -709,7 +752,7 @@ func (a *Adapter) buildDerived(ctx context.Context, p shardnode.RoundParams, der
 	if err != nil {
 		return "", fmt.Errorf("engineapi: looking up parent header %x: %w", parentHash32, err)
 	}
-	attrs, err := DeriveAttributesV2Checked(derived.Input, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)}, a.feeCollector)
+	attrs, err := DeriveAttributesV2Checked(derived.Input, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)}, collector)
 	if err != nil {
 		return "", fmt.Errorf("engineapi: build: parent %x: %w", parentHash32, err)
 	}
@@ -740,6 +783,7 @@ func (a *Adapter) buildDerived(ctx context.Context, p shardnode.RoundParams, der
 	a.mu.Lock()
 	a.pending[id] = buildContext{
 		payloadID: *resp.PayloadID,
+		collector: collector,
 		b1Update:  bytes.Clone(derived.B1Update), b1Records: bytes.Clone(derived.RecordsImport), b1Input: bytes.Clone(derived.Encoded), b1Commitment: derived.Commitment,
 		parent:          p.Parent,
 		certificate:     derived.Observation.Certificate(),
@@ -774,6 +818,10 @@ func (a *Adapter) Seal(ctx context.Context, id shardnode.BuildID) (shardnode.Blo
 	resp, err := a.engine.GetPayloadWithSealV1(ctx, bc.payloadID)
 	if err != nil {
 		return shardnode.Block{}, fmt.Errorf("engineapi: getPayloadWithSealV1: %w", err)
+	}
+
+	if a.resolveCollector != nil && resp.ExecutionPayload.FeeRecipient != data20(bc.collector) {
+		return shardnode.Block{}, fmt.Errorf("%w: built payload has wrong VR fee collector", ErrCompanionBinding)
 	}
 
 	if len(bc.b1Update) > 0 && (uint64(resp.ExecutionPayload.GasLimit) != a.verifier.B1.Profile.MaxGas || !bytes.Equal(resp.SealCompanion.B1Update, bc.b1Update) || !bytes.Equal(resp.SealCompanion.RootRecords, bc.b1Records) || !bytes.Equal(resp.SealCompanion.RootInput, bc.b1Input) || !bytes.Equal(resp.ExecutionPayload.ExtraData, bc.b1Commitment[:])) {
@@ -871,11 +919,18 @@ func (a *Adapter) CheckBlockBinding(ctx context.Context, b shardnode.Block, p sh
 	if err != nil {
 		return fmt.Errorf("%w: parent header: %w", shardnode.ErrBlockBindingUnavailable, err)
 	}
-	attrs, err := DeriveAttributesV2Checked(input.Input, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)}, a.feeCollector)
+	collector, err := a.collectorFor(ctx, p.Parent)
+	if err != nil {
+		return fmt.Errorf("%w: resolving parent fee state: %w", shardnode.ErrBlockBindingUnavailable, err)
+	}
+	attrs, err := DeriveAttributesV2Checked(input.Input, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)}, collector)
 	if err != nil {
 		return fmt.Errorf("%w: parent header: %w", shardnode.ErrBlockBindingUnavailable, err)
 	}
 	payload := envelope.ExecutionPayload
+	if a.resolveCollector != nil && payload.FeeRecipient != attrs.SuggestedFeeRecipient {
+		return fmt.Errorf("%w: recovered payload has wrong VR fee collector", ErrCompanionBinding)
+	}
 	if a.verifier.B1 != nil && uint64(payload.GasLimit) != a.verifier.B1.Profile.MaxGas {
 		return b1paired.ErrAdmission
 	}
@@ -939,7 +994,7 @@ func (a *Adapter) Verify(ctx context.Context, b shardnode.Block, p shardnode.Rou
 				if _, err := a.deriveV2(ctx, p, p.AuthorizingCertificate, p.AuthorizingTechnicalRecord); err != nil {
 					if isParentWitnessAcquisitionError(err) {
 						if errors.Is(err, ErrParentWitnessUnavailable) {
-							return shardnode.StatusSyncing, transientParentWitnessError{err}
+							return shardnode.StatusSyncing, transientProofError{err}
 						}
 						return shardnode.StatusSyncing, err
 					}
@@ -988,9 +1043,15 @@ func (a *Adapter) Verify(ctx context.Context, b shardnode.Block, p shardnode.Rou
 	if err != nil {
 		if isParentWitnessAcquisitionError(err) {
 			if errors.Is(err, ErrParentWitnessUnavailable) {
-				return shardnode.StatusSyncing, transientParentWitnessError{err}
+				return shardnode.StatusSyncing, transientProofError{err}
 			}
 			return shardnode.StatusSyncing, fmt.Errorf("engineapi: acquiring parent witness for round %d: %w", p.Round, err)
+		}
+		if sourceUnavailable(err) {
+			// The root log the import is derived from is not available here yet (a non-active follower asks only mirrors, which may not
+			// hold it yet): this node cannot judge the block, it has not found it invalid. Reported as syncing, so recovery retries
+			// instead of stopping on a finalized-branch conflict (bft-core#1067, case 1).
+			return shardnode.StatusSyncing, fmt.Errorf("engineapi: the root log for round %d is not available yet: %w", p.Round, err)
 		}
 		return shardnode.StatusInvalid, fmt.Errorf("engineapi: authenticating the bound certificate for round %d: %w", p.Round, err)
 	}
@@ -1018,12 +1079,17 @@ func (a *Adapter) Verify(ctx context.Context, b shardnode.Block, p shardnode.Rou
 		return shardnode.StatusSyncing, fmt.Errorf("engineapi: looking up parent header for verification: %w", err)
 	}
 
+	collector, err := a.collectorFor(ctx, p.Parent)
+	if err != nil {
+		return shardnode.StatusSyncing, transientProofError{err}
+	}
+
 	// Only now, with the input authenticated, are the execution parameters computable: they are functions of
 	// the bound certificate's root round and reference time, both read from derived.Input. The payload
 	// fields are checked last of the checks, so a block that fails authentication is reported as an
 	// authentication failure rather than as a field divergence. A divergence stays StatusInvalid with
 	// the local warning, not an error return, exactly as before the reordering.
-	attrs, err := DeriveAttributesV2Checked(derived.Input, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)}, a.feeCollector)
+	attrs, err := DeriveAttributesV2Checked(derived.Input, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)}, collector)
 	if err != nil {
 		return shardnode.StatusInvalid, fmt.Errorf("engineapi: parent header timestamp: %w", err)
 	}
@@ -1033,7 +1099,7 @@ func (a *Adapter) Verify(ctx context.Context, b shardnode.Block, p shardnode.Rou
 		SuggestedFeeRecipient: envelope.ExecutionPayload.FeeRecipient,
 		Withdrawals:           envelope.ExecutionPayload.Withdrawals,
 	}
-	if err := VerifyPayloadFieldsV2(derived.Input, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)}, a.feeCollector, claimed); err != nil {
+	if err := VerifyPayloadFieldsV2(derived.Input, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)}, collector, claimed); err != nil {
 		if a.log != nil {
 			a.log.WarnContext(ctx, "rejecting round before execution: attributes diverge from local derivation",
 				slog.String("status", "INVALID"), slog.String("err", err.Error()))

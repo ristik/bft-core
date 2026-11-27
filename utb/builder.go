@@ -23,8 +23,8 @@ import (
 	"github.com/unicitynetwork/bft-core/utbentry"
 )
 
-// MaxMembers is the deployment's committee ceiling (the admitted 16-member profile). go-base's decoder bound is larger; a larger committee is never
-// admitted through the wire cap. A future profile raises this deliberately.
+// MaxMembers is the committee ceiling of an entry built here: utbentry.MaxMembers, 256 (owner §49), go-base's decoder bound. A committee above it is never
+// admitted.
 const MaxMembers = utbentry.MaxMembers
 
 var (

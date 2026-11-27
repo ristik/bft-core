@@ -100,7 +100,7 @@ func newFollowup(t *testing.T, votedRound uint64, change func(state *abdrc.State
 	}
 	f.state = state
 	var err error
-	f.tc, err = cm.blockStore.GetLastTC()
+	f.tc, err = cm.blockStore().GetLastTC()
 	require.NoError(t, err)
 	require.NotNil(t, f.tc)
 
@@ -125,7 +125,7 @@ func newFollowup(t *testing.T, votedRound uint64, change func(state *abdrc.State
 	}()
 
 	// the node is at its genesis (a fresh database on bolt), has not voted in round 4 (the durable vote state is monotonic)
-	blocks, err := cm.blockStore.GetDB().LoadBlocks()
+	blocks, err := cm.blockStore().GetDB().LoadBlocks()
 	require.NoError(t, err)
 	var genesis *storage.ExecutedBlock
 	for _, b := range blocks {
@@ -146,7 +146,7 @@ func newFollowup(t *testing.T, votedRound uint64, change func(state *abdrc.State
 	f.db = &spyDB{PersistentStore: behindDB}
 	bs, err := storage.New(cm.params.HashAlgorithm, f.db, cm.orchestration, cm.log)
 	require.NoError(t, err)
-	cm.blockStore = bs
+	cm.storeRef.Store(bs)
 	cm.irReqVerifier, err = NewIRChangeReqVerifier(cm.params, bs)
 	require.NoError(t, err)
 	cm.pacemaker.Reset(ctx, bs.GetHighQc().GetRound(), nil, nil)
@@ -159,7 +159,9 @@ func newFollowup(t *testing.T, votedRound uint64, change func(state *abdrc.State
 func (f *followup) signed(block *drctypes.BlockData, tc *drctypes.TimeoutCert) *abdrc.ProposalMsg {
 	f.t.Helper()
 	prop := &abdrc.ProposalMsg{Block: block, LastRoundTc: tc}
-	require.NoError(f.t, f.cm.safety.Sign(block.Epoch, prop))
+	// Build the peer's fixture proposal without reserving a slot for the
+	// manager under test. The fixture can reconstruct an older proposal.
+	require.NoError(f.t, prop.Sign(f.cm.safety.signer))
 	return prop
 }
 
@@ -202,7 +204,7 @@ func (f *followup) emittedCount() int {
 
 func (f *followup) persisted(round uint64) *storage.ExecutedBlock {
 	f.t.Helper()
-	blocks, err := f.cm.blockStore.GetDB().LoadBlocks()
+	blocks, err := f.cm.blockStore().GetDB().LoadBlocks()
 	require.NoError(f.t, err)
 	for _, b := range blocks {
 		if b.GetRound() == round {
@@ -236,10 +238,10 @@ func Test_Followup_QCBindsTheTimestampOfTheRecoveredTip(t *testing.T) {
 			require.EqualValues(t, 3, f.cm.safety.storage.GetHighestVotedRound())
 			require.Empty(t, f.db.written())
 
-			tip, err := f.cm.blockStore.Block(4)
+			tip, err := f.cm.blockStore().Block(4)
 			require.NoError(t, err)
 			require.Nil(t, tip.Qc)
-			highQc := f.cm.blockStore.GetHighQc()
+			highQc := f.cm.blockStore().GetHighQc()
 			emitted := f.emittedCount()
 			require.False(t, f.cm.recovery.InRecovery())
 
@@ -247,10 +249,10 @@ func Test_Followup_QCBindsTheTimestampOfTheRecoveredTip(t *testing.T) {
 			err = f.cm.onProposalMsg(f.ctx, f.proposal5())
 			require.ErrorContains(t, err, "proposal triggers recovery")
 			require.True(t, f.cm.recovery.InRecovery(), "the QC starts a recovery")
-			tip, err = f.cm.blockStore.Block(4)
+			tip, err = f.cm.blockStore().Block(4)
 			require.NoError(t, err)
 			require.Nil(t, tip.Qc, "the QC was not attached to the local block")
-			require.Same(t, highQc, f.cm.blockStore.GetHighQc(), "the high QC did not change")
+			require.Same(t, highQc, f.cm.blockStore().GetHighQc(), "the high QC did not change")
 			require.Equal(t, emitted, f.emittedCount(), "no certificates were emitted")
 			require.Empty(t, f.votes(), "no vote on top of that QC")
 			require.Empty(t, f.db.written())
@@ -258,23 +260,23 @@ func Test_Followup_QCBindsTheTimestampOfTheRecoveredTip(t *testing.T) {
 			stored := f.persisted(4)
 			require.NotNil(t, stored)
 			require.Nil(t, stored.Qc, "nothing was persisted for the QC")
-			root, err := f.cm.blockStore.GetState()
+			root, err := f.cm.blockStore().GetState()
 			require.NoError(t, err)
 			require.EqualValues(t, 1, root.CommittedHead.GetRound(), "nothing was committed")
 
 			// the repair: the honest state replaces the inconsistent one, the QC certifies the block, the vote follows
 			require.NoError(t, f.cm.onStateResponse(f.ctx, clone(t, f.honest)))
-			tip, err = f.cm.blockStore.Block(4)
+			tip, err = f.cm.blockStore().Block(4)
 			require.NoError(t, err)
 			require.NotNil(t, tip.Qc)
-			require.EqualValues(t, 4, f.cm.blockStore.GetHighQc().GetRound())
+			require.EqualValues(t, 4, f.cm.blockStore().GetHighQc().GetRound())
 			require.Len(t, f.votes(), 1)
 			require.EqualValues(t, 5, f.votes()[0].Message.(*abdrc.VoteMsg).VoteInfo.RoundNumber)
 			require.EqualValues(t, 5, f.cm.safety.storage.GetHighestVotedRound())
 			require.NotNil(t, f.persisted(4).Qc)
 
 			// the served state passes the verification and the staged recovery of another node
-			served, err := f.cm.blockStore.GetState()
+			served, err := f.cm.blockStore().GetState()
 			require.NoError(t, err)
 			require.NoError(t, served.Verify(crypto.SHA256, f.cm.trustBase.Load(), f.cm.trustBaseStore.GenesisPin()))
 			require.NoError(t, storage.ValidateRecoveryState(crypto.SHA256, clone(t, served), served.CommittedHead.GetRound(), f.cm.orchestration, f.peerDB,
@@ -378,7 +380,7 @@ func Test_Followup_LeaderOfTheRoundBeforeTheRecoveryVote(t *testing.T) {
 				require.ErrorContains(t, err, "to be leader of the round 4")
 			}
 			// not executed, not signed, not stored, not sent
-			_, err = f.cm.blockStore.Block(4)
+			_, err = f.cm.blockStore().Block(4)
 			require.Error(t, err, "the proposal was not executed")
 			require.Empty(t, f.votes())
 			require.Empty(t, f.db.written())
@@ -390,7 +392,7 @@ func Test_Followup_LeaderOfTheRoundBeforeTheRecoveryVote(t *testing.T) {
 			// the installed recovery is complete and the buffer is housekept
 			require.False(t, f.cm.recovery.InRecovery())
 			require.Empty(t, f.cm.voteBuffer)
-			require.EqualValues(t, 2, f.cm.blockStore.GetHighQc().GetRound())
+			require.EqualValues(t, 2, f.cm.blockStore().GetHighQc().GetRound())
 		})
 	}
 
@@ -442,7 +444,7 @@ func Test_Followup_QCTupleOnTheLivePath(t *testing.T) {
 		require.NoError(t, f.cm.checkRecoveryNeeded(f.qc4))
 		err = f.cm.onProposalMsg(f.ctx, f.proposal5())
 		require.NotContains(t, fmt.Sprint(err), "triggers recovery")
-		tip, err := f.cm.blockStore.Block(4)
+		tip, err := f.cm.blockStore().Block(4)
 		require.NoError(t, err)
 		require.NotNil(t, tip.Qc, "accepted: the known limitation, not an authentication of the author")
 	})
@@ -540,7 +542,7 @@ func Test_Followup_LastVoteOfTheRecoveryVote(t *testing.T) {
 		require.Equal(t, sent.VoteInfo.RoundNumber, restored.VoteInfo.RoundNumber)
 		require.Equal(t, sent.LedgerCommitInfo.PreviousHash, restored.LedgerCommitInfo.PreviousHash)
 		// a restart reads the last vote from the database and resets the pacemaker with it
-		f.cm.pacemaker.Reset(f.ctx, f.cm.blockStore.GetHighQc().GetRound(), f.tc, read)
+		f.cm.pacemaker.Reset(f.ctx, f.cm.blockStore().GetHighQc().GetRound(), f.tc, read)
 		require.Equal(t, sent.Signature, f.cm.pacemaker.GetVoted().Signature)
 		require.EqualValues(t, 4, f.cm.pacemaker.GetVoted().VoteInfo.RoundNumber)
 	})

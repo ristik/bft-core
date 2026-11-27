@@ -16,9 +16,12 @@ import (
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/m2contract"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
+	"github.com/unicitynetwork/bft-core/q3active"
+	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	"github.com/unicitynetwork/bft-core/trusthistorystore"
 	"github.com/unicitynetwork/bft-core/utb"
 	basetypes "github.com/unicitynetwork/bft-go-base/types"
@@ -46,84 +49,24 @@ func (x *ConsensusManager) InstallEpochGenesis(proof handoff.OldCommitProof, hea
 // only then is the anchor installed.
 func (x *ConsensusManager) InstallEpochBundle(incoming handoffdelivery.Bundle) (*rctypes.EpochAnchor, error) {
 	proof, head, body, candidate := incoming.Proof, incoming.Snapshot, incoming.Body, incoming.Candidate
-	if x.params.NetworkProfileVersion != storage.ProfileHandoff || x.pacemaker.GetCurrentRound() != 0 {
+	if x.params.NetworkProfileVersion != storage.ProfileHandoff || x.pacemaker.GetCurrentRound() != 0 || x.workerRunning.Load() {
 		return nil, errors.New("epoch genesis requires stopped profile-2 consensus")
 	}
-	if !x.recoveryProfile2 || x.recoveryHistory == nil {
-		return nil, fmt.Errorf("epoch genesis requires profile 2 recovery: %w", abdrc.ErrRecoveryEpoch)
-	}
-	old, err := x.trustBaseStore.GetByEpoch(proof.Record.Epoch)
-	if err != nil {
-		return nil, fmt.Errorf("old root trust lineage: %w", err)
-	}
-	prior, err := x.recoveryHistory.ByEpoch(proof.Record.Epoch)
-	if err != nil {
-		return nil, fmt.Errorf("old root trust lineage: %w", err)
-	}
-	var predecessor []byte
-	if prior.V1 != nil {
-		predecessor, err = old.Hash(crypto.SHA256)
-	} else if prior.V2 != nil {
-		predecessor = prior.BodyID[:]
-	} else {
-		return nil, errors.New("handoff predecessor has no verified trust body")
-	}
-	if err != nil || !bytes.Equal(predecessor, proof.Record.PredecessorBodyID) {
-		return nil, errors.New("handoff predecessor differs from verified old trust base")
-	}
-	oldID, err := old.Hash(crypto.SHA256)
+	c, err := x.checkEpochBundle(incoming)
 	if err != nil {
 		return nil, err
 	}
-	// the old epoch's commit QC is verified by that epoch's own rule, in the wire form the epoch signs with
-	oldSigning, err := x.trustBaseStore.SigningConfig(proof.Record.Epoch)
-	if err != nil {
-		return nil, fmt.Errorf("old root trust lineage: %w", err)
-	}
-	verified, err := handoff.VerifyOldCommitProofSigning(proof, old, oldSigning)
-	if err != nil {
-		return nil, fmt.Errorf("old handoff commit proof: %w", err)
-	}
-	v := evmroot.VerifiedHandoff{RecordID: bytes.Clone(verified.RecordID[:]), Root: bytes.Clone(verified.StateRoot[:]),
-		ControlDigest: bytes.Clone(verified.ControlDigest[:]), OrderRound: verified.OrderRound,
-		CommitSealRound: verified.CommitSealRound, Epoch: verified.SignerEpoch, Record: proof.Record}
-	g, err := evmroot.DeriveEpochGenesis(v, body)
-	if err != nil {
-		return nil, fmt.Errorf("derive epoch genesis: %w", err)
-	}
-	for _, member := range body.Members {
-		if _, err := peer.Decode(member.NodeID); err != nil {
-			return nil, fmt.Errorf("invalid successor node ID %q: %w", member.NodeID, err)
-		}
-	}
-	nodes := make([]*basetypes.NodeInfo, len(body.Members))
-	for i, member := range body.Members {
-		nodes[i] = &basetypes.NodeInfo{NodeID: member.NodeID, SigKey: bytes.Clone(member.ConsensusKey), Stake: member.Weight}
-	}
-	projected, err := quorumweight.NewTrustBase(old.NetworkID, nodes, basetypes.WithEpoch(g.Epoch),
-		basetypes.WithEpochStart(g.Start), basetypes.WithQuorumThreshold(body.RootThreshold), basetypes.WithPreviousTrustBaseHash(oldID))
-	if err != nil {
-		return nil, fmt.Errorf("project successor root committee: %w", err)
-	}
-	projected.StateHash = bytes.Clone(body.StateSummary)
-	projected.ChangeRecordHash = bytes.Clone(body.ChangeRecordHash)
-	bodyID := body.Identity()
-	interval := m2contract.TrustInterval{Body: body, Activation: evmroot.ActivatedTrustBase{
-		BodyIdentity: bodyID[:], EpochStart: g.Start, ActivationCommitID: bytes.Clone(verified.RecordID[:])}}
-	bundle := handoffdelivery.Bundle{Proof: proof, Body: body, Snapshot: head, Candidate: bytes.Clone(candidate)}
-	if head == nil || len(head.ShardInfo) == 0 {
-		return nil, errors.New("handoff snapshot has no shards")
-	}
-	first := head.ShardInfo[0]
-	if _, err := verifyHandoffBundle(x.trustBaseStore, bundle, old, first.Partition, first.Shard, first.ShardConfHash); err != nil {
+	// the activation schedule's fence over the bundle's verified checkpoint, before the first durable write (bundle retention)
+	if err := x.FenceEpoch(c.g.Epoch, head); err != nil {
 		return nil, err
 	}
-	if archive, ok := x.blockStore.GetDB().(handoffBundleArchive); ok {
+	old, oldSigning, v, g, projected, bodyID, interval, bundle := c.old, c.oldSigning, c.v, c.g, c.projected, c.bodyID, c.interval, c.bundle
+	if archive, ok := x.blockStore().GetDB().(handoffBundleArchive); ok {
 		if err := retainEquivalentHandoffBundle(x.trustBaseStore, archive, g.Epoch, bundle, old, g.ID()); err != nil {
 			return nil, err
 		}
 	}
-	safetyStore, ok := x.blockStore.GetDB().(epochAnchorSafetyStore)
+	safetyStore, ok := x.blockStore().GetDB().(epochAnchorSafetyStore)
 	if !ok {
 		return nil, errors.New("durable epoch anchor safety store unavailable")
 	}
@@ -152,10 +95,10 @@ func (x *ConsensusManager) InstallEpochBundle(incoming handoffdelivery.Bundle) (
 	if err != nil {
 		return nil, err
 	}
-	if err := x.blockStore.RetainHandoffArtifacts(bodyID[:], body.Encode(), candidate); err != nil {
+	if err := x.blockStore().RetainHandoffArtifacts(bodyID[:], body.Encode(), candidate); err != nil {
 		return nil, fmt.Errorf("retain handoff candidate: %w", err)
 	}
-	a, err := x.blockStore.InstallEpochAnchor(head, v, g)
+	a, err := x.blockStore().InstallEpochAnchor(head, v, g)
 	if err != nil {
 		return nil, err
 	}
@@ -163,21 +106,21 @@ func (x *ConsensusManager) InstallEpochBundle(incoming handoffdelivery.Bundle) (
 	if err != nil {
 		return nil, err
 	}
-	if err := x.blockStore.ConfigureHandoffV2Authority(newTrust, installed); err != nil {
+	if err := x.blockStore().ConfigureHandoffV2Authority(newTrust, installed); err != nil {
 		return nil, err
 	}
-	reqVerifier, err := NewIRChangeReqVerifier(x.params, x.blockStore)
+	reqVerifier, err := NewIRChangeReqVerifier(x.params, x.blockStore())
 	if err != nil {
 		return nil, fmt.Errorf("successor request verifier: %w", err)
 	}
-	t2Timeouts, err := NewLucBasedT2TimeoutGenerator(x.params, x.blockStore)
+	t2Timeouts, err := NewLucBasedT2TimeoutGenerator(x.params, x.blockStore())
 	if err != nil {
 		return nil, fmt.Errorf("successor T2 timeout generator: %w", err)
 	}
 	selector, err := newEpochLeader(x.trustBaseStore, g.Epoch, g.Start, newTrust.RootNodes,
 		func() (Leader, error) { return newBootstrapLeader(x.leaderSelector, g.Start, newTrust.RootNodes) },
 		func() (Leader, error) {
-			return reputationLeader(x.params.NetworkProfileVersion, a, newTrust, x.trustBaseStore, func() leaderHeads { return x.blockStore })
+			return reputationLeader(x.params.NetworkProfileVersion, a, newTrust, x.trustBaseStore, func() leaderHeads { return x.blockStore() })
 		})
 	if err != nil {
 		return nil, err
@@ -194,6 +137,105 @@ func (x *ConsensusManager) InstallEpochBundle(incoming handoffdelivery.Bundle) (
 	x.t2Timeouts = t2Timeouts
 	x.epochAnchor = a
 	return a, nil
+}
+
+// checkedEpochBundle is what checkEpochBundle established and InstallEpochBundle installs from.
+type checkedEpochBundle struct {
+	old        *basetypes.RootTrustBaseV1
+	oldSigning votesig.Config
+	v          evmroot.VerifiedHandoff
+	g          evmroot.EpochGenesis
+	projected  *basetypes.RootTrustBaseV1
+	bodyID     [32]byte
+	interval   m2contract.TrustInterval
+	bundle     handoffdelivery.Bundle
+}
+
+// CheckEpochBundle runs InstallEpochBundle's checks of the bundle itself, and writes nothing: the old commit proof under the verified old
+// trust lineage and its own epoch's scheme, the derived epoch genesis, the successor committee and the bundle's snapshot. The checks of
+// this root's own durable state (the retained bundle archive, the epoch-anchor safety record) stay in the install. An install that fetches its bundle from a root peer runs it on each answer, so a peer serving an invalid bundle is passed over
+// for the next one instead of failing the install. It does not need a stopped manager; the install still re-runs every check.
+func (x *ConsensusManager) CheckEpochBundle(incoming handoffdelivery.Bundle) error {
+	if x.params.NetworkProfileVersion != storage.ProfileHandoff {
+		return errors.New("epoch genesis requires profile-2 consensus")
+	}
+	_, err := x.checkEpochBundle(incoming)
+	return err
+}
+
+func (x *ConsensusManager) checkEpochBundle(incoming handoffdelivery.Bundle) (checkedEpochBundle, error) {
+	proof, head, body, candidate := incoming.Proof, incoming.Snapshot, incoming.Body, incoming.Candidate
+	if !x.recoveryProfile2 || x.recoveryHistory == nil {
+		return checkedEpochBundle{}, fmt.Errorf("epoch genesis requires profile 2 recovery: %w", abdrc.ErrRecoveryEpoch)
+	}
+	old, err := x.trustBaseStore.GetByEpoch(proof.Record.Epoch)
+	if err != nil {
+		return checkedEpochBundle{}, fmt.Errorf("old root trust lineage: %w", err)
+	}
+	prior, err := x.recoveryHistory.ByEpoch(proof.Record.Epoch)
+	if err != nil {
+		return checkedEpochBundle{}, fmt.Errorf("old root trust lineage: %w", err)
+	}
+	var predecessor []byte
+	if prior.V1 != nil {
+		predecessor, err = old.Hash(crypto.SHA256)
+	} else if prior.V2 != nil {
+		predecessor = prior.BodyID[:]
+	} else {
+		return checkedEpochBundle{}, errors.New("handoff predecessor has no verified trust body")
+	}
+	if err != nil || !bytes.Equal(predecessor, proof.Record.PredecessorBodyID) {
+		return checkedEpochBundle{}, errors.New("handoff predecessor differs from verified old trust base")
+	}
+	oldID, err := old.Hash(crypto.SHA256)
+	if err != nil {
+		return checkedEpochBundle{}, err
+	}
+	// the old epoch's commit QC is verified by that epoch's own rule, in the wire form the epoch signs with
+	oldSigning, err := x.trustBaseStore.SigningConfig(proof.Record.Epoch)
+	if err != nil {
+		return checkedEpochBundle{}, fmt.Errorf("old root trust lineage: %w", err)
+	}
+	verified, err := handoff.VerifyOldCommitProofSigning(proof, old, oldSigning)
+	if err != nil {
+		return checkedEpochBundle{}, fmt.Errorf("old handoff commit proof: %w", err)
+	}
+	v := evmroot.VerifiedHandoff{RecordID: bytes.Clone(verified.RecordID[:]), Root: bytes.Clone(verified.StateRoot[:]),
+		ControlDigest: bytes.Clone(verified.ControlDigest[:]), OrderRound: verified.OrderRound,
+		CommitSealRound: verified.CommitSealRound, Epoch: verified.SignerEpoch, Record: proof.Record}
+	g, err := evmroot.DeriveEpochGenesis(v, body)
+	if err != nil {
+		return checkedEpochBundle{}, fmt.Errorf("derive epoch genesis: %w", err)
+	}
+	for _, member := range body.Members {
+		if _, err := peer.Decode(member.NodeID); err != nil {
+			return checkedEpochBundle{}, fmt.Errorf("invalid successor node ID %q: %w", member.NodeID, err)
+		}
+	}
+	nodes := make([]*basetypes.NodeInfo, len(body.Members))
+	for i, member := range body.Members {
+		nodes[i] = &basetypes.NodeInfo{NodeID: member.NodeID, SigKey: bytes.Clone(member.ConsensusKey), Stake: member.Weight}
+	}
+	projected, err := quorumweight.NewTrustBase(old.NetworkID, nodes, basetypes.WithEpoch(g.Epoch),
+		basetypes.WithEpochStart(g.Start), basetypes.WithQuorumThreshold(body.RootThreshold), basetypes.WithPreviousTrustBaseHash(oldID))
+	if err != nil {
+		return checkedEpochBundle{}, fmt.Errorf("project successor root committee: %w", err)
+	}
+	projected.StateHash = bytes.Clone(body.StateSummary)
+	projected.ChangeRecordHash = bytes.Clone(body.ChangeRecordHash)
+	bodyID := body.Identity()
+	interval := m2contract.TrustInterval{Body: body, Activation: evmroot.ActivatedTrustBase{
+		BodyIdentity: bodyID[:], EpochStart: g.Start, ActivationCommitID: bytes.Clone(verified.RecordID[:])}}
+	bundle := handoffdelivery.Bundle{Proof: proof, Body: body, Snapshot: head, Candidate: bytes.Clone(candidate)}
+	if head == nil || len(head.ShardInfo) == 0 {
+		return checkedEpochBundle{}, errors.New("handoff snapshot has no shards")
+	}
+	first := head.ShardInfo[0]
+	if _, err := verifyHandoffBundle(x.trustBaseStore, bundle, old, first.Partition, first.Shard, first.ShardConfHash); err != nil {
+		return checkedEpochBundle{}, err
+	}
+	return checkedEpochBundle{old: old, oldSigning: oldSigning, v: v, g: g, projected: projected, bodyID: bodyID,
+		interval: interval, bundle: bundle}, nil
 }
 
 type handoffBundleArchive interface {
@@ -239,18 +281,18 @@ func (x *ConsensusManager) InstalledEVMTransition(proof handoff.OldCommitProof,
 	if x.params.NetworkProfileVersion != storage.ProfileHandoff || x.epochAnchor == nil {
 		return nil, rctypes.ErrEpochAnchor
 	}
-	if err := x.blockStore.AnchoredFrozenParent(proof.Record.SuccessorTRHash, proof.Control.FrozenParent); err != nil {
+	if err := x.blockStore().AnchoredFrozenParent(proof.Record.SuccessorTRHash, proof.Control.FrozenParent); err != nil {
 		return nil, err
 	}
 	old, err := x.trustBaseStore.GetByEpoch(proof.Record.Epoch)
 	if err != nil {
 		return nil, fmt.Errorf("old root trust lineage: %w", err)
 	}
-	successorTR, err := x.blockStore.AnchoredTechnicalRecord(proof.Record.SuccessorTRHash)
+	successorTR, err := x.blockStore().AnchoredTechnicalRecord(proof.Record.SuccessorTRHash)
 	if err != nil {
 		return nil, fmt.Errorf("verified successor shard assignment: %w", err)
 	}
-	step, err := x.blockStore.AnchoredAssignmentStep(proof.Record)
+	step, err := x.blockStore().AnchoredAssignmentStep(proof.Record)
 	if err != nil {
 		return nil, err
 	}
@@ -267,7 +309,7 @@ func (x *ConsensusManager) HandoffBundle(_ context.Context, epoch uint64) (*hand
 	if x.params.NetworkProfileVersion != storage.ProfileHandoff || epoch < 2 {
 		return nil, rctypes.ErrEpochAnchor
 	}
-	archive, ok := x.blockStore.GetDB().(handoffBundleArchive)
+	archive, ok := x.blockStore().GetDB().(handoffBundleArchive)
 	if ok {
 		raw, err := archive.HandoffBundle(epoch)
 		if err != nil {
@@ -295,11 +337,11 @@ func (x *ConsensusManager) HandoffBundle(_ context.Context, epoch uint64) (*hand
 			return &bundle, nil
 		}
 	}
-	head, path, record, err := x.blockStore.HandoffCheckpoint()
+	head, path, record, err := x.blockStore().HandoffCheckpoint()
 	if err != nil || record.Epoch+1 != epoch {
 		return nil, errors.Join(handoffdelivery.ErrBundle, fmt.Errorf("handoff checkpoint into epoch %d (record epoch %d)", epoch, record.Epoch), err)
 	}
-	rawBody, err := x.blockStore.HandoffBody(record.NextBodyID)
+	rawBody, err := x.blockStore().HandoffBody(record.NextBodyID)
 	if err != nil {
 		return nil, err
 	}
@@ -307,7 +349,7 @@ func (x *ConsensusManager) HandoffBundle(_ context.Context, epoch uint64) (*hand
 	if err != nil {
 		return nil, err
 	}
-	candidate, err := x.blockStore.HandoffCandidate(record.NextBodyID)
+	candidate, err := x.blockStore().HandoffCommittedPreimage(record.NextBodyID)
 	if err != nil {
 		return nil, err
 	}
@@ -344,7 +386,7 @@ func (x *ConsensusManager) ClosureWitness(ctx context.Context, epoch uint64) ([]
 		}
 		return handoffdelivery.EncodeBundle(*bundle)
 	}
-	link, head, candidate, err := x.Q3ActivationEvidence(epoch)
+	link, head, candidate, err := x.q3ClosureEvidence(ctx, epoch)
 	if err != nil {
 		return nil, err
 	}
@@ -353,6 +395,35 @@ func (x *ConsensusManager) ClosureWitness(ctx context.Context, epoch uint64) ([]
 		return nil, fmt.Errorf("retained commit proof: %w", err)
 	}
 	return handoffdelivery.EncodeWitnessV3(handoffdelivery.WitnessV3{Proof: proof, Body: link.Body.Encode(), Snapshot: head, Candidate: candidate})
+}
+
+func (x *ConsensusManager) q3ClosureEvidence(ctx context.Context, epoch uint64) (q3format.Link, *abdrc.CommittedBlock, []byte, error) {
+	link, head, candidate, err := x.Q3ActivationEvidence(epoch)
+	if !errors.Is(err, ErrNoQ3Evidence) || epoch > x.InstalledRootEpoch() {
+		return link, head, candidate, err
+	}
+	// A joining root can have installed the verified activation from a peer.
+	// Its first proposal can use that same checkpoint from the install journal.
+	journal, ok := x.q3.(interface {
+		StagedBundleAt(context.Context, uint64) (q3active.Bundle, bool, error)
+	})
+	if !ok {
+		return link, head, candidate, err
+	}
+	bundle, found, readErr := journal.StagedBundleAt(ctx, epoch)
+	if readErr != nil || !found {
+		return link, head, candidate, errors.Join(err, readErr)
+	}
+	envelope, decodeErr := q3format.DecodeEnvelope(bundle.Envelope)
+	if decodeErr != nil || len(envelope.Links) == 0 {
+		return link, head, candidate, errors.Join(err, decodeErr)
+	}
+	link = envelope.Links[len(envelope.Links)-1]
+	entry, active := x.q3.Activated(epoch)
+	if !active || link.Body.Epoch != epoch || link.Body.Identity() != entry.BodyID() {
+		return q3format.Link{}, nil, nil, fmt.Errorf("%w: retained bundle does not name installed epoch %d", ErrNoQ3Evidence, epoch)
+	}
+	return link, bundle.Snapshot, bundle.Candidate, nil
 }
 
 func (x *ConsensusManager) matchesInstalledAnchor(a *rctypes.EpochAnchor) bool {
@@ -459,7 +530,12 @@ func reconcileAssignmentHistory(db any, trust *trustbase.TrustBaseStore, orchest
 		if _, err := verifyHandoffBundle(trust, bundle, old, first.Partition, first.Shard, first.ShardConfHash); err != nil {
 			return fmt.Errorf("%w: epoch %d: %w", storage.ErrAssignmentHistory, epoch, err)
 		}
-		confs, provenance, _, err := storage.DeriveActivatedConfigs(bundle.Proof.Record, bundle.Body, bundle.Candidate, bundle.Proof.Control.FrozenParent)
+		// a VR handoff's root-side changes install against the configurations in effect at its ordering round
+		installed, err := orchestration.ShardConfigs(bundle.Proof.Record.OrderedRound)
+		if err != nil {
+			return fmt.Errorf("epoch %d: %w", epoch, err)
+		}
+		confs, provenance, err := storage.DeriveActivatedConfigsAt(bundle.Proof.Record, bundle.Body.Encode(), bundle.Candidate, installed)
 		if err != nil {
 			return fmt.Errorf("epoch %d: %w", epoch, err)
 		}
@@ -482,22 +558,24 @@ func verifyHandoffBundle(trust *trustbase.TrustBaseStore, bundle handoffdelivery
 
 // SetPosServices installs the P85 control executor's collaborators on the block store: the custody deployment, the closure authority
 // and the closure proposer. It must be called before the manager starts.
-func (x *ConsensusManager) SetPosServices(s *storage.PosServices) { x.blockStore.SetPosServices(s) }
+func (x *ConsensusManager) SetPosServices(s *storage.PosServices) { x.blockStore().SetPosServices(s) }
 
 // SetRecordFetcher names where an installed epoch checkpoint's missing source-log prefix is fetched from.
 func (x *ConsensusManager) SetRecordFetcher(f storage.RecordFetcher) {
-	x.blockStore.SetRecordFetcher(f)
+	x.blockStore().SetRecordFetcher(f)
 }
 
 // ControlCut is the retained control cut of the committed root block of the round, for the shards' authenticated record feed.
 func (x *ConsensusManager) ControlCut(key storage.CutKey) (storage.ControlCut, error) {
-	return x.blockStore.ControlCut(key)
+	return x.blockStore().ControlCut(key)
 }
 
 // Records returns up to max records of the retained source log from the index.
 func (x *ConsensusManager) Records(from uint64, max int) ([]rootrecords.Record, error) {
-	return x.blockStore.Records(from, max)
+	return x.blockStore().Records(from, max)
 }
 
 // Witness is the WitnessSource of the retained control witnesses.
-func (x *ConsensusManager) Witness(hash [32]byte) ([]byte, error) { return x.blockStore.Witness(hash) }
+func (x *ConsensusManager) Witness(hash [32]byte) ([]byte, error) {
+	return x.blockStore().Witness(hash)
+}

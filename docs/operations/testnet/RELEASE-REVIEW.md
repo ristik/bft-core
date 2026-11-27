@@ -54,7 +54,7 @@ Each row: the check, where to look, and what a pass is. Record `PASS`, `FAIL` (w
 | # | check | where / how | pass |
 |---|---|---|---|
 | 13 | Each validator's signing key is held by its own authority only | `compose.yaml` mounts: `validator%d/auth` (the authority's key, sockets and credentials) is mounted by `authority%d` and by that validator's own `shard%d` (client socket and credential) and by nothing else | no container mounts another validator's `auth`; the root nodes and every other service mount none |
-| 14 | Faucet key and captcha secret are Docker secrets | `compose.yaml` `secrets:`; `faucet-secrets/` modes | readable only by the signer; not in `compose.yaml`, environment or images |
+| 14 | Faucet key and captcha secret are Docker secrets | `compose.yaml` `secrets:`; `faucet-secrets/` modes | readable only by the signer; not in `compose.yaml`, environment or images; `funder-secrets/` (the tools' account) mounted by no service |
 | 15 | The aggregator's key is a private file | `aggregator/keys.json` mode and owner (10001, 0600), mounted read-only by `aggregator` only; the `aggregator` and `mongo` services have no `env_file` and no key, secret or password in their environment in the generated `compose.yaml` | as stated |
 | 16 | Containers are least-privilege | the generated `compose.yaml`: every service has `read_only`, `cap_drop: [ALL]`, `no-new-privileges`, a non-root user (only `prometheus` and `mongo` set `user` in `compose.yaml`; for the others `docker image inspect --format '{{.Config.User}}' <id>` for each image in `images.json` must print a non-root user), `mem_limit`, `cpus`, `pids_limit`. `mongo` has no authentication: it is on its own internal `aggregator` network, which only `pod1` joins, so every container in validator 1's namespace (`root1`, `shard1`, `metrics1`, `aggregator`) reaches it. That is validator 1's trust domain (the co-hosted entity is trusted, validator-entity model); no other service reaches it | no exceptions without a written reason |
 | 17 | The generation directory and backups carry no secret in a public place | backup archive location, mode; the manifest and `network/` contain no private key; the review record itself (no key, no `docker compose config` output) | as stated |
@@ -65,14 +65,14 @@ Each row: the check, where to look, and what a pass is. Record `PASS`, `FAIL` (w
 |---|---|---|---|
 | 18 | Per-container limits are set and sum below the host | `mem_limit`/`cpus` totals from `compose.yaml` against `free -m`, `nproc` on the host | total below the host with headroom stated |
 | 19 | Logs, metrics and the journal are bounded | `logging.options` (10 MiB x 3), Prometheus `retention.size`, shard `--journal-candidates`, `--archive-prune` | as stated |
-| 20 | Request size and rate limits hold | 16 KiB body (raw transactions, `eth_call` and `eth_estimateGas` 4.5 MiB, two at once), 10 requests/s per address, 100/s overall; the aggregator route 64 KiB, 10/s per address, 50/s overall; faucet body 2 KiB | refusals observed (row 9) |
+| 20 | Request size and rate limits hold | 16 KiB body (raw transactions, `eth_call` and `eth_estimateGas` 4.5 MiB, two at once), 20 requests/s per address with a burst of 60, 400/s overall; the aggregator route 64 KiB, 20/s per address with a burst of 60, 200/s overall; faucet body 2 KiB | refusals observed (row 9) |
 | 21 | Measured envelope | the host's own measurements of memory, CPU, disk growth and RPC/proof capacity under the load generator at the selected limits (`loadgen.py`) | numbers recorded with the host and revision; a hosted-runner figure does not count |
 
 ### 1.5 Replay and recovery
 
 | # | check | where / how | pass |
 |---|---|---|---|
-| 22 | One validator entity down and back | `rehearse.py --stages pod-restart` evidence (and the host run) | the public gateway fails closed while down; survivors certify; the entity rejoins on the same block |
+| 22 | One validator entity down and back | `rehearse.py --stages pod-restart` evidence (and the host run) | the gateway serves reads and accepts a transaction with one validator down, the survivors certify it, and the entity rejoins on the same block |
 | 23 | Quiesced backup and same-generation restore | `backup.py` run on the host; `rehearse.py --stages backup-restore` evidence | archive and sha256 exist; restored validators agree on blocks and the funded nonce |
 | 24 | Reset | `reset.py`; `rehearse.py --stages reset` evidence | block-zero hash changed; old wallet pin gets 409; new network pays a transfer |
 | 25 | Replay of its own history | the native lane evidence (T6) and the archive restore rows X-29 to X-31 of the failure matrix | cited rows MET at the revision under review, or the limit stated; the archive replicas became a derived two-of-three set in #751, so re-check these rows against that change |

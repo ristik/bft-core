@@ -171,8 +171,8 @@ func (s *q4bStore) WriteBlock(b *storage.ExecutedBlock, root bool) error {
 	return s.observed(b, root, func() error { return s.BoltDB.WriteBlock(b, root) })
 }
 
-func (s *q4bStore) CommitBlock(b *storage.ExecutedBlock, recs []rootrecords.Record, cut *storage.CutEntry) error {
-	return s.observed(b, true, func() error { return s.BoltDB.CommitBlock(b, recs, cut) })
+func (s *q4bStore) CommitBlock(b *storage.ExecutedBlock, recs []rootrecords.Record, cut *storage.CutEntry, obs []storage.ObservationInput) error {
+	return s.observed(b, true, func() error { return s.BoltDB.CommitBlock(b, recs, cut, obs) })
 }
 
 func (s *q4bStore) observed(b *storage.ExecutedBlock, root bool, write func() error) error {
@@ -294,6 +294,9 @@ type q4bLive struct {
 	// the shim traces of nodes that were closed (a restart makes a new shim; the earlier one's trace stays evidence)
 	retired [][]q4shim.Event
 	retIdx  []int
+	// link, when set, is each node's network instead of a shim on skewedNet (a real transport); run, when set, is what runs a started node's manager
+	link func(i int, r *q3Replica) RootNet
+	run  func(i int, cm *ConsensusManager) func(context.Context) error
 }
 
 func (c *q4bLive) signing(epoch uint64) (votesig.Config, error) {
@@ -306,10 +309,14 @@ func (c *q4bLive) signing(epoch uint64) (votesig.Config, error) {
 // attach puts a shim, the crash state and the observing wrappers on a replica.
 func (c *q4bLive) attach(i int, n *q4bNode) {
 	r := n.r
-	conn := c.net.connect(r.id())
 	n.crash = newQ4BCrash()
-	n.shim = q4shim.New(conn, q4shim.Config{Self: r.id(), Signing: c.signing, Signer: r.node.Signer, KeepRaw: true})
-	r.link, r.durable = n.shim, true
+	if c.link != nil {
+		r.link, r.durable = c.link(i, r), true
+	} else {
+		conn := c.net.connect(r.id())
+		n.shim = q4shim.New(conn, q4shim.Config{Self: r.id(), Signing: c.signing, Signer: r.node.Signer, KeepRaw: true})
+		r.link, r.durable = n.shim, true
+	}
 	r.wrapStore = func(db storage.BoltDB) PersistentStore { return &q4bStore{BoltDB: db, live: c, index: i, c: n.crash} }
 	r.wrapSigner = func(s abcrypto.Signer) abcrypto.Signer { return &q4bSigner{Signer: s, c: n.crash} }
 	n.crash.onCrash = func() { c.offline.Store(r.id(), struct{}{}) }
@@ -449,7 +456,11 @@ func (c *q4bLive) start(names ...string) {
 		c.mu.Unlock()
 		c.offline.Delete(c.nodes[i].r.id())
 		c.nodes[i].r.stopRun = func() { c.stop(name) }
-		go func() { done <- cm.Run(ctx) }()
+		run := cm.Run
+		if c.run != nil {
+			run = c.run(i, cm)
+		}
+		go func() { done <- run(ctx) }()
 	}
 }
 
@@ -583,8 +594,8 @@ func (c *q4bLive) state(name string) q4bState {
 	m := c.nodes[c.idx(name)].r.manager
 	var s q4bState
 	s.Round = m.pacemaker.GetCurrentRound()
-	s.HighQC = m.blockStore.GetHighQc().GetRound()
-	if st, err := m.blockStore.GetState(); err == nil {
+	s.HighQC = m.blockStore().GetHighQc().GetRound()
+	if st, err := m.blockStore().GetState(); err == nil {
 		s.Committed = st.CommittedHead.Block.Round
 	}
 	return s
@@ -648,7 +659,7 @@ func (c *q4bLive) requireChainsAgree(names ...string) {
 			for round, blk := range ca {
 				if other, ok := cb[round]; ok {
 					shared++
-					require.Truef(c.t, bytes.Equal(blk.Hash, other.Hash), "%w: round %d, %s and %s", errQ4BChain, round, a, b)
+					require.Truef(c.t, bytes.Equal(blk.Hash, other.Hash), "%v: round %d, %s and %s", errQ4BChain, round, a, b)
 				}
 			}
 			require.NotZero(c.t, shared, "%s and %s share committed rounds", a, b)

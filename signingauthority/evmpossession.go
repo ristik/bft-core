@@ -42,6 +42,10 @@ func (a *Authority) ethSigner() (hashSigner, []byte, error) {
 	if a.state != healthActive {
 		return nil, nil, ErrStateUntrusted
 	}
+	if a.retired {
+		// the shared signer of the election and delegation possessions: a retired key attests nothing it could not sign for
+		return nil, nil, ErrRetired
+	}
 	hs, ok := a.signer.(hashSigner)
 	if !ok {
 		return nil, nil, ErrNoHashSigner
@@ -70,6 +74,9 @@ func ethSign(hs hashSigner, digest [32]byte) ([]byte, error) {
 // network whose successor binding names this node with this key (the same binding checks as SignHandoffPoP, which also bound the epoch),
 // and the member that carries the key must name this node as its EVM validator.
 func (a *Authority) SignElectionPoP(req ElectionPoPRequest) (evmassign.EVMPoP, error) {
+	if _, err := a.fenceGate(); err != nil {
+		return evmassign.EVMPoP{}, err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	hs, pub, err := a.ethSigner()
@@ -91,6 +98,11 @@ func (a *Authority) SignElectionPoP(req ElectionPoPRequest) (evmassign.EVMPoP, e
 	if err != nil {
 		return evmassign.EVMPoP{}, fmt.Errorf("%w: %v", ErrContextMismatch, err)
 	}
+	// the same digest as SignPosPoP: the pin (when there is one, or when one is required) binds both entry points
+	d := req.Deployment
+	if err := a.checkPosScope(d.NetworkWord, d.ChainID, d.Election, id); err != nil {
+		return evmassign.EVMPoP{}, err
+	}
 	sig, err := ethSign(hs, digest)
 	if err != nil {
 		return evmassign.EVMPoP{}, err
@@ -101,10 +113,16 @@ func (a *Authority) SignElectionPoP(req ElectionPoPRequest) (evmassign.EVMPoP, e
 // SignDelegationPossession signs ElectionPolicy.delegationDigest for this authority's own key: the payload must nominate this key as the
 // identity's EVM key and this node as its EVM validator, and nothing else is signed.
 func (a *Authority) SignDelegationPossession(req DelegationPossessionRequest) ([]byte, error) {
+	if _, err := a.fenceGate(); err != nil {
+		return nil, err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	hs, pub, err := a.ethSigner()
 	if err != nil {
+		return nil, err
+	}
+	if err := a.checkPosScope(req.Network, req.Chain, req.Election, req.Request.Id); err != nil {
 		return nil, err
 	}
 	word, err := evmassign.NodeIDWord(a.enroll.NodeID)

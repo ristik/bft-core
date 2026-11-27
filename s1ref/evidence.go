@@ -82,11 +82,14 @@ func scanEvidence(raw []byte, tokens *int) (*evidence, error) {
 	return e, nil
 }
 
-// sigShape is the structural signature rule: exactly 64 bytes, or 65 bytes
-// whose recovery byte is 0 or 1. Anything else (including an empty string) is
-// malformed; a well-shaped but invalid, zero or high-s signature is false.
+// sigShape is the structural signature rule, the strict native form P85
+// evidence also takes (D5 section 2): exactly 65 bytes r||s||v whose recovery
+// byte is 0 or 1. A 64-byte compact signature, v in {2,3} (native-valid but
+// ineligible: the native signer emits only 0 and 1) and anything else
+// (including an empty string) is malformed; a well-shaped but invalid, zero or
+// high-s signature, or one whose parity recovers another key, is false.
 func sigShape(sig []byte) error {
-	if len(sig) == 64 || (len(sig) == 65 && sig[64] <= 1) {
+	if len(sig) == 65 && sig[64] <= 1 {
 		return nil
 	}
 	return ErrSigShape

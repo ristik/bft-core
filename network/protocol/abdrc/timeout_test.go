@@ -2,10 +2,13 @@ package abdrc
 
 import (
 	gocrypto "crypto"
+	"crypto/sha256"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-go-base/crypto"
+	basetypes "github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
 
 	testcertificates "github.com/unicitynetwork/bft-core/internal/testutils/certificates"
@@ -16,6 +19,7 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/testutils"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 )
 
 func TestTimeoutMsg_Bytes(t *testing.T) {
@@ -272,4 +276,55 @@ func TestTimeoutMsg_GetRound(t *testing.T) {
 	require.Equal(t, uint64(0), tmoMsg.GetRound())
 	tmoMsg = &TimeoutMsg{Timeout: &types.Timeout{Round: 10}}
 	require.Equal(t, uint64(10), tmoMsg.GetRound())
+}
+
+// A decoded timeout message carries the SHA-256 of the exact bytes it was decoded from, for both wire forms, once: TakeWireDigest forgets it.
+// A message built in memory has none, and the digest is not part of any encoding.
+func TestTimeoutMsg_WireDigest(t *testing.T) {
+	built := NewTimeoutMsg(types.NewTimeout(3, 1, nil), "author", nil)
+	built.Signature = []byte{1, 2, 3}
+	_, ok := built.TakeWireDigest()
+	require.False(t, ok, "built in memory")
+	for _, scheme := range []uint64{0, votesig.SchemeDomainBound} {
+		built.Scheme = scheme
+		raw, err := basetypes.Cbor.Marshal(built)
+		require.NoError(t, err)
+		decoded := &TimeoutMsg{}
+		require.NoError(t, basetypes.Cbor.Unmarshal(raw, decoded))
+		again, err := basetypes.Cbor.Marshal(decoded)
+		require.NoError(t, err)
+		require.Equal(t, raw, again, "the digest is not encoded")
+		digest, ok := decoded.TakeWireDigest()
+		require.True(t, ok)
+		require.Equal(t, sha256.Sum256(raw), digest)
+		_, ok = decoded.TakeWireDigest()
+		require.False(t, ok, "taken once")
+	}
+}
+
+// A message without a digest is shared by reference: the network loops a node's own vote back as the object the node keeps and
+// sends again, and the consensus test network hands one object to every receiver. TakeWireDigest does not write to it, so receivers
+// taking the digest while another goroutine encodes the message do not race (#1191, run under -race).
+func TestTimeoutMsg_TakeWireDigestOfASharedMessage(t *testing.T) {
+	shared := NewTimeoutMsg(types.NewTimeout(3, 1, nil), "author", nil)
+	shared.Signature = []byte{1, 2, 3}
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for range 100 {
+				_, ok := shared.TakeWireDigest()
+				require.False(t, ok)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for range 100 {
+				_, err := basetypes.Cbor.Marshal(shared)
+				require.NoError(t, err)
+			}
+		}()
+	}
+	wg.Wait()
 }

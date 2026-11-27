@@ -38,11 +38,17 @@ elif [ -n "${POST_M2A_URETH_BIN:-}" ] || [ -n "${POST_M2A_URETH_COMMIT:-}" ]; th
   }
   URETH_BIN=$POST_M2A_URETH_BIN
   URETH_PIN_COMMIT=$POST_M2A_URETH_COMMIT
-  M2_RUN_LOG_DIR=${M2_RUN_LOG_DIR:-/Users/risto/uni/agre/briefs/devnet-runs/m2-p2-$(date -u +%Y%m%dT%H%M%SZ)}
+  M2_RUN_LOG_DIR=${M2_RUN_LOG_DIR:-/Users/risto/uni/agre/briefs/devnet-runs/m2-p2${LANE_RUN_TAG}-$(date -u +%Y%m%dT%H%M%SZ)}
+  echo "profile-2 logs: $M2_RUN_LOG_DIR"
+elif [ "${VR_LANE:-0}" = 1 ] && [ "${M2_PROFILE2:-0}" = 1 ]; then
+  # The VR roots replay historical observations from their paired client. Use the VR resolver and
+  # archive-proof support from ureth #106 until the shared lane pin includes those changes.
+  URETH_PIN_COMMIT=b8bd8ef4aefb050defd4322bdd0c64ca480a038f
+  M2_RUN_LOG_DIR=${M2_RUN_LOG_DIR:-/Users/risto/uni/agre/briefs/devnet-runs/m2-p2${LANE_RUN_TAG}-$(date -u +%Y%m%dT%H%M%SZ)}
   echo "profile-2 logs: $M2_RUN_LOG_DIR"
 elif [ "${M2_PROFILE2:-0}" = 1 ]; then
   URETH_PIN_COMMIT=ae6e6be94d6dc45d0df6574cb5fbedef398f5c2e
-  M2_RUN_LOG_DIR=${M2_RUN_LOG_DIR:-/Users/risto/uni/agre/briefs/devnet-runs/m2-p2-$(date -u +%Y%m%dT%H%M%SZ)}
+  M2_RUN_LOG_DIR=${M2_RUN_LOG_DIR:-/Users/risto/uni/agre/briefs/devnet-runs/m2-p2${LANE_RUN_TAG}-$(date -u +%Y%m%dT%H%M%SZ)}
   echo "profile-2 logs: $M2_RUN_LOG_DIR"
 fi
 
@@ -50,12 +56,24 @@ validators=${1:-4}
 rounds=${2:-10}
 postM2aMode=${POST_M2A_MODE:-}
 postM2aChainID=${POST_M2A_CHAIN_ID:-31337}
-# The any-age final lane (scripts/anyage-lane.sh, briefs/anyage-final-lane-plan.md): the P85 genesis AND the bridge in one devnet. ANYAGE_LANE=1 adds
-# the aggregator-go shard(s) as BFT shard(s) of the same root chain (partition 7, the aggregation partition, scripts/lib/agg-lib.sh) beside the EVM shard; the vault and verifier are
-# deployed by the lane's setup step once the devnet is up. Nothing in the P85 path changes when the flag is unset.
+# The any-age final lane (scripts/anyage-lane.sh, briefs/anyage-final-lane-plan.md): the P85 genesis AND the aggregator in one devnet. ANYAGE_LANE=1 adds
+# the aggregator-go shard(s) as BFT shard(s) of the same root chain (partition 7, the aggregation partition, scripts/lib/agg-lib.sh) beside the EVM shard. Nothing in the
+# P85 path changes when the flag is unset. (The protocol 6/7 bridge the lane once deployed here was removed, bft-core#1106.)
+if [ "${NB2_T7_LANE:-0}" = 1 ]; then
+  [ "${M2_PROFILE2:-0}:${Q3_B1:-0}:${SIGNING:-local}:${UTB_LANE:-0}:${P85_LANE:-0}:${VR_LANE:-0}:$validators" = 1:1:authority:1:0:0:4 ] ||
+    { echo "NB2 T7 needs four authority-signed validators, profile 2, B1 and UTB" >&2; exit 2; }
+  # Retain the complete certified history in replicated archives while the
+  # live journal prunes acknowledged entries. The default journal stops at 256 blocks.
+  export EVM_JOURNAL_CANDIDATES=${EVM_JOURNAL_CANDIDATES:-4096} EVM_ARCHIVE_DERIVED=${EVM_ARCHIVE_DERIVED-1}
+  export EVM_EXTRA_ARGS=${EVM_EXTRA_ARGS---journal-observations 8192 --journal-bytes 134217728}
+  ANYAGE_LANE=1
+fi
 if [ "${ANYAGE_LANE:-0}" = 1 ]; then
-  [ "${P85_LANE:-0}" = 1 ] && [ "${M2_PROFILE2:-0}" = 1 ] && [ "$validators" -eq 4 ] || { echo "ANYAGE_LANE=1 requires the P85 lane (P85_LANE=1, M2_PROFILE2=1, four validators)" >&2; exit 2; }
-  chainID=$postM2aChainID partitionID=8 rootRpcPort=25866
+  [ "${NB2_T7_LANE:-0}" = 1 ] || {
+    [ "${P85_LANE:-0}" = 1 ] && [ "${M2_PROFILE2:-0}" = 1 ] && [ "$validators" -eq 4 ] ||
+      { echo "ANYAGE_LANE=1 requires the P85 lane (P85_LANE=1, M2_PROFILE2=1, four validators)" >&2; exit 2; }
+  }
+  chainID=$postM2aChainID partitionID=8 rootRpcPort=$((25866+LANE_PORT_OFFSET))
   source scripts/lib/agg-lib.sh
 fi
 if [ -n "$postM2aMode" ]; then
@@ -67,13 +85,63 @@ if [ -n "$postM2aMode" ]; then
     exit 2
   fi
 fi
-if [ "${M2_PROFILE2:-0}" = 1 ] && [ "$validators" -ne 4 ]; then
+if [ "${VR_POS16:-0}" = 1 ]; then
+  [ "${VR_LANE:-0}" = 1 ] && [ "${VR_POS:-0}" = 1 ] && [ "${VR_JOINER:-0}" = 1 ] &&
+    [ "${SIGNING:-local}" = authority ] && [ "${VR_UTB:-1}" = 1 ] && [ "$validators" -eq 15 ] ||
+    { echo "VR_POS16=1 needs the PoS VR lane, 15 incumbents plus a joiner, authority signing and UTB" >&2; exit 2; }
+  export VR_POS_LIMITS=15,16,16 VR_INCUMBENTS="$validators"
+fi
+if [ "${M2_PROFILE2:-0}" = 1 ] && [ "$validators" -ne 4 ] && [ "${VR_POS16:-0}" != 1 ]; then
   echo "profile-2 handoff lane requires four validators" >&2
   exit 2
+fi
+# VR_LANE=1 (VT-14, scripts/lib/vr-lib.sh): a validator-registry generation. Its handoffs are VT-05b's, so every lane whose steps would be
+# skipped (or whose genesis path bypasses the VR plan and verify) is refused here, before setup wipes test-nodes; so are the restart and
+# restore probes the lane has not been run with.
+if [ "${VR_LANE:-0}" = 1 ]; then
+  # A long VR run (the Foundation's governance delay alone is 3600 s of certified time): the full-history journal of a shard node stops the chain after
+  # 256 blocks, so the archive stores are on (an archive-replica restore also needs them), the journal bounds are raised to the maximum the node accepts,
+  # and the shard node has an operator RPC (the root tells its paired shard node the staged successor there). Each can be overridden in the environment.
+  export VR_ARCHIVE=${VR_ARCHIVE:-1} EVM_OPERATOR_STATUS_RPC=${EVM_OPERATOR_STATUS_RPC:-1}
+  # the candidate bound is the existing knob (helper.sh emits the flag once); the replicas are derived by the node from the current assignment (as the P85 lane's),
+  # never named from the genesis validators, which an assignment change retires
+  export EVM_JOURNAL_CANDIDATES=${EVM_JOURNAL_CANDIDATES:-4096} EVM_ARCHIVE_DERIVED=${EVM_ARCHIVE_DERIVED-1}
+  export EVM_EXTRA_ARGS=${EVM_EXTRA_ARGS---journal-observations 8192 --journal-bytes 134217728}
+  [ "${Q3_B1:-0}" = 1 ] && [ "${M2_PROFILE2:-0}" = 1 ] || { echo "VR_LANE=1 requires Q3_B1=1 and M2_PROFILE2=1" >&2; exit 2; }
+  for vrConflict in P85_LANE P85_SHADOW Q4_LIVE_LANE H3_ASSIGNMENT_LANE Q3_WEIGHT_LANE H6_ABORT_LANE F8_MIXED_LANE ANYAGE_LANE UTB_LANE \
+    D2C_RESTART_PROBE H4_RESTORE_PROBE M2A_FINAL_RESTORE FAUCET_PROBE POST_M2A_SKIP_HANDOFF; do
+    [ "${!vrConflict:-0}" = 0 ] || { echo "VR_LANE=1 refuses $vrConflict=${!vrConflict}: its steps do not run on a VR generation" >&2; exit 2; }
+  done
+  [ -z "$postM2aMode" ] || { echo "VR_LANE=1 refuses POST_M2A_MODE=$postM2aMode: the manifest genesis path bypasses the VR plan and verify" >&2; exit 2; }
+  # The signed trust-base history (UTB, briefs/utb-signed-entries-design.md) is ON in a VR generation: its handoffs install epoch E+1 and an old-epoch token has to
+  # keep verifying across them. VR_UTB=0 runs without it (the runs before VT-UTB did). The UTB profile is the one the UTB lane runs with (scripts/lib/utb-lib.sh,
+  # UTB_LANE's consumers in helper.sh, h3-lib.sh and m2-handoff-lib.sh), so a VR run switches it on there; UTB_LANE itself is still refused from the environment above.
+  VR_UTB=${VR_UTB:-1}
+  case "$VR_UTB" in 0 | 1) ;; *) echo "VR_UTB must be 0 or 1" >&2; exit 2 ;; esac
+  if [ "$VR_UTB" = 1 ]; then export UTB_LANE=1 VR_UTB; fi
+  # The aggregator partition (aggregator-go as a BFT shard of the same root chain, scripts/lib/agg-lib.sh) is what the signed history is for: it verifies the history
+  # from the pinned genesis and certifies the tokens an old epoch must keep verifying. Off by default (VR_AGG=1 for the aggregator acceptance run, with VR_UTB=1); it takes the any-age lane's
+  # aggregator machinery (ANYAGE_LANE is refused from the environment above and set here, after the check). Needs AGG_BIN and MongoDB (agg-lib.sh).
+  VR_AGG=${VR_AGG:-0}
+  case "$VR_AGG" in 0 | 1) ;; *) echo "VR_AGG must be 0 or 1" >&2; exit 2 ;; esac
+  [ "$VR_AGG" = 0 ] || [ "$VR_UTB" = 1 ] || { echo "VR_AGG=1 needs VR_UTB=1" >&2; exit 2; }
+  if [ "$VR_AGG" = 1 ]; then
+    : "${AGG_BIN:?VR_AGG=1 needs AGG_BIN (the pinned aggregator-go binary; VR_AGG=0 runs without the aggregator)}"
+    export ANYAGE_LANE=1 VR_AGG
+    chainID=$postM2aChainID partitionID=8 rootRpcPort=$((25866+LANE_PORT_OFFSET))
+    source scripts/lib/agg-lib.sh
+  fi
+  source scripts/lib/vr-lib.sh || exit 2
+  vr_check_inputs || exit 2
 fi
 if [ "${M2A_FINAL_RESTORE:-0}" = 1 ] && { [ "${M2_PROFILE2:-0}" != 1 ] || [ "${SIGNING:-local}" != authority ] || [ "$validators" -ne 4 ]; }; then
   echo "M2a final restore requires M2_PROFILE2=1, SIGNING=authority and four validators" >&2
   exit 2
+fi
+if [ "${UTB_LANE:-0}" = 1 ]; then
+  [ "${ANYAGE_LANE:-0}" = 1 ] || [ "${VR_UTB:-0}" = 1 ] || { echo "UTB_LANE=1 requires ANYAGE_LANE=1 (the aggregator partition)" >&2; exit 2; }
+  source scripts/lib/utb-lib.sh || exit 2
+  utb_resolve_verifier || exit 2
 fi
 partitionID=8
 if [ "${M1_FEE_ACCOUNTING:-0}" = 1 ] && { [ "$validators" -ne 4 ] || [ "$rounds" -lt 10 ]; }; then
@@ -94,10 +162,15 @@ if [ "${H4_RESTORE_PROBE:-0}" = 1 ] && { [ "${SIGNING:-local}" != authority ] ||
   exit 2
 fi
 
-rethEngineBase=18551
-rethEthBase=18545
-rethP2PBase=30401
-engineProxyPort=18651
+rethEngineBase=$((18551+LANE_PORT_OFFSET))
+rethEthBase=$((18545+LANE_PORT_OFFSET))
+if [ "${VR_POS16:-0}" = 1 ]; then
+  rethEthBase=$(lane_port 18200)
+  rethEngineBase=$(lane_port 18220)
+  export rethEthBase rethEngineBase
+fi
+rethP2PBase=$((30401+LANE_PORT_OFFSET))
+engineProxyPort=$((18651+LANE_PORT_OFFSET))
 d2cPersistenceThreshold=${D2C_PERSISTENCE_THRESHOLD:-64}
 echo "ureth engine.persistence-threshold=$d2cPersistenceThreshold blocks (D2C replay visibility)"
 
@@ -106,8 +179,11 @@ echo "ureth engine.persistence-threshold=$d2cPersistenceThreshold blocks (D2C re
 # client and verifies it by revision. It used to run the stock `reth` on PATH; that client cannot
 # start a shard node, so every paired lane was pointed at a client it would refuse.
 urethPinResolve || exit 1
+urethPinRequireStateProofs "$URETH_BIN" || exit 2
+if [ "${VR_LANE:-0}" = 1 ]; then export VR_ARCHIVE_STATE_PROOFS=1; fi
 export URETH_PIN_FEE_COLLECTOR
-echo "bft source commit=$(git rev-parse HEAD)"
+bftSourceCommit=${BFT_SOURCE_COMMIT:-$(git rev-parse HEAD 2>/dev/null)}
+echo "bft source commit=$bftSourceCommit"
 echo "ureth source commit=$URETH_PIN_COMMIT binary sha256=$(shasum -a 256 "$URETH_BIN" | cut -d' ' -f1)"
 
 failures=0
@@ -129,7 +205,40 @@ negativeReths="reth-wrong reth-wrongchain reth-othergenesis reth-laterfork"
 # nodes only, and a reth is stopped by its pid file only if that pid is still a `reth node` running
 # from this checkout. This runs nested inside scripts/reth-smoke.sh, whose own teardown cannot undo
 # anything a machine-wide sweep here had already killed.
+# At teardown, dump roots whose logs have been quiet for LANE_STALL_DUMP_SECS (default 5; 0 disables dumps). After an H6
+# timeout, dump the whole owned committee: a wedged consensus goroutine can coexist with active RPC or network logs (#1063).
+# SIGQUIT writes the Go stacks to debug.log (m2_start_root) and exits. The lane copies the logs into its evidence.
+dump_stalled_roots() {
+  local secs=${LANE_STALL_DUMP_SECS:-5} now p home log age reason dumped=()
+  [ "$secs" -gt 0 ] 2>/dev/null || return 0
+  now=$(date +%s)
+  for p in $(owned_pids 'ubft root-node run'); do
+    home=$(ps -o args= -p "$p" 2>/dev/null | sed -n 's/.*--home \([^ ]*\).*/\1/p')
+    log=$home/debug.log
+    [ -n "$home" ] && [ -f "$log" ] || continue
+    reason=${H6_ROOT_DUMP_REASON:-}
+    if [ -z "$reason" ]; then
+      age=$(( now - $(p_mtime "$log") ))
+      [ "$age" -ge "$secs" ] || continue
+      reason="no log output for ${age}s at teardown"
+    fi
+    owned_pid "$p" 'ubft root-node run' || continue
+    echo "STALL: root $home (pid $p), $reason: SIGQUIT, goroutine dump in $log"
+    printf '\n=== #1063 stall dump: %s, SIGQUIT at %s ===\n' "$reason" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$log"
+    kill -QUIT "$p" 2>/dev/null && dumped+=("$p")
+  done
+  local i
+  for p in ${dumped[@]+"${dumped[@]}"}; do
+    for i in $(seq 1 30); do kill -0 "$p" 2>/dev/null || break; sleep 0.1; done
+  done
+}
+
+H6_ROOT_DUMP_REASON=
+nb2DriverPid=
 cleanup() {
+  if [ "${NB2_T7_LANE:-0}" = 1 ]; then trap '' TERM HUP INT; fi
+  if [ -n "$nb2DriverPid" ]; then kill -TERM "$nb2DriverPid" 2>/dev/null || true; wait "$nb2DriverPid" || true; fi
+  dump_stalled_roots
   if [ "${F8_MIXED_LANE:-0}" = 1 ]; then f8_stop; fi
   if [ "${ANYAGE_LANE:-0}" = 1 ]; then stop_aggs; fi   # by this run's own pid files
   ./stop-evm.sh -a >/dev/null 2>&1 || true
@@ -157,6 +266,10 @@ cleanup() {
     stop_pidfile "test-nodes/$d/pid" 'reth.* node' INT
   done
   for p in $(owned_pids 'reth.* node'); do
+    kill -INT "$p" 2>/dev/null || true
+  done
+  # the seed servers of a VT-11 run (INT and TERM reach here through the EXIT trap): ownership-checked like every sweep above, before the wait
+  for p in $(owned_pids 'ubft seed serve'); do
     kill -INT "$p" 2>/dev/null || true
   done
   wait 2>/dev/null || true
@@ -245,8 +358,14 @@ fi
 echo "=== 1. generate the shard topology and chain spec ==="
 rootValidators=3
 if [ "${M2_PROFILE2:-0}" = 1 ]; then rootValidators=4; fi
+if [ "${VR_POS16:-0}" = 1 ]; then rootValidators=$validators; fi
 ./setup-evm-nodes.sh -r "$rootValidators" -v "$validators" -c "$postM2aChainID" >/dev/null || { echo "setup failed" >&2; exit 1; }
 registry_layout_require || exit 1
+# VR_LANE=1 (VT-14, scripts/lib/vr-lib.sh): a validator-registry generation. The EVM shard configuration pins VR before the profile and the
+# genesis are derived from it; the roots start in VR mode from that pin.
+if [ "${VR_LANE:-0}" = 1 ]; then
+  vr_lane_conf || { echo "vr: pinning VR in the shard configuration failed" >&2; exit 1; }
+fi
 if [ "${Q3_B1:-0}" = 1 ]; then
   # the stock generated genesis is built with the legacy registry artifact; the fresh-B1 profile below replaces the registry (layout 3)
   echo "base genesis registry artifact (layout $(registry_layout), replaced by the B1 profile's registry genesis below) sha256=$(shasum -a 256 "$(registry_artifact)" | cut -d' ' -f1)"
@@ -257,7 +376,7 @@ genesisSHA=$(shasum -a 256 test-nodes/evm-genesis.json | cut -d' ' -f1)
 echo "generated genesis sha256=$genesisSHA"
 
 # Fresh-B1 deployment (Q3_B1=1): one profile file, derived from the shard configuration and the root trust base, is the source of the registry
-# genesis (layout 3), of ureth's --unicity.* bindings and of the shard nodes' Update admission (--b1-profile), as in scripts/dnb-devnet.sh.
+# genesis (layout 3), of ureth's --unicity.* bindings and of the shard nodes' Update admission (--b1-profile).
 b1GasLimit=30000000
 if [ "${Q3_B1:-0}" = 1 ]; then
   p85ProfileArgs=()
@@ -266,9 +385,11 @@ if [ "${Q3_B1:-0}" = 1 ]; then
     p85_prepare_genesis || { echo "p85 genesis preparation failed" >&2; exit 1; }
     p85ProfileArgs=($(p85_profile_args))
   fi
+  if [ "${VR_LANE:-0}" = 1 ]; then p85ProfileArgs=($(vr_profile_args)); fi
   build/ubft engine-api b1-profile --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" --trust-base test-nodes/trust-base.json \
     --max-epochs-per-update "${Q3_B1_MAX_EPOCHS:-2}" --delta-ev "${Q3_B1_DELTA_EV:-16}" --delta-hold "${Q3_B1_DELTA_HOLD:-17}" --out test-nodes/b1-profile.json ${p85ProfileArgs[@]+"${p85ProfileArgs[@]}"} | tee test-nodes/b1-profile.out || { echo "b1-profile failed" >&2; exit 1; }
   if [ "${P85_LANE:-0}" = 1 ]; then p85_write_pos_deployment test-nodes/b1-profile.json || exit 1; p85_check_hook_gas test-nodes/b1-profile.json || exit 1; fi
+  if [ "${VR_LANE:-0}" = 1 ]; then vr_prepare_genesis || { echo "vr: genesis preparation failed" >&2; exit 1; }; fi
   b1GasLimit=$(python3 -c "import json;print(json.load(open('test-nodes/b1-profile.json'))['maxGas'])")
   export EVM_B1_PROFILE=test-nodes/b1-profile.json URETH_B1_PROFILE_OUT=test-nodes/b1-profile.out URETH_BUILDER_GASLIMIT=$b1GasLimit
 fi
@@ -301,6 +422,10 @@ if [ "${P85_LANE:-0}" = 1 ]; then
   p85_reconcile_genesis_assignment test-nodes/evm-genesis-funded.json || exit 1   # before the P85 accounts are added: the genesis assignment id comes from the full configuration
   p85_merge_alloc test-nodes/evm-genesis-funded.json || exit 1
 fi
+if [ "${VR_LANE:-0}" = 1 ]; then
+  vr_pos_reconcile test-nodes/evm-genesis-funded.json || exit 1   # a PoS generation: the genesis assignment id comes from the full configuration, before the accounts are added
+  vr_merge_alloc test-nodes/evm-genesis-funded.json || exit 1
+fi
 fundedSHA=$(shasum -a 256 test-nodes/evm-genesis-funded.json | cut -d' ' -f1)
 echo "funded genesis source sha256=$fundedSHA"
 # The funding edit replaces alloc, so finalize it again through U5a. That inserts the pinned
@@ -310,7 +435,11 @@ fullShardConf=test-nodes/evm-full-shard-conf-v2.json
 if [ "${Q3_B1:-0}" = 1 ]; then
   build/ubft engine-api genesis --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" --trust-base test-nodes/trust-base.json \
     --b1-profile test-nodes/b1-profile.json --alloc-source test-nodes/evm-genesis-funded.json --out "$chainSpec" \
-    --full-shard-conf "$fullShardConf" --identities-out test-nodes/b1-identities.json || { echo "finalized funded B1 genesis failed" >&2; exit 1; }
+    --full-shard-conf "$fullShardConf" --identities-out test-nodes/b1-identities.json >test-nodes/genesis.out || { cat test-nodes/genesis.out >&2; echo "finalized funded B1 genesis failed" >&2; exit 1; }
+  cat test-nodes/genesis.out
+  # the execution genesis block hash, from the generation's own artifacts: the pin an authority's activation fence holds its source to
+  awk '/^block hash:/{print $3}' test-nodes/genesis.out >test-nodes/execution-genesis-hash
+  [ -s test-nodes/execution-genesis-hash ] || { echo "no block hash in the genesis output" >&2; exit 1; }
 else
 build/ubft engine-api genesis --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
   --alloc-source test-nodes/evm-genesis-funded.json --out "$chainSpec" \
@@ -318,6 +447,11 @@ build/ubft engine-api genesis --shard-conf "test-nodes/shard-conf-${partitionID}
 fi
 echo "finalized funded genesis sha256=$(shasum -a 256 "$chainSpec" | cut -d' ' -f1)"
 if [ "${P85_LANE:-0}" = 1 ]; then p85_assert_full_conf "$fullShardConf" || exit 1; fi
+if [ "${VR_LANE:-0}" = 1 ]; then
+  # the ureth vector verify certifies is the one every ureth launch evaluates: the same genesis spec, computed once
+  export URETH_GENESIS_SPEC=$chainSpec
+  vr_verify "$chainSpec" "$fullShardConf" || exit 1
+fi
 fi
 if [ "${SIGNING:-local}" = authority ]; then
   # The full configuration is the one the root chain will certify, so enroll against it rather
@@ -326,30 +460,38 @@ if [ "${SIGNING:-local}" = authority ]; then
   cp "$fullShardConf" "test-nodes/shard-conf-${partitionID}_0.json"
   enroll_evm_authorities "$validators" "$partitionID" || exit 1
   echo "enrolled $validators independent signing authorities against the full shard configuration"
+  if [ "${VR_LANE:-0}" = 1 ]; then
+    for i in $(seq 1 "$validators"); do provision_authority_fence "$i" || exit 1; done
+    echo "provisioned the activation fence of $validators signing authorities"
+  fi
+  if [ "${VR_POS:-0}" = 1 ]; then
+    for i in $(seq 1 "$validators"); do M2_CHAIN_ID="$postM2aChainID" vr_pos_pin_authority "$i" || exit 1; done
+  fi
 fi
 
 if [ "${UTB_LANE:-0}" = 1 ]; then
   # the combined UTB lane (scripts/utb-lane.sh): the any-age machinery with the signed trust-base entry profile on from the first voting epoch. The genesis
-  # entry, its pin and the deployment manifest are generated once, here, from the epoch-1 trust base the roots will start with.
-  [ "${ANYAGE_LANE:-0}" = 1 ] || { echo "UTB_LANE=1 requires ANYAGE_LANE=1 (the aggregator partition and the bridge)" >&2; exit 2; }
-  source scripts/lib/utb-lib.sh
+  # entry, its pin and the deployment manifest are generated once, here, from the epoch-1 trust base the roots will start with. A VR generation (VR_UTB) has
+  # no aggregator partition of its own here: its genesis entry came from `vr-genesis plan` and was checked by `vr-genesis verify`; the manifest is generated
+  # from the same trust base and must hold the same entry.
   UTB_ROOT_FLAGS_FN=utb_root_flags UTB_AGG_ENV_FN=utb_agg_env
   export UTB_ROOT_FLAGS_FN UTB_AGG_ENV_FN
+  if [ "${VR_UTB:-0}" = 1 ]; then
+    cp test-nodes/utb-genesis.cbor "$VR_DIR/utb-genesis.plan.cbor" && cp test-nodes/utb-genesis.id "$VR_DIR/utb-genesis.plan.id" || { echo "vr: the plan wrote no UTB genesis entry" >&2; exit 1; }
+  fi
   UTB_COMPONENTS=${UTB_COMPONENTS:-$(utb_lane_components)} utb_prepare_genesis test-nodes/trust-base.json || { echo "the UTB genesis could not be generated" >&2; exit 1; }
+  if [ "${VR_UTB:-0}" = 1 ]; then
+    cmp -s "$VR_DIR/utb-genesis.plan.cbor" test-nodes/utb-genesis.cbor && cmp -s "$VR_DIR/utb-genesis.plan.id" test-nodes/utb-genesis.id ||
+      { echo "vr: the manifest's UTB genesis entry is not the one vr-genesis plan emitted" >&2; exit 1; }
+  fi
   echo "UTB genesis entry $(utb_pin) (manifest $UTB_DIR/utb-manifest.json)"
 fi
 
 if [ "${ANYAGE_LANE:-0}" = 1 ] && [ -n "${ANYAGE_PREP_ONLY:-}" ]; then
-  # A dry run of the combined genesis: every offline input exists (P85 genesis, profile, identities, enrolled authorities, aggregator shard configurations,
-  # the bridge deployment derived from the identities); no reth, root, validator or aggregator process is started and no port is taken.
+  # A dry run of the combined genesis: every offline input exists (P85 genesis, profile, identities, enrolled authorities, aggregator shard configurations);
+  # no reth, root, validator or aggregator process is started and no port is taken.
   agg_prepare_confs || { echo "aggregator shard configuration failed" >&2; exit 1; }
-  if [ -n "${DNB_TOOL:-}" ]; then
-    BRIDGE_IDENTITIES=test-nodes/b1-identities.json
-    "$DNB_TOOL" deployment --identities "$BRIDGE_IDENTITIES" --agg-conf "$(for k in $(seq 1 "$aggShards"); do printf '%s,' "$(agg_conf "$k")"; done | sed 's/,$//')" --out test-nodes/bridge-deployment.json \
-      || { echo "the bridge deployment cannot be derived from this genesis' identities" >&2; exit 1; }
-    test -s test-nodes/bridge-deployment.json || { echo "dnb-tool wrote no bridge-deployment.json" >&2; exit 1; }
-  fi
-  echo "anyage prep only: P85 genesis, profile, identities, aggregator shard configurations${DNB_TOOL:+, bridge deployment} generated; nothing started"
+  echo "anyage prep only: P85 genesis, profile, identities, aggregator shard configurations generated; nothing started"
   exit 0
 fi
 
@@ -364,11 +506,12 @@ for i in $(seq 1 "$validators"); do
   # satisfy reth - nothing here pre-authenticates on its behalf.
   openssl rand -hex 32 >"test-nodes/evm$i/jwt.hex"
   registry_layout_require || exit 1
+  lane_preflight_ports "reth$i" $((rethEngineBase + i - 1)) $((rethEthBase + i - 1)) "$((rethP2PBase + i - 1))@0.0.0.0" || exit 1
   "$URETH_BIN" node --chain "$chainSpec" --datadir "test-nodes/reth$i/dd" \
     --authrpc.jwtsecret "test-nodes/evm$i/jwt.hex" \
     --authrpc.addr 127.0.0.1 --authrpc.port $((rethEngineBase + i - 1)) \
     --http --http.addr 127.0.0.1 --http.port $((rethEthBase + i - 1)) \
-    --http.api eth,net,web3,admin,debug --rpc.eth-proof-window 64 \
+    --http.api eth,net,web3,admin,debug $(urethPinStateProofFlags) \
     --port $((rethP2PBase + i - 1)) --disable-discovery \
     --ipcdisable --engine.persistence-threshold "$d2cPersistenceThreshold" \
     --builder.gaslimit "${URETH_BUILDER_GASLIMIT:-30000000}" \
@@ -402,21 +545,21 @@ pass "reth instances trust each other (transaction gossip peers)"
 if [ "${D2C_FAULT_SCENARIO:-}" = proof-outage ] || [ "${D2C_FAULT_SCENARIO:-}" = proof-corrupt ]; then
   mkdir -p test-nodes/proof-proxy
   printf '{"mode":"pass","until":0}\n' >test-nodes/proof-proxy/control.json
-  python3 scripts/d2c-proof-proxy.py --listen 127.0.0.1:18645 \
+  python3 scripts/d2c-proof-proxy.py --listen 127.0.0.1:$((18645+LANE_PORT_OFFSET)) \
     --target "http://127.0.0.1:$rethEthBase" \
     --control test-nodes/proof-proxy/control.json --log test-nodes/proof-proxy/proxy.log \
     >test-nodes/proof-proxy/stdout.log 2>&1 &
   echo $! >test-nodes/proof-proxy/pid
   ready=false
   for _ in $(seq 1 20); do
-    if curl -sS --max-time 2 -X POST http://127.0.0.1:18645 \
+    if curl -sS --max-time 2 -X POST http://127.0.0.1:$((18645+LANE_PORT_OFFSET)) \
       -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' 2>/dev/null | grep -q result; then
       ready=true; break
     fi
     sleep 0.25
   done
   $ready || { echo "D2C proof proxy did not start" >&2; exit 1; }
-  echo "D2C proof proxy routes validator 1 HTTP RPC through 127.0.0.1:18645"
+  echo "D2C proof proxy routes validator 1 HTTP RPC through 127.0.0.1:$((18645+LANE_PORT_OFFSET))"
 fi
 
 if [ "${D2C_FAULT_SCENARIO:-}" = hostile-builder ] || [ "${D2C_FAULT_SCENARIO:-}" = hostile-fee-recipient ]; then
@@ -469,20 +612,21 @@ cat >test-nodes/wrong-genesis.json <<'EOF'
 "baseFeePerGas":"0x3b9aca00"}
 EOF
 registry_layout_require || exit 1
+lane_preflight_ports "negative reth (wrong-genesis)" $((18651+LANE_PORT_OFFSET)) $((18645+LANE_PORT_OFFSET)) "$((30499+LANE_PORT_OFFSET))@0.0.0.0" || exit 1
 "$URETH_BIN" node --chain test-nodes/wrong-genesis.json --datadir test-nodes/reth-wrong/dd \
-  --authrpc.jwtsecret test-nodes/evm1/jwt.hex --authrpc.addr 127.0.0.1 --authrpc.port 18651 \
-  --http --http.addr 127.0.0.1 --http.port 18645 --http.api eth,net,web3 \
-  --port 30499 --disable-discovery --ipcdisable \
+  --authrpc.jwtsecret test-nodes/evm1/jwt.hex --authrpc.addr 127.0.0.1 --authrpc.port $((18651+LANE_PORT_OFFSET)) \
+  --http --http.addr 127.0.0.1 --http.port $((18645+LANE_PORT_OFFSET)) --http.api eth,net,web3 \
+  --port $((30499+LANE_PORT_OFFSET)) --disable-discovery --ipcdisable \
   $(urethPinUnicityFlags) \
   >test-nodes/reth-wrong/reth.log 2>&1 &
 echo $! >test-nodes/reth-wrong/pid
 for _ in $(seq 1 60); do
-  rpc http://127.0.0.1:18645 eth_chainId '[]' 2>/dev/null | grep -q result && break
+  rpc http://127.0.0.1:$((18645+LANE_PORT_OFFSET)) eth_chainId '[]' 2>/dev/null | grep -q result && break
   sleep 1
 done
 doctorOut=$(build/ubft shard-node doctor --home test-nodes/evm1 --executor engine-api \
   --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
-  --engine-url http://127.0.0.1:18651 --eth-url http://127.0.0.1:18645 \
+  --engine-url http://127.0.0.1:$((18651+LANE_PORT_OFFSET)) --eth-url http://127.0.0.1:$((18645+LANE_PORT_OFFSET)) \
   --jwt-secret test-nodes/evm1/jwt.hex 2>&1)
 doctorStatus=$?
 if [ "$doctorStatus" -ne 0 ] && echo "$doctorOut" | grep -qE '^\[FAIL\] chain identity[[:space:]]+engineapi: execution client reports chainId=31338, shard conf says 31337'; then
@@ -497,7 +641,7 @@ stop_pidfile test-nodes/reth-wrong/pid 'reth.* node'   # ownership-checked; remo
 # (for example, the intentionally absent root bootnodes at this preflight stage).
 capOut=$(build/ubft shard-node doctor --home test-nodes/evm1 --executor engine-api \
   --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
-  --engine-url http://127.0.0.1:18699 --eth-url "http://127.0.0.1:$rethEthBase" \
+  --engine-url http://127.0.0.1:$((18699+LANE_PORT_OFFSET)) --eth-url "http://127.0.0.1:$rethEthBase" \
   --jwt-secret test-nodes/evm1/jwt.hex 2>&1)
 capStatus=$?
 if [ "$capStatus" -ne 0 ] && echo "$capOut" | grep -qE '^\[FAIL\] engine link[[:space:]]+engineapi: checking capabilities:'; then
@@ -519,21 +663,23 @@ g["config"]["chainId"] = 31338
 json.dump(g, open("test-nodes/wrong-chain-genesis.json", "w"))
 PYGEN
 registry_layout_require || exit 1
+lane_preflight_ports "negative reth (wrong-chain-genesis)" $((18751+LANE_PORT_OFFSET)) $((18745+LANE_PORT_OFFSET)) "$((30599+LANE_PORT_OFFSET))@0.0.0.0" || exit 1
 "$URETH_BIN" node --chain test-nodes/wrong-chain-genesis.json --datadir test-nodes/reth-wrongchain/dd \
-  --authrpc.jwtsecret test-nodes/evm1/jwt.hex --authrpc.addr 127.0.0.1 --authrpc.port 18751 \
-  --http --http.addr 127.0.0.1 --http.port 18745 --http.api eth,net,web3 \
-  --port 30599 --disable-discovery --ipcdisable \
+  --authrpc.jwtsecret test-nodes/evm1/jwt.hex --authrpc.addr 127.0.0.1 --authrpc.port $((18751+LANE_PORT_OFFSET)) \
+  --http --http.addr 127.0.0.1 --http.port $((18745+LANE_PORT_OFFSET)) --http.api eth,net,web3 \
+  --port $((30599+LANE_PORT_OFFSET)) --disable-discovery --ipcdisable \
   $(urethPinUnicityFlags) \
   >test-nodes/reth-wrongchain/reth.log 2>&1 &
 echo $! >test-nodes/reth-wrongchain/pid
 for _ in $(seq 1 60); do
-  rpc http://127.0.0.1:18745 eth_chainId '[]' 2>/dev/null | grep -q result && break
+  rpc http://127.0.0.1:$((18745+LANE_PORT_OFFSET)) eth_chainId '[]' 2>/dev/null | grep -q result && break
   sleep 1
 done
+lane_port_preflight $((28001+LANE_PORT_OFFSET)) "negative shard node" || exit 1
 boundedRun 60 build/ubft shard-node run --home test-nodes/evm1 --executor engine-api --registry-layout "$(registry_layout)" \
-  --address /ip4/127.0.0.1/tcp/28001 --trust-base test-nodes/trust-base.json \
+  --address /ip4/127.0.0.1/tcp/$((28001+LANE_PORT_OFFSET)) --trust-base test-nodes/trust-base.json \
   --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
-  --engine-url http://127.0.0.1:18751 --eth-url http://127.0.0.1:18745 \
+  --engine-url http://127.0.0.1:$((18751+LANE_PORT_OFFSET)) --eth-url http://127.0.0.1:$((18745+LANE_PORT_OFFSET)) \
   --jwt-secret test-nodes/evm1/jwt.hex --log-format text --log-level info
 runOut=$boundedOut; runStatus=$boundedStatus
 if [ "$runStatus" -ne 0 ] && [ "$runStatus" -ne 124 ] && echo "$runOut" | grep -q 'startup chain-identity check' &&
@@ -557,20 +703,21 @@ g["alloc"]["0x00000000000000000000000000000000000000aa"] = {"balance": "0x1"}
 json.dump(g, open("test-nodes/other-genesis.json", "w"))
 PYGEN
 registry_layout_require || exit 1
+lane_preflight_ports "negative reth (other-genesis)" $((18851+LANE_PORT_OFFSET)) $((18845+LANE_PORT_OFFSET)) "$((30699+LANE_PORT_OFFSET))@0.0.0.0" || exit 1
 "$URETH_BIN" node --chain test-nodes/other-genesis.json --datadir test-nodes/reth-othergenesis/dd \
-  --authrpc.jwtsecret test-nodes/evm1/jwt.hex --authrpc.addr 127.0.0.1 --authrpc.port 18851 \
-  --http --http.addr 127.0.0.1 --http.port 18845 --http.api eth,net,web3 \
-  --port 30699 --disable-discovery --ipcdisable \
+  --authrpc.jwtsecret test-nodes/evm1/jwt.hex --authrpc.addr 127.0.0.1 --authrpc.port $((18851+LANE_PORT_OFFSET)) \
+  --http --http.addr 127.0.0.1 --http.port $((18845+LANE_PORT_OFFSET)) --http.api eth,net,web3 \
+  --port $((30699+LANE_PORT_OFFSET)) --disable-discovery --ipcdisable \
   $(urethPinUnicityFlags) \
   >test-nodes/reth-othergenesis/reth.log 2>&1 &
 echo $! >test-nodes/reth-othergenesis/pid
 for _ in $(seq 1 60); do
-  rpc http://127.0.0.1:18845 eth_chainId '[]' 2>/dev/null | grep -q result && break
+  rpc http://127.0.0.1:$((18845+LANE_PORT_OFFSET)) eth_chainId '[]' 2>/dev/null | grep -q result && break
   sleep 1
 done
 expectedGenesis=$(rpc "http://127.0.0.1:$rethEthBase" eth_getBlockByNumber '["0x0", false]' | pyget "['result']['hash']")
-otherChainID=$(rpc http://127.0.0.1:18845 eth_chainId '[]' | pyget "['result']")
-otherGenesis=$(rpc http://127.0.0.1:18845 eth_getBlockByNumber '["0x0", false]' | pyget "['result']['hash']")
+otherChainID=$(rpc http://127.0.0.1:$((18845+LANE_PORT_OFFSET)) eth_chainId '[]' | pyget "['result']")
+otherGenesis=$(rpc http://127.0.0.1:$((18845+LANE_PORT_OFFSET)) eth_getBlockByNumber '["0x0", false]' | pyget "['result']['hash']")
 info "configured expectation: chainId 31337, genesis $expectedGenesis"
 info "the other client reports: chainId $otherChainID (same), genesis $otherGenesis (different)"
 
@@ -585,10 +732,11 @@ elif [ "$expectedGenesis" = "$otherGenesis" ]; then
 elif [ "$otherChainID" != "0x7a69" ]; then
   fail "3d premise: the other client reports chainId $otherChainID, not 0x7a69 — this would be caught by the chain-id check, not the genesis check"
 else
+  lane_port_preflight $((28002+LANE_PORT_OFFSET)) "negative shard node" || exit 1
   boundedRun 60 build/ubft shard-node run --home test-nodes/evm1 --executor engine-api --registry-layout "$(registry_layout)" \
-    --address /ip4/127.0.0.1/tcp/28002 --trust-base test-nodes/trust-base.json \
+    --address /ip4/127.0.0.1/tcp/$((28002+LANE_PORT_OFFSET)) --trust-base test-nodes/trust-base.json \
     --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
-    --engine-url http://127.0.0.1:18851 --eth-url http://127.0.0.1:18845 \
+    --engine-url http://127.0.0.1:$((18851+LANE_PORT_OFFSET)) --eth-url http://127.0.0.1:$((18845+LANE_PORT_OFFSET)) \
     --expected-genesis-hash "$expectedGenesis" \
     --jwt-secret test-nodes/evm1/jwt.hex --log-format text --log-level info
   genOut=$boundedOut; genStatus=$boundedStatus
@@ -612,10 +760,11 @@ else
   # would accept this. It is refused because both identity checks now read the authenticated Engine
   # connection too — standard eth_chainId/eth_getBlockByNumber on the authrpc port, which the
   # Engine API's underlying-protocol section requires and this pinned client serves.
+  lane_port_preflight $((28003+LANE_PORT_OFFSET)) "negative shard node" || exit 1
   boundedRun 60 build/ubft shard-node run --home test-nodes/evm1 --executor engine-api --registry-layout "$(registry_layout)" \
-    --address /ip4/127.0.0.1/tcp/28003 --trust-base test-nodes/trust-base.json \
+    --address /ip4/127.0.0.1/tcp/$((28003+LANE_PORT_OFFSET)) --trust-base test-nodes/trust-base.json \
     --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
-    --engine-url http://127.0.0.1:18851 --eth-url "http://127.0.0.1:$rethEthBase" \
+    --engine-url http://127.0.0.1:$((18851+LANE_PORT_OFFSET)) --eth-url "http://127.0.0.1:$rethEthBase" \
     --jwt-secret test-nodes/evm1/jwt.hex --log-format text --log-level info
   pairOut=$boundedOut; pairStatus=$boundedStatus
   # The "--" before the pattern is load-bearing: this message STARTS with "--eth-url", and without
@@ -637,7 +786,7 @@ else
   # de-duplicated the chain-id check applies here too.
   pairDoctor=$(build/ubft shard-node doctor --home test-nodes/evm1 --executor engine-api \
     --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
-    --engine-url http://127.0.0.1:18851 --eth-url "http://127.0.0.1:$rethEthBase" \
+    --engine-url http://127.0.0.1:$((18851+LANE_PORT_OFFSET)) --eth-url "http://127.0.0.1:$rethEthBase" \
     --jwt-secret test-nodes/evm1/jwt.hex 2>&1)
   pairDoctorStatus=$?
   if [ "$pairDoctorStatus" -ne 0 ] && echo "$pairDoctor" | grep -qE '^\[FAIL\] genesis hash' &&
@@ -680,21 +829,22 @@ g["config"]["pragueTime"] = 4102444800  # 2100-01-01; far enough that it cannot 
 json.dump(g, open("test-nodes/laterfork-genesis.json", "w"))
 PYFORK
 registry_layout_require || exit 1
+lane_preflight_ports "negative reth (laterfork-genesis)" $((18951+LANE_PORT_OFFSET)) $((18945+LANE_PORT_OFFSET)) "$((30759+LANE_PORT_OFFSET))@0.0.0.0" || exit 1
 "$URETH_BIN" node --chain test-nodes/laterfork-genesis.json --datadir test-nodes/reth-laterfork/dd \
-  --authrpc.jwtsecret test-nodes/evm1/jwt.hex --authrpc.addr 127.0.0.1 --authrpc.port 18951 \
-  --http --http.addr 127.0.0.1 --http.port 18945 --http.api eth,net,web3 \
-  --port 30799 --disable-discovery --ipcdisable \
+  --authrpc.jwtsecret test-nodes/evm1/jwt.hex --authrpc.addr 127.0.0.1 --authrpc.port $((18951+LANE_PORT_OFFSET)) \
+  --http --http.addr 127.0.0.1 --http.port $((18945+LANE_PORT_OFFSET)) --http.api eth,net,web3 \
+  --port $((30759+LANE_PORT_OFFSET)) --disable-discovery --ipcdisable \
   $(urethPinUnicityFlags) \
   >test-nodes/reth-laterfork/reth.log 2>&1 &
 echo $! >test-nodes/reth-laterfork/pid
 for _ in $(seq 1 60); do
-  rpc http://127.0.0.1:18945 eth_chainId '[]' 2>/dev/null | grep -q result && break
+  rpc http://127.0.0.1:$((18945+LANE_PORT_OFFSET)) eth_chainId '[]' 2>/dev/null | grep -q result && break
   sleep 1
 done
 configuredGenesis=$(rpc "http://127.0.0.1:$rethEthBase" eth_getBlockByNumber '["0x0", false]' | pyget "['result']['hash']")
-laterChainID=$(rpc http://127.0.0.1:18945 eth_chainId '[]' | pyget "['result']")
-laterGenesis=$(rpc http://127.0.0.1:18945 eth_getBlockByNumber '["0x0", false]' | pyget "['result']['hash']")
-laterConfig=$(rpc http://127.0.0.1:18945 eth_config '[]')
+laterChainID=$(rpc http://127.0.0.1:$((18945+LANE_PORT_OFFSET)) eth_chainId '[]' | pyget "['result']")
+laterGenesis=$(rpc http://127.0.0.1:$((18945+LANE_PORT_OFFSET)) eth_getBlockByNumber '["0x0", false]' | pyget "['result']['hash']")
+laterConfig=$(rpc http://127.0.0.1:$((18945+LANE_PORT_OFFSET)) eth_config '[]')
 laterCode=$(echo "$laterConfig" | pyget "['error']['code']")
 laterError=$(echo "$laterConfig" | pyget "['error']['message']")
 okNext=$(rpc "http://127.0.0.1:$rethEthBase" eth_config '[]' | pyget "['result']['next']")
@@ -718,10 +868,11 @@ elif [ "$okNext" != "None" ]; then
   fail "3f premise: the configured client's eth_config reports a scheduled fork ('$okNext'), so the positive path would be refused too"
 else
   info "premise holds: identical chain id and genesis, Prague loaded at 4102444800, eth_config refuses unsupported Prague"
+  lane_port_preflight $((28004+LANE_PORT_OFFSET)) "negative shard node" || exit 1
   boundedRun 60 build/ubft shard-node run --home test-nodes/evm1 --executor engine-api --registry-layout "$(registry_layout)" \
-    --address /ip4/127.0.0.1/tcp/28004 --trust-base test-nodes/trust-base.json \
+    --address /ip4/127.0.0.1/tcp/$((28004+LANE_PORT_OFFSET)) --trust-base test-nodes/trust-base.json \
     --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
-    --engine-url http://127.0.0.1:18951 --eth-url http://127.0.0.1:18945 \
+    --engine-url http://127.0.0.1:$((18951+LANE_PORT_OFFSET)) --eth-url http://127.0.0.1:$((18945+LANE_PORT_OFFSET)) \
     --expected-genesis-hash "$configuredGenesis" \
     --jwt-secret test-nodes/evm1/jwt.hex --log-format text --log-level info
   forkOut=$boundedOut; forkStatus=$boundedStatus
@@ -740,7 +891,7 @@ else
   # doctor calls the same Adapter.CheckExecutionProfile.
   forkDoctor=$(build/ubft shard-node doctor --home test-nodes/evm1 --executor engine-api \
     --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
-    --engine-url http://127.0.0.1:18951 --eth-url http://127.0.0.1:18945 \
+    --engine-url http://127.0.0.1:$((18951+LANE_PORT_OFFSET)) --eth-url http://127.0.0.1:$((18945+LANE_PORT_OFFSET)) \
     --jwt-secret test-nodes/evm1/jwt.hex 2>&1)
   forkDoctorStatus=$?
   if [ "$forkDoctorStatus" -ne 0 ] && echo "$forkDoctor" | grep -qE '^\[FAIL\] execution profile' &&
@@ -785,6 +936,12 @@ if [ "${F8_MIXED_LANE:-0}" = 1 ]; then f8_prepare; fi
 if [ "${H3_ASSIGNMENT_LANE:-0}" = 1 ] || [ "${P85_LANE:-0}" = 1 ]; then   # the P85 joiner restores from a retained validator's archive (as the H3 joiner)
   export EVM_ARCHIVE_ROOT=test-nodes/h3-archives
   mkdir -p "$EVM_ARCHIVE_ROOT"
+elif [ "${VR_LANE:-0}" = 1 ] && [ "${VR_ARCHIVE:-0}" = 1 ]; then   # a long VR run (the joiner's): the journal is pruned by the archive replicas, and a joiner restores from an archive
+  export EVM_ARCHIVE_ROOT=test-nodes/vr-archives
+  mkdir -p "$EVM_ARCHIVE_ROOT"
+elif [ "${NB2_T7_LANE:-0}" = 1 ]; then
+  export EVM_ARCHIVE_ROOT=test-nodes/nb2-t7-archives
+  mkdir -p "$EVM_ARCHIVE_ROOT"
 elif [ "${H4_RESTORE_PROBE:-0}" = 1 ] || [ "${M2A_FINAL_RESTORE:-0}" = 1 ]; then
   export EVM_ARCHIVE_ROOT=test-nodes/h4-archives
   mkdir -p "$EVM_ARCHIVE_ROOT"
@@ -807,7 +964,7 @@ for i in $(seq 1 "$validators"); do
   export "EVM_ETH_URL_$i=http://127.0.0.1:$((rethEthBase + i - 1))"
 done
 if [ "${D2C_FAULT_SCENARIO:-}" = proof-outage ] || [ "${D2C_FAULT_SCENARIO:-}" = proof-corrupt ]; then
-  export EVM_ETH_URL_1=http://127.0.0.1:18645
+  export EVM_ETH_URL_1=http://127.0.0.1:$((18645+LANE_PORT_OFFSET))
 fi
 if [ "${D2C_FAULT_SCENARIO:-}" = hostile-builder ] || [ "${D2C_FAULT_SCENARIO:-}" = hostile-fee-recipient ]; then
   export EVM_ENGINE_URL_1="http://127.0.0.1:$engineProxyPort"
@@ -879,6 +1036,15 @@ else
   echo "--- evm1 tail ---"; tail -25 test-nodes/evm1/debug.log 2>/dev/null
   echo "--- reth1 tail ---"; tail -15 test-nodes/reth1/reth.log 2>/dev/null
 fi
+if [ "${NB2_T7_LANE:-0}" = 1 ]; then
+  $mined && $certified && [ "$failures" = "$preflightFailures" ] || exit 1
+  bash scripts/nb2-t7/drive.sh "http://127.0.0.1:$rethEthBase" "http://127.0.0.1:$(agg_port 1)" "$postM2aChainID" "$(utb_agg_history_url 1)" &
+  nb2DriverPid=$!
+  nb2Status=0
+  wait "$nb2DriverPid" || nb2Status=$?
+  nb2DriverPid=
+  exit "$nb2Status"
+fi
 if [ "${H4_RESTORE_PROBE:-0}" = 1 ]; then
   for i in $(seq 1 "$validators"); do
     ready=false
@@ -925,7 +1091,20 @@ if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
   pass "three aggregator shards certified alongside the EVM partition; UC/TR/EVM trace recorded"
 fi
 
-if [ "${M2_PROFILE2:-0}" = 1 ] && [ "${POST_M2A_SKIP_HANDOFF:-0}" != 1 ]; then
+if [ "${VR_LANE:-0}" = 1 ]; then
+  # a VR generation: the genesis committee reads back from VR through ureth; its handoffs are VT-05b's (the P85/Q3 operator handoffs do not
+  # apply in VR mode), so the profile-2 handoff steps are skipped
+  vr_readback "http://127.0.0.1:$rethEthBase" || { fail "the VR views do not read back the genesis committee"; exit 1; }
+  pass "VR reads back the genesis committee, the PoA module and GENESIS_RESULT through ureth"
+  echo "  info: VR lane: the profile-2 operator handoffs do not apply to a VR generation (its handoffs are VT-05b's); skipped"
+  if [ -n "${VR_STEPS:-}" ]; then   # the VR boundary steps on the running devnet (scripts/vr-boundary-steps.sh): the live run of a VR handoff
+    failures=${failures:-0}
+    source "$VR_STEPS"
+    echo "VR steps failures: $failures"
+    [ "$failures" -eq 0 ] && exit 0 || exit 1
+  fi
+fi
+if [ "${M2_PROFILE2:-0}" = 1 ] && [ "${POST_M2A_SKIP_HANDOFF:-0}" != 1 ] && [ "${VR_LANE:-0}" != 1 ]; then
   echo "=== M2 profile-2: two certified root handoffs with paid execution ==="
   if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
     f8_slow_stop_resume_evm || { fail "EVM delay/stop/resume probe failed"; exit 1; }
@@ -977,7 +1156,7 @@ fi
 
 echo
 echo "=== 6. D1 continuous certified execution through block $rounds ==="
-echo "timing: witness attempt=400ms episode=500ms, T2=5000ms, proof window=64 blocks"
+echo "timing: witness attempt=400ms episode=500ms, T2=5000ms, state proofs: $(urethPinStateProofFlags)"
 probeArgs=()
 faultArgs=()
 traceArgs=()
@@ -1160,11 +1339,12 @@ if [ "${M1_FEE_ACCOUNTING:-0}" = 1 ]; then
     fi
     if [ "$failures" -eq 0 ]; then
       registry_layout_require || exit 1
+      lane_preflight_ports "reth1 fee-floor restart" "$rethEngineBase" "$rethEthBase" "$rethP2PBase@0.0.0.0" || exit 1
       "$URETH_BIN" node --chain "$chainSpec" --datadir test-nodes/reth1/dd \
         --authrpc.jwtsecret test-nodes/evm1/jwt.hex \
         --authrpc.addr 127.0.0.1 --authrpc.port "$rethEngineBase" \
         --http --http.addr 127.0.0.1 --http.port "$rethEthBase" \
-        --http.api eth,net,web3,admin,debug --rpc.eth-proof-window 64 \
+        --http.api eth,net,web3,admin,debug $(urethPinStateProofFlags) \
         --port "$rethP2PBase" --disable-discovery --ipcdisable \
         --engine.persistence-threshold "$d2cPersistenceThreshold" --builder.gaslimit "${URETH_BUILDER_GASLIMIT:-30000000}" \
         $(urethPinUnicityFlags) >test-nodes/reth1/reth-restart.log 2>&1 &

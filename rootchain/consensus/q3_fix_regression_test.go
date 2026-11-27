@@ -73,9 +73,9 @@ func TestSuccessiveCoupledSupersessionInstall(t *testing.T) {
 			require.NoError(t, r.rt.Recover(context.Background()))
 			require.NoError(t, r.rt.Activate(context.Background(), r.bundle()))
 			anchor := r.manager.epochAnchor
-			_, err := r.manager.blockStore.Add(&rctypes.BlockData{Version: 3, Round: 7, Epoch: 2, Payload: &rctypes.Payload{Version: 3}, Anchor: anchor}, nil)
+			_, err := r.manager.blockStore().Add(&rctypes.BlockData{Version: 3, Round: 7, Epoch: 2, Payload: &rctypes.Payload{Version: 3}, Anchor: anchor}, nil)
 			require.NoError(t, err)
-			first, err := r.manager.blockStore.Block(7)
+			first, err := r.manager.blockStore().Block(7)
 			require.NoError(t, err)
 			key := types.PartitionShardID{PartitionID: q3fixture.PartitionID, ShardID: types.ShardID{}.Key()}
 			pending := first.ShardState.States[key]
@@ -101,8 +101,10 @@ func TestSuccessiveCoupledSupersessionInstall(t *testing.T) {
 				empty, dbErr := storage.NewBoltStorage(filepath.Join(t.TempDir(), "empty.db"))
 				require.NoError(t, dbErr)
 				t.Cleanup(func() { require.NoError(t, empty.Close()) })
-				r.manager.blockStore, err = storage.NewFromCheckpoint(crypto.SHA256, f.Snapshot, empty, r.orchestration, r.manager.log, storage.ProfileHandoff)
+				var newStore *storage.BlockStore
+				newStore, err = storage.NewFromCheckpoint(crypto.SHA256, f.Snapshot, empty, r.orchestration, r.manager.log, storage.ProfileHandoff)
 				require.NoError(t, err)
+				r.manager.storeRef.Store(newStore)
 			}
 			err = r.rt.Activate(context.Background(), q3active.Bundle{Envelope: second.EnvelopeBytes, Snapshot: second.Snapshot, Candidate: second.Candidate})
 			if name == "valid" {
@@ -139,7 +141,12 @@ func TestSuccessiveCoupledSupersessionInstall(t *testing.T) {
 
 func runtimeRequestHistory(t *testing.T, r *q3Replica) *q3active.RequestHistory {
 	t.Helper()
-	h, err := r.rt.RequestHistory(q3active.RequestHistoryConfig{Candidates: r.manager.blockStore, Anchor: func(types.PartitionID, types.ShardID) (*types.PartitionDescriptionRecord, error) {
+	h, err := r.rt.RequestHistory(q3active.RequestHistoryConfig{Candidates: r.manager.blockStore(), Anchor: func(partition types.PartitionID, shard types.ShardID) (*types.PartitionDescriptionRecord, error) {
+		for _, conf := range r.f.ExtraConfs {
+			if conf.PartitionID == partition && conf.ShardID.Equal(shard) {
+				return conf, nil
+			}
+		}
 		return r.f.ShardConf, nil
 	}, HashAlg: crypto.SHA256, Network: q3fixture.Network, Version: 1})
 	require.NoError(t, err)
@@ -178,12 +185,12 @@ func selectRuntimeRequestHistory(t *testing.T, r *q3Replica) *q3active.RequestHi
 	h := runtimeRequestHistory(t, r)
 	r.manager.irReqVerifier.SetRequestHistory(h)
 	resolver, err := NewRequestViewResolver(h, crypto.SHA256, func(p types.PartitionID, s types.ShardID) (*storage.ShardInfo, []byte, *types.InputRecord, error) {
-		state, err := r.manager.blockStore.GetState()
+		state, err := r.manager.blockStore().GetState()
 		if err != nil {
 			return nil, nil, nil, err
 		}
 		id, err := state.CommittedHead.Block.Hash(crypto.SHA256)
-		return r.manager.blockStore.ShardInfo(p, s), id, nil, err
+		return r.manager.blockStore().ShardInfo(p, s), id, nil, err
 	}, nil)
 	require.NoError(t, err)
 	r.manager.SetViewResolver(resolver)
@@ -208,10 +215,8 @@ func TestQ3InstallPreservesSelectedRequestHistory(t *testing.T) {
 			require.True(t, enabled)
 			require.EqualValues(t, 9, view.TotalWeight())
 			require.EqualValues(t, 5, view.Threshold())
-			proof := func(heavy bool) *rctypes.IRChangeReq {
-				tr := view.ExpectedTR()
-				uc, err := view.PreviousUC()
-				require.NoError(t, err)
+			// proofOn is the proof of the light or the heavy members built on the certificate uc, for the shard round and epoch of tr
+			proofOn := func(heavy bool, tr certification.TechnicalRecord, uc *types.UnicityCertificate) *rctypes.IRChangeReq {
 				req := &rctypes.IRChangeReq{Partition: q3fixture.PartitionID, Shard: types.ShardID{}, CertReason: rctypes.Quorum}
 				for _, id := range view.Context().NodeIDs() {
 					w, err := view.SignerWeight(id)
@@ -226,6 +231,11 @@ func TestQ3InstallPreservesSelectedRequestHistory(t *testing.T) {
 				}
 				return req
 			}
+			proof := func(heavy bool) *rctypes.IRChangeReq {
+				uc, err := view.PreviousUC()
+				require.NoError(t, err)
+				return proofOn(heavy, view.ExpectedTR(), uc)
+			}
 			lights, heavy := proof(false), proof(true)
 			_, err = r.manager.irReqVerifier.VerifyIRChangeReqView(view, lights)
 			require.ErrorIs(t, err, quorumweight.ErrQuorumNotReached)
@@ -233,34 +243,47 @@ func TestQ3InstallPreservesSelectedRequestHistory(t *testing.T) {
 			// The first successor block (7) switches the shard to the activated assignment and carries no request of it. The switch is a
 			// change in the pipeline until it commits (QC of block 8), so the shard's proof is first proposed in block 9.
 			var parent *storage.ExecutedBlock
-			parent, err = r.manager.blockStore.Block(anchor.Slot)
+			parent, err = r.manager.blockStore().Block(anchor.Slot)
 			require.NoError(t, err)
 			first := &rctypes.BlockData{Version: 3, Epoch: 2, Round: 7, Anchor: anchor, Payload: &rctypes.Payload{Version: 3}}
-			b7, err := parent.Extend(first, r.manager.irReqVerifier, r.orchestration, crypto.SHA256, r.manager.log, r.manager.blockStore.LeaderInputs())
+			b7, err := parent.Extend(first, r.manager.irReqVerifier, r.orchestration, crypto.SHA256, r.manager.log, r.manager.blockStore().LeaderInputs())
 			require.NoError(t, err)
 			second := &rctypes.BlockData{Version: 3, Epoch: 2, Round: 8, Payload: &rctypes.Payload{Version: 3},
 				Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 7, Epoch: 2, CurrentRootHash: b7.RootHash}, Signatures: map[string]hex.Bytes{r.id().String(): {1}}}}
-			b8, err := b7.Extend(second, r.manager.irReqVerifier, r.orchestration, crypto.SHA256, r.manager.log, r.manager.blockStore.LeaderInputs())
+			b8, err := b7.Extend(second, r.manager.irReqVerifier, r.orchestration, crypto.SHA256, r.manager.log, r.manager.blockStore().LeaderInputs())
 			require.NoError(t, err)
 			qc8 := &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 8, ParentRoundNumber: 7, Epoch: 2, CurrentRootHash: b8.RootHash},
 				LedgerCommitInfo: &types.UnicitySeal{Version: 1, NetworkID: 5, Epoch: 2, Timestamp: 99, RootChainRoundNumber: 7, Hash: b7.RootHash}, Signatures: map[string]hex.Bytes{r.id().String(): {1}}}
 			if persist {
-				_, err = r.manager.blockStore.Add(first, r.manager.irReqVerifier)
+				_, err = r.manager.blockStore().Add(first, r.manager.irReqVerifier)
 				require.NoError(t, err)
-				_, err = r.manager.blockStore.Add(second, r.manager.irReqVerifier)
+				_, err = r.manager.blockStore().Add(second, r.manager.irReqVerifier)
 				require.NoError(t, err)
-				_, err = r.manager.blockStore.ProcessQc(qc8)
+				_, err = r.manager.blockStore().ProcessQc(qc8)
 				require.NoError(t, err)
 			}
+			// Block 9 carries qc8, which commits block 7; a node processes it before it executes block 9 (onProposalMsg). Block 7
+			// recertified the shard in root epoch 2, so the requests of block 9 build on that certificate: one built on the closed epoch's
+			// certificate is refused (#1036). The commit is applied here to the parent block 9 is executed on, as the store applies it.
+			shardKey := types.PartitionShardID{PartitionID: q3fixture.PartitionID, ShardID: types.ShardID{}.Key()}
+			_, err = b8.Extend(&rctypes.BlockData{Version: 3, Epoch: 2, Round: 9, Payload: &rctypes.Payload{Version: 3, Requests: []*rctypes.IRChangeReq{heavy}}, Qc: qc8},
+				r.manager.irReqVerifier, r.orchestration, crypto.SHA256, r.manager.log, r.manager.blockStore().LeaderInputs())
+			require.ErrorIs(t, err, storage.ErrRequestBeforeActivation, "without the commit, the shard's certificate is the closed epoch's")
+			_, err = b7.GenerateCertificates(qc8)
+			require.NoError(t, err)
+			recert := b7.ShardState.States[shardKey].LastCR
+			require.EqualValues(t, 2, recert.UC.GetRootEpoch())
+			b8.ShardState.States[shardKey].LastCR = recert
+			lights, heavy = proofOn(false, recert.Technical, &recert.UC), proofOn(true, recert.Technical, &recert.UC)
 			block := func(req *rctypes.IRChangeReq) *rctypes.BlockData {
 				return &rctypes.BlockData{Version: 3, Epoch: 2, Round: 9, Payload: &rctypes.Payload{Version: 3, Requests: []*rctypes.IRChangeReq{req}}, Qc: qc8}
 			}
-			_, err = b8.Extend(block(lights), r.manager.irReqVerifier, r.orchestration, crypto.SHA256, r.manager.log, r.manager.blockStore.LeaderInputs())
+			_, err = b8.Extend(block(lights), r.manager.irReqVerifier, r.orchestration, crypto.SHA256, r.manager.log, r.manager.blockStore().LeaderInputs())
 			require.ErrorIs(t, err, quorumweight.ErrQuorumNotReached)
-			executed, err := b8.Extend(block(heavy), r.manager.irReqVerifier, r.orchestration, crypto.SHA256, r.manager.log, r.manager.blockStore.LeaderInputs())
+			executed, err := b8.Extend(block(heavy), r.manager.irReqVerifier, r.orchestration, crypto.SHA256, r.manager.log, r.manager.blockStore().LeaderInputs())
 			require.NoError(t, err)
 			if persist {
-				_, err = r.manager.blockStore.Add(block(heavy), r.manager.irReqVerifier)
+				_, err = r.manager.blockStore().Add(block(heavy), r.manager.irReqVerifier)
 				require.NoError(t, err)
 			}
 			shard := executed.ShardState.States[types.PartitionShardID{PartitionID: q3fixture.PartitionID, ShardID: types.ShardID{}.Key()}]

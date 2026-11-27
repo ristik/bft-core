@@ -1,0 +1,36 @@
+{
+  "Contracts": {
+    "FlatLineage": {
+      "address": "5f8bd49cd9f0cb2bd5bb9d4320dfe9b61023249d",
+      "createNonce": 1,
+      "initHash": "4892cb36a5a0a70cd5019f787d1555cacfcd7810f791cf8638c24619435b42d6",
+      "runtimeHash": "f75a2e5acc45056e536beab646856c6abe044f5448c85f676930c1161f379bc0"
+    },
+    "FlatReceipts": {
+      "address": "5dddfce53ee040d9eb21afbc0ae1bb4dbb0ba643",
+      "createNonce": 0,
+      "initHash": "3092470f4a480316a5a4f076f830cec3e06ab39626d1fa3319e75ad218e20ba1",
+      "runtimeHash": "324e6192e4440cf2b26831019d130043cea5b2a7afc5a652655092429a3669a6"
+    },
+    "NativeBridgeRecovery11": {
+      "address": "3a7c5e31b732201a71e46d6431d7a142b45602f5",
+      "createNonce": 3,
+      "initHash": "f08a775536f2502d33c4d7a021f8ac83528c56e07d5a6d5ef2c7a37ac8aad812",
+      "runtimeHash": "deb3ff31eab80840acebe2207e2aa4aef247e310f350458c60adcb81b9ea2296"
+    },
+    "NativeBridgeVerifier11": {
+      "address": "8fc11ea0315429b971aad0723b981a18cc54191b",
+      "createNonce": 2,
+      "initHash": "a97bb125f5b2d30f01432a0cdfc48f32a4edfdeae51c8f0c183e276ff2885945",
+      "runtimeHash": "f0ba9be0aed20270d9a1fea0aba38f11c8a9ae93b612fdbbee5a1c897e15dda5"
+    }
+  },
+  "Deployer": "1000000000000000000000000000000000000001",
+  "Domain": "1ce177655403c094e978b6c488e22103547e05f8318d9c67f072b5860ec1f893",
+  "Generation": "5e30219e2a58bd15c91133b1873056b495aa6f827866a87dfc88192d9048fd16",
+  "Pins": "da275fc6f37f152b026641e1820e14f852c0cf33458d5bdbab6e6926f9320241",
+  "RecoveryAddress": "3a7c5e31b732201a71e46d6431d7a142b45602f5",
+  "RecoveryRuntimeHash": "deb3ff31eab80840acebe2207e2aa4aef247e310f350458c60adcb81b9ea2296",
+  "RegistryRuntimeHash": "ebbadc64b3f723741dbf79e3ffd7bf2ea31daf4e4a949a3e01e5656926f446ae",
+  "Release": "e201fef995c3b13f761007690eb03eb681d712a77490d89265f9f45afec0fc67"
+}

@@ -42,6 +42,10 @@ type State struct {
 	// Retired are the (id, generation) retirement markers with the reference digest each retired with, ascending by key: a generation
 	// retires once, a repeat of the same request is no new record and a conflicting one is refused.
 	Retired []Retired
+	// HolderRetired are the holder-scoped (holder, id, generation) retirement markers of a validator-registry generation (record kind 8),
+	// ascending by key. The SealRegistry refuses a second record of one key (its v2 dedup key), so the root projects each key once: a repeat
+	// is no new record and a conflicting one is refused. Empty on every pre-VR state, which keeps that state's encoding at version 1.
+	HolderRetired []HolderRetired
 	// Resolved are the Election results the log has closed or acknowledged, ascending. A result resolves once: custody refuses a second
 	// SessionClosed, or an Ack, of a session that is no longer open, and its record cursor is strict, so a repeat would block every later
 	// record. The list grows by one per resolved election and is never pruned (replay needs it).
@@ -62,6 +66,13 @@ type PendingH struct {
 
 // Retired is one retirement marker.
 type Retired struct {
+	ID, Generation uint64
+	RefDigest      [32]byte
+}
+
+// HolderRetired is one holder-scoped retirement marker.
+type HolderRetired struct {
+	Holder         uint8
 	ID, Generation uint64
 	RefDigest      [32]byte
 }
@@ -97,6 +108,7 @@ func (s State) clone() State {
 	s.Awaiting = append([]Awaiting(nil), s.Awaiting...)
 	s.Closed = append([]Awaiting(nil), s.Closed...)
 	s.Retired = append([]Retired(nil), s.Retired...)
+	s.HolderRetired = append([]HolderRetired(nil), s.HolderRetired...)
 	s.Resolved = append([][32]byte(nil), s.Resolved...)
 	return s
 }
@@ -352,7 +364,8 @@ func (s State) HRoundAwaiting(epoch uint64) (uint64, bool) {
 
 const stateDomain = "UNICITY_P85_ROOT_SOURCE_STATE"
 
-// Bytes is the canonical encoding committed by Digest.
+// Bytes is the canonical encoding committed by Digest. A state without holder-scoped retirements is encoded exactly as before (version 1,
+// 19 fields), so every pre-VR state keeps its committed digest; one with any is version 2, the same fields followed by the markers.
 func (s State) Bytes() []byte {
 	pending := make([]any, 0, len(s.Pending))
 	for _, p := range s.Pending {
@@ -374,8 +387,17 @@ func (s State) Bytes() []byte {
 	for _, x := range s.Resolved {
 		resolved = append(resolved, x[:])
 	}
-	b, err := types.Cbor.Marshal([]any{stateDomain, uint64(1), s.Epoch, s.Offset, s.First, s.Frozen, s.Endpoint, s.NextEpoch, s.NextOffset, s.NextFirst,
-		pending, awaiting, retired, resolved, s.Count, s.Tip[:], s.LastProgress, s.LastTime, closed})
+	fields := []any{stateDomain, uint64(1), s.Epoch, s.Offset, s.First, s.Frozen, s.Endpoint, s.NextEpoch, s.NextOffset, s.NextFirst,
+		pending, awaiting, retired, resolved, s.Count, s.Tip[:], s.LastProgress, s.LastTime, closed}
+	if len(s.HolderRetired) > 0 {
+		holders := make([]any, 0, len(s.HolderRetired))
+		for _, x := range s.HolderRetired {
+			holders = append(holders, []any{uint64(x.Holder), x.ID, x.Generation, x.RefDigest[:]})
+		}
+		fields[1] = uint64(2)
+		fields = append(fields, holders)
+	}
+	b, err := types.Cbor.Marshal(fields)
 	if err != nil {
 		panic(err) // fixed shape of scalars and byte strings
 	}
@@ -388,13 +410,13 @@ func (s State) Digest() [32]byte { return sha256.Sum256(s.Bytes()) }
 // DecodeState parses the canonical encoding and refuses anything that is not exactly that or not internally consistent.
 func DecodeState(data []byte) (State, error) {
 	var f []any
-	if err := types.Cbor.Unmarshal(data, &f); err != nil || len(f) != 19 {
+	if err := types.Cbor.Unmarshal(data, &f); err != nil || (len(f) != 19 && len(f) != 20) {
 		return State{}, fmt.Errorf("%w: shape", ErrState)
 	}
 	if d, ok := f[0].(string); !ok || d != stateDomain {
 		return State{}, fmt.Errorf("%w: domain", ErrState)
 	}
-	if v, ok := f[1].(uint64); !ok || v != 1 {
+	if v, ok := f[1].(uint64); !ok || v != uint64(len(f)-18) {
 		return State{}, fmt.Errorf("%w: version", ErrState)
 	}
 	u := func(i int) uint64 { v, _ := f[i].(uint64); return v }
@@ -491,9 +513,34 @@ func DecodeState(data []byte) (State, error) {
 		copy(x[:], id)
 		s.Resolved = append(s.Resolved, x)
 	}
+	if len(f) == 20 {
+		hs, isArr := f[19].([]any)
+		if !isArr {
+			return State{}, fmt.Errorf("%w: field type", ErrState)
+		}
+		for _, hv := range hs {
+			hf, isArr := hv.([]any)
+			if !isArr || len(hf) != 4 {
+				return State{}, fmt.Errorf("%w: holder retired entry", ErrState)
+			}
+			var x HolderRetired
+			holder, g0 := hf[0].(uint64)
+			var g1, g2 bool
+			x.ID, g1 = hf[1].(uint64)
+			x.Generation, g2 = hf[2].(uint64)
+			ref, g3 := hf[3].([]byte)
+			if !g0 || holder >= MaxHolders || !g1 || !g2 || !g3 || len(ref) != 32 {
+				return State{}, fmt.Errorf("%w: holder retired field", ErrState)
+			}
+			x.Holder = uint8(holder)
+			copy(x.RefDigest[:], ref)
+			s.HolderRetired = append(s.HolderRetired, x)
+		}
+	}
 	if err := s.consistent(); err != nil {
 		return State{}, err
 	}
+	// a version 2 encoding with no marker is not canonical: Bytes writes that state as version 1
 	if !bytes.Equal(s.Bytes(), data) {
 		return State{}, fmt.Errorf("%w: not canonical", ErrState)
 	}
@@ -522,6 +569,8 @@ func (s State) consistent() error {
 		return fmt.Errorf("%w: resolved results not strictly ascending", ErrState)
 	case !retiredAscending(s.Retired):
 		return fmt.Errorf("%w: retired markers not strictly ascending", ErrState)
+	case !holderRetiredAscending(s.HolderRetired):
+		return fmt.Errorf("%w: holder retired markers not strictly ascending", ErrState)
 	case (s.Count == 0) != (s.Tip == [32]byte{}):
 		return fmt.Errorf("%w: log count %d with tip %x", ErrState, s.Count, s.Tip)
 	}

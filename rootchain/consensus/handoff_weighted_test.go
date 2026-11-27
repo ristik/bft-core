@@ -39,7 +39,7 @@ func id(n *testutils.TestNode) string { return n.PeerConf.ID.String() }
 func (f *planFixture) endorsedPlan(t *testing.T, stakes map[string]uint64, threshold uint64) (abdrc.HandoffApprovalMsg, []byte, []byte) {
 	t.Helper()
 	cm := f.cm
-	state, err := cm.blockStore.GetState()
+	state, err := cm.blockStore().GetState()
 	require.NoError(t, err)
 	state.CommittedHead.ShardInfo = []abdrc.ShardInfo{{Partition: 8, IR: &types.InputRecord{BlockHash: f.parentHash}}}
 	plan, err := cm.buildHandoffPlanFromState(&f.next, state, nil)

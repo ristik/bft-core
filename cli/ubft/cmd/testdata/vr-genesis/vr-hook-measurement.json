@@ -1,0 +1,46 @@
+{
+  "boundary": 17977775,
+  "caps": {
+    "adopt": 1000000,
+    "attach": 3000000,
+    "detach": 500000,
+    "elect": 4000000,
+    "gov": 1000000,
+    "output": 1000000,
+    "record": 1500000,
+    "resolved": 500000
+  },
+  "ceilings": {
+    "activations": 64,
+    "boundChanges": 16,
+    "boundPayload": 65536,
+    "changePayload": 16384,
+    "committee": 16,
+    "pendingChanges": 32
+  },
+  "combined": [
+    {
+      "name": "mixed-first",
+      "records": 32,
+      "reservation": 67744218
+    },
+    {
+      "name": "mixed-middle",
+      "records": 32,
+      "reservation": 67012828
+    },
+    {
+      "name": "mixed-last",
+      "records": 32,
+      "reservation": 66335058
+    }
+  ],
+  "elect": 7981487,
+  "h": 32,
+  "invariant": "vr-v1-single-live-output",
+  "moduleCodeHash": "0xdc32fd0656973ea957215de192a96e4287ba061afd663386af795d6c64c55814",
+  "records": 52265192,
+  "registry": "0xff00000000000000000000000000000000000003",
+  "registryCodeHash": "0x3abfd37f4f7c1f3e7af8b0a449a4c0b509ec49a1bfdfb7e669855f9c557c7b39",
+  "source": "ureth tests/vr_hook.rs over testdata/vr-hook.json sha256 0xf14727d0acf130d050eb141f70cfadee3163d6a04a3dde2e1b7cc95715171d29 (unicity-pos-contracts 85950b44 (bft-core#1319: record kind 9 PoPMissed; the origin of its registry genesis))"
+}

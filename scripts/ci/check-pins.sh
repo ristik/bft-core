@@ -2,14 +2,14 @@
 # Verifies the components of a lane run against the reviewed manifest scripts/ci/lane-pins.json and refuses a wrong pin.
 #   scripts/ci/check-pins.sh component NAME VALUE      VALUE (a 40-hex commit) must equal the pinned commit of NAME
 #   scripts/ci/check-pins.sh git NAME DIR              the HEAD of the checkout DIR (clean, no local change) must equal the pinned commit of NAME
-#   scripts/ci/check-pins.sh env                       every component the lane reads from the environment (AGG_COMMIT + the aggregator provenance, P85_CONTRACTS, NBP_DIR,
+#   scripts/ci/check-pins.sh env                       every component the lane reads from the environment (AGG_COMMIT + the aggregator provenance, P85_CONTRACTS,
 #                                                      UTB_SDK_JS, M2_URETH_COMMIT + M2_URETH_BIN's reported commit, FOUNDRY) against the manifest; prints one line each
-#   scripts/ci/check-pins.sh env-core                  the same for a lane without the aggregator, NBP and the SDK (ureth, contracts, Foundry)
+#   scripts/ci/check-pins.sh env-core                  the same for a lane without the aggregator and the SDK (ureth, contracts, Foundry)
 #   scripts/ci/check-pins.sh selftest                  chain-free tests: a right pin is accepted, a wrong one, a short one and an unknown component are refused
-# PINS=<file> selects another manifest (the self-test uses it). Exit status 0 only when everything checked matches.
+# PINS=<file> selects another manifest (the self-test uses it); without it the manifest of LANE_PRODUCT (scripts/ci/lane-product.sh manifest). Exit status 0 only when everything checked matches.
 set -uo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-PINS=${PINS:-$here/lane-pins.json}
+PINS=${PINS:-$("$here/lane-product.sh" manifest)}   # LANE_PRODUCT=pinned: the frozen product's dependency set (lane-product.sh)
 bad=0
 say() { printf '%s\n' "$*"; }
 pin_of() { jq -er --arg n "$1" '.components[$n].commit // empty' "$PINS" 2>/dev/null; }
@@ -56,7 +56,6 @@ case "${1:-}" in
       prov=$(dirname "$AGG_BIN"); [ -s "$prov/commit.txt" ] && check_component aggregator-go "$(tr -d '[:space:]' <"$prov/commit.txt")" || { say "FAIL  aggregator-go: no provenance commit.txt beside AGG_BIN"; bad=1; }
     else say "FAIL  aggregator-go: AGG_BIN is not set"; bad=1; fi
     check_git contracts "${P85_CONTRACTS:-/nonexistent}" || bad=1
-    check_git native-bridge-plugins "${NBP_DIR:-/nonexistent}" || bad=1
     check_git state-transition-sdk-js "${UTB_SDK_JS:-/nonexistent}" || bad=1
     reported=$("${M2_URETH_BIN:-/nonexistent}" --version 2>&1 | sed -n 's/^Commit SHA: //p' | head -1)
     check_component ureth "${reported:-none}" || bad=1
@@ -88,6 +87,13 @@ case "${1:-}" in
     n=$((n + 1)); if "$0" t6 >/dev/null 2>&1; then echo "  ok    the T6 script's defaults match the record"; else echo "  FAIL  the T6 script's defaults do not match the record"; fails=$((fails + 1)); fi
     jq '.t6.contracts.commit="0123456789abcdef0123456789abcdef01234567"' "$PINS" >"$t/t6a.json"; jq '.t6.foundry.linuxSha256="00"' "$PINS" >"$t/t6b.json"
     for m in t6a t6b; do n=$((n + 1)); if PINS=$t/$m.json "$0" t6 >/dev/null 2>&1; then echo "  FAIL  a T6 record that differs from the script ($m) was accepted"; fails=$((fails + 1)); else echo "  ok    a T6 record that differs from the script ($m) is refused"; fi; done
+    # the campaign's product pin (product=pinned): the real manifest carries a full bft-core commit; a product checkout at it is accepted by name, one elsewhere (the harness) is refused
+    n=$((n + 1)); if [[ "$(pin_of bft-core)" =~ ^[0-9a-f]{40}$ ]]; then echo "  ok    the manifest pins bft-core to a full commit"; else echo "  FAIL  the manifest has no full bft-core commit"; fails=$((fails + 1)); fi
+    mkdir "$t/product" && git -C "$t/product" init -q && git -C "$t/product" -c user.email=a@b -c user.name=a commit -q --allow-empty -m p
+    printf '{"components":{"bft-core":{"commit":"%s"}}}\n' "$(git -C "$t/product" rev-parse HEAD)" >"$t/pins5.json"
+    n=$((n + 1)); if PINS=$t/pins5.json "$0" git bft-core "$t/product" >/dev/null 2>&1; then echo "  ok    a product checkout at the bft-core pin is accepted"; else echo "  FAIL  a product checkout at the bft-core pin was refused"; fails=$((fails + 1)); fi
+    printf '{"components":{"bft-core":{"commit":"%s"}}}\n' "$good" >"$t/pins6.json"
+    n=$((n + 1)); if PINS=$t/pins6.json "$0" git bft-core "$t/product" >/dev/null 2>&1; then echo "  FAIL  a checkout that is not the bft-core pin was accepted as the product"; fails=$((fails + 1)); else echo "  ok    a checkout that is not the bft-core pin is refused as the product"; fi
     echo "check-pins self-test: $n cases, $fails failures"; [ "$fails" -eq 0 ]; exit $? ;;
   *) echo "usage: $0 component NAME VALUE | git NAME DIR | env | env-core | t6 | selftest" >&2; exit 2 ;;
 esac

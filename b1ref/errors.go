@@ -69,11 +69,9 @@ var (
 var (
 	ErrNetwork            = newSentinel(ErrInvalid, "network mismatch")
 	ErrEpochBeforeGenesis = newSentinel(ErrInvalid, "seal epoch is before the registry's genesis epoch")
-	ErrEpochNotUsable     = newSentinel(ErrInvalid, "seal epoch is after the usable origin epoch")
-	ErrOriginNotReady     = newSentinel(ErrInvalid, "the registry has no usable root origin yet")
+	ErrEpochNotUsable     = newSentinel(ErrInvalid, "seal epoch is after the imported registry tip")
 	ErrBeforeStart        = newSentinel(ErrInvalid, "root round before the interval start")
 	ErrAfterEnd           = newSentinel(ErrInvalid, "root round at or after the interval end")
-	ErrFuture             = newSentinel(ErrInvalid, "certificate root round is in the future")
 
 	ErrPartition     = newSentinel(ErrInvalid, "partition mismatch")
 	ErrShard         = newSentinel(ErrInvalid, "shard mismatch")
@@ -85,13 +83,14 @@ var (
 	ErrIRHash        = newSentinel(ErrInvalid, "input record digest mismatch")
 	ErrClaimConflict = newSentinel(ErrInvalid, "two different claims for one shard under one seal")
 
-	ErrUnknownSigner = newSentinel(ErrInvalid, "unknown signer")
-	ErrSigFormat     = newSentinel(ErrMalformed, "signature is not a canonical compact signature")
-	ErrSigRange      = newSentinel(ErrInvalid, "signature scalar out of range or high-s")
-	ErrSigInvalid    = newSentinel(ErrInvalid, "signature does not verify")
-	ErrQuorum        = newSentinel(ErrInvalid, "quorum not reached")
-	ErrRSMTZeroRoot  = newSentinel(ErrInvalid, "zero root")
-	ErrRSMTFold      = newSentinel(ErrInvalid, "membership fold does not reach the root")
+	// Why a signature does not count (CheckSealSignature). None of them fails a seal: a signature that does not count contributes zero and the
+	// seal is judged by the weight that does (ErrQuorum).
+	ErrSigFormat    = newSentinel(ErrMalformed, "signature is not exactly 65 bytes with a recovery ID 0..3")
+	ErrSigRange     = newSentinel(ErrInvalid, "signature scalar out of range or high-s")
+	ErrSigInvalid   = newSentinel(ErrInvalid, "signature does not recover to the member's key")
+	ErrQuorum       = newSentinel(ErrInvalid, "quorum not reached")
+	ErrRSMTZeroRoot = newSentinel(ErrInvalid, "zero root")
+	ErrRSMTFold     = newSentinel(ErrInvalid, "membership fold does not reach the root")
 )
 
 // ErrInfrastructure is the family of execution failures that are neither a verdict nor a halt: impossible admitted registry

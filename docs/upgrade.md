@@ -2,6 +2,18 @@
 
 Notes for upgrades which need more than replacing the binary of one node at a time.
 
+## Validator registry activation schedule
+
+Start VT-07 on a fresh generation. In VR mode, point each root's `--pos-evm-rpc` at a private
+execution endpoint that can serve historical state proofs for every queued certified block hash.
+The paired VR devnet enables `--unicity.archive-state-proofs` automatically and requires a ureth
+binary that supports it. It pins ureth #106 until the shared lane pin includes that support.
+For a manual paired deployment, enable the flag and retain account and
+storage history.
+The ordinary bounded proof window can leave an old observation waiting for a proof after an
+execution-client outage. The root retains that observation and resumes replay when its proof
+becomes available.
+
 ## Strict signature rule (bft-go-base `uc-consolidation`)
 
 The technical reasoning, the example and the full procedure are in
@@ -162,6 +174,7 @@ network needs to be looked at first.
 
 The signature rule above comes from bft-go-base; its own rollout note is [docs/UPGRADING.md](https://github.com/ristik/bft-go-base/blob/main/docs/UPGRADING.md)
 in ristik/bft-go-base (pinned at `8890ddce75de`, which also adds the canonical absent-hash rule of bft-go-base#3: an empty `stateHash`/`changeRecordHash` of a V2 entry is refused, absent is null). In this repository: native messages and V2 trust-base entries take the 65-byte recoverable rule (`votesig.CheckSignatureShape`:
-65 bytes, recovery ID 0..3); the frozen B1 and S1 reference profiles keep their own acceptance (64 bytes, or 65 with a recovery byte 0 or 1) through the
-explicit compact verifier (`b1ref.verifyCompact`, `s1ref.verifyCompact`), so a library bump does not change what those profiles accept. Tightening them is
-a coordinated re-pin of the Go, Rust and contract implementations, not part of this sync.
+65 bytes, recovery ID 0..3); the frozen B1 reference profile keeps its own acceptance (64 bytes, or 65 with a recovery byte 0 or 1) through the
+explicit compact verifier (`b1ref.verifyCompact`), so a library bump does not change what it accepts. Tightening it is a coordinated re-pin of the Go,
+Rust and contract implementations, not part of this sync. The S1 reference oracle (reserved, not activated) follows P85 evidence instead (#1297, D5 §2):
+exactly 65 bytes, recovery byte 0 or 1, low s, one recovery with that parity (`s1ref.checkSignature`).

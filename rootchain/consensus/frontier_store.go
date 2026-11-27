@@ -26,6 +26,8 @@ var _ interface {
 	HandoffReceipts([]byte) ([]byte, error)
 	StoreHandoffCandidate([]byte, []byte) error
 	HandoffCandidate([]byte) ([]byte, error)
+	StoreHandoffVRCandidate([]byte, []byte) error
+	HandoffVRCandidate([]byte) ([]byte, error)
 	StoreHandoffCheckpoint(uint64, []byte) error
 	HandoffCheckpoint(uint64) ([]byte, error)
 	handoffBundleArchive
@@ -34,7 +36,20 @@ var _ interface {
 	storage.RecordStore
 	storage.CutStore
 	storage.BlockCommitter
+	storage.LastTCRounder
 } = (*frontierPersistentStore)(nil)
+
+// LastTCRound forwards the cheap stored-TC round of the real store; otherwise it decodes the stored TC.
+func (s *frontierPersistentStore) LastTCRound() (uint64, bool, error) {
+	if store, ok := s.PersistentStore.(storage.LastTCRounder); ok {
+		return store.LastTCRound()
+	}
+	tc, err := s.ReadLastTC()
+	if err != nil || tc == nil {
+		return 0, false, err
+	}
+	return tc.GetRound(), true, nil
+}
 
 func (s *frontierPersistentStore) fault(err error) error {
 	if err != nil {
@@ -111,9 +126,12 @@ func (s *frontierPersistentStore) GetCut(key storage.CutKey) (storage.DurableCut
 }
 
 // CommitBlock forwards the atomic commit when the real store has one; otherwise it falls back to the separate writes.
-func (s *frontierPersistentStore) CommitBlock(block *storage.ExecutedBlock, recs []rootrecords.Record, cut *storage.CutEntry) error {
+func (s *frontierPersistentStore) CommitBlock(block *storage.ExecutedBlock, recs []rootrecords.Record, cut *storage.CutEntry, obs []storage.ObservationInput) error {
 	if store, ok := s.PersistentStore.(storage.BlockCommitter); ok {
-		return s.fault(store.CommitBlock(block, recs, cut))
+		return s.fault(store.CommitBlock(block, recs, cut, obs))
+	}
+	if len(obs) > 0 {
+		return s.fault(storage.ErrNoAtomicObservationCommit)
 	}
 	// the real store cannot commit atomically: the same writes in the order a crash repeats idempotently
 	if len(recs) > 0 {
@@ -250,6 +268,20 @@ func (s *frontierPersistentStore) HandoffCandidate(id []byte) ([]byte, error) {
 	return nil, nil // callers treat a store with no candidates as having none
 }
 
+func (s *frontierPersistentStore) StoreHandoffVRCandidate(id, candidate []byte) error {
+	if store, ok := s.PersistentStore.(interface{ StoreHandoffVRCandidate([]byte, []byte) error }); ok {
+		return store.StoreHandoffVRCandidate(id, candidate)
+	}
+	return storage.ErrAssignmentHistory
+}
+
+func (s *frontierPersistentStore) HandoffVRCandidate(id []byte) ([]byte, error) {
+	if store, ok := s.PersistentStore.(interface{ HandoffVRCandidate([]byte) ([]byte, error) }); ok {
+		return store.HandoffVRCandidate(id)
+	}
+	return nil, nil
+}
+
 // StoreHandoffCheckpoint and HandoffCheckpoint forward the canonical handoff checkpoint. Without them the block tree sees no checkpoint
 // retention, captures nothing, and serves the current root, which is the committing block only until the next commit.
 func (s *frontierPersistentStore) StoreHandoffCheckpoint(epoch uint64, data []byte) error {
@@ -289,4 +321,19 @@ func (s *frontierPersistentStore) InstallEpochAnchorRoot(block *storage.Executed
 		return errors.New("atomic epoch anchor storage unavailable")
 	}
 	return s.fault(store.InstallEpochAnchorRoot(block, a))
+}
+
+// PendingObservations and AckObservation forward the durable observation queue of the real store.
+func (s *frontierPersistentStore) PendingObservations(max int) ([]storage.ObservationInput, storage.ObservationCursor, error) {
+	if q, ok := s.PersistentStore.(storage.ObservationQueue); ok {
+		return q.PendingObservations(max)
+	}
+	return nil, storage.ObservationCursor{}, storage.ErrAssignmentHistory
+}
+
+func (s *frontierPersistentStore) AckObservation(id storage.ObservationID, prev [32]byte) error {
+	if q, ok := s.PersistentStore.(storage.ObservationQueue); ok {
+		return q.AckObservation(id, prev)
+	}
+	return storage.ErrAssignmentHistory
 }

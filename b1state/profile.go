@@ -37,7 +37,14 @@ type Profile struct {
 	// when set they are part of the profile hash and the hook needs RecordsCustody. A profile without them hashes exactly as before.
 	ElectionContract [20]byte
 	ElectGas         uint64
+	// ExecutionRevision is the execution revision (bft-core#1199): the native precompile set and semantics the execution client must implement.
+	// It must equal CurrentExecutionRevision exactly (zero and any other value are refused) and is part of the profile hash, under the V2 domain.
+	ExecutionRevision uint64
 }
+
+// ProfileHashDomain is the versioned domain of the profile hash. V2 (bft-core#1199) adds the execution-profile revision; the V1 domain
+// "UNICITY_B1_PROFILE" no longer hashes anything in this binary, so a V1 identity cannot be reproduced or confused with a V2 one.
+const ProfileHashDomain = "UNICITY_B1_PROFILE_V2"
 
 // HookReadsGas reserves the gate reads of the records hook: custody.recordCursor, registry.recordCount and recordTargetCount, and
 // custody.limits (H must fit its maxBatch) before the call, custody.recordCursor after it. Each is a cold staticcall of a few thousand gas; the figure is a price with a wide margin.
@@ -124,12 +131,23 @@ func (p Profile) RequiredSystemGas() (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if p.RestGas > math.MaxUint64-UpdateGasBase-ImportEnvelopeGas-hook || k > (math.MaxUint64-UpdateGasBase-p.RestGas-ImportEnvelopeGas-hook)/PerEpochGas() {
+	// every addition is checked before it is made (no unsigned subtraction of a term that was not shown to fit)
+	epochs, ok := mulU64(PerEpochGas(), k)
+	if !ok {
 		return 0, ErrOverflow
 	}
-	return UpdateGasBase + PerEpochGas()*k + p.RestGas + ImportEnvelopeGas + hook, nil
+	total := UpdateGasBase
+	for _, term := range []uint64{epochs, p.RestGas, ImportEnvelopeGas, hook} {
+		if total, ok = addU64(total, term); !ok {
+			return 0, ErrOverflow
+		}
+	}
+	return total, nil
 }
 func (p Profile) Validate() error {
+	if err := CheckExecutionRevision(p.ExecutionRevision); err != nil {
+		return err
+	}
 	if p.Network == 0 || p.RootGenesisID == ([32]byte{}) || p.ExecutionChainID == 0 || p.RuntimeHash == ([32]byte{}) || p.CompilerHash == ([32]byte{}) || p.RestGas == 0 || p.GenesisUCTime == 0 || !p.validHook() || p.DeltaEV >= p.DeltaHold || p.MaxEpochsPerUpdate < MinEpochsPerUpdate {
 		return ErrProfile
 	}
@@ -157,12 +175,15 @@ func (p Profile) Hash() ([32]byte, error) {
 	// All frozen bounds and prices are committed, including caller metering and
 	// the supported signing and quorum policies, rather than inferred locally.
 	// A profile without the election hook hashes exactly as it did before the hook existed; one with it commits three more items.
-	items := uint64(35)
+	// The V2 domain (#1199) commits the execution revision as an unsigned integer right after the domain (one more array item), so the profile
+	// hash of a different native EVM generation differs, and no profile hashes under the old domain any more.
+	items := uint64(36)
 	if p.ElectionEnabled() {
 		items += 3
 	}
 	b := array(nil, items)
-	b = textValue(b, "UNICITY_B1_PROFILE")
+	b = textValue(b, ProfileHashDomain)
+	b = uintValue(b, p.ExecutionRevision)
 	for _, v := range []uint64{uint64(p.Network), p.MaxEpochsPerUpdate, p.DeltaEV, p.DeltaHold, p.SystemGas, p.ForcedGas, p.MaxGas, p.OrdinaryCapacity, p.RestGas, p.CompanionBytes, p.OtherCompanionBytes, k, c, t, p.GenesisUCTime} {
 		b = uintValue(b, v)
 	}
@@ -201,4 +222,30 @@ func SystemGas(budget, admit, open, imp, finalize, hooks uint64) (uint64, error)
 		return 0, ErrBudget
 	}
 	return admit + open + imp + finalize + hooks, nil
+}
+
+func addU64(a, b uint64) (uint64, bool) {
+	if a > math.MaxUint64-b {
+		return 0, false
+	}
+	return a + b, true
+}
+
+func mulU64(a, b uint64) (uint64, bool) {
+	if a != 0 && b > math.MaxUint64/a {
+		return 0, false
+	}
+	return a * b, true
+}
+
+// MaxGasFor is SystemGas + ForcedGas + ordinary capacity with every addition checked.
+func MaxGasFor(systemGas, forcedGas, ordinaryCapacity uint64) (uint64, error) {
+	t, ok := addU64(systemGas, forcedGas)
+	if ok {
+		t, ok = addU64(t, ordinaryCapacity)
+	}
+	if !ok {
+		return 0, ErrOverflow
+	}
+	return t, nil
 }

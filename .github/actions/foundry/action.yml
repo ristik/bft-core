@@ -1,0 +1,16 @@
+name: Pinned Foundry
+description: Installs the Foundry release pinned in scripts/ci/lane-pins.json (digest-verified; the archive is cached by digest; bounded retries) and puts it on PATH. Replaces foundry-rs/foundry-toolchain, whose foundryup fetches an attestation and the archive from github.com without retries (bft-core CI, 2026-11-08, repeated 504s).
+runs:
+  using: composite
+  steps:
+    - id: pin
+      shell: bash
+      run: echo "sha=$(jq -er .toolchains.foundry.sha256 scripts/ci/lane-pins.json)" >>"$GITHUB_OUTPUT"
+    - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      with:
+        path: ~/.cache/unicity-foundry
+        key: foundry-${{ steps.pin.outputs.sha }}
+    - shell: bash
+      run: |
+        scripts/ci/install-foundry.sh
+        echo "$HOME/.foundry/bin" >>"$GITHUB_PATH"

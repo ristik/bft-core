@@ -70,7 +70,26 @@ const (
 	// opSignElectionPoP and opSignDelegationPossession ask for the two EVM possession signatures of the P85 contracts. Operator channel only.
 	opSignElectionPoP          op = 107
 	opSignDelegationPossession op = 108
+	// opAdvanceWithProof is the proof-verified advance (#1085): one root activation bundle, which the authority verifies against its own
+	// lineage. Operator channel only. It is bounded by the frame like every message: one activation per call.
+	opAdvanceWithProof op = 109
+	// opSignRegistration asks for the EVM possession signature of VR.register / VR.proposeBinding (VT-10). Operator channel only.
+	opSignRegistration op = 110
+	// opReloadRegistrationPolicy replaces the authorized registrations of a running authority; the deployment pin, key and record are
+	// untouched. Operator channel only.
+	opReloadRegistrationPolicy op = 111
+	// opSignPosPoP asks for the P85 assignment possession proof of the pinned election; opSetPosPolicy pins that election once (#1216).
+	// Operator channel only.
+	opSignPosPoP     op = 112
+	opSetPosPolicy   op = 113
+	opPublishSession op = 114
 )
+
+// MaxAdvanceProofBytes is the largest activation bundle one opAdvanceWithProof can carry: the frame less an allowance for the request's
+// own fields. It is the bound in force for a signing authority (activationproof.MaxBundleBytes, the envelope's own 16 MiB, is looser); a
+// root's one-activation bundle of a committee of the profile's 16 members is a small fraction of it. The operator CLI checks a proof file
+// against it before reading the file.
+const MaxAdvanceProofBytes = MaxFrameBytes - 4*1024
 
 func (o op) servedToClient() bool {
 	switch o {
@@ -80,9 +99,13 @@ func (o op) servedToClient() bool {
 	return false
 }
 
+// servedToPoP is the whole of the automated member's channel: the handoff possession proof and nothing else.
+func (o op) servedToPoP() bool { return o == opSignHandoffPoP }
+
 func (o op) servedToOperator() bool {
 	switch o {
-	case opReplaceSession, opStatus, opEnrollment, opCompleteEnrollment, opAdvanceEpoch, opSignHandoffPoP, opSignElectionPoP, opSignDelegationPossession:
+	case opReplaceSession, opStatus, opEnrollment, opCompleteEnrollment, opAdvanceEpoch, opSignHandoffPoP, opSignElectionPoP, opSignDelegationPossession,
+		opAdvanceWithProof, opSignRegistration, opReloadRegistrationPolicy, opSignPosPoP, opSetPosPolicy, opPublishSession:
 		return true
 	}
 	return false
@@ -102,6 +125,8 @@ func (o op) String() string {
 		return "restore-status"
 	case opReplaceSession:
 		return "replace-session"
+	case opPublishSession:
+		return "publish-session"
 	case opStatus:
 		return "status"
 	case opEnrollment:
@@ -116,8 +141,31 @@ func (o op) String() string {
 		return "sign-election-pop"
 	case opSignDelegationPossession:
 		return "sign-delegation-possession"
+	case opAdvanceWithProof:
+		return "advance-with-proof"
+	case opSignRegistration:
+		return "sign-registration"
+	case opReloadRegistrationPolicy:
+		return "reload-registration-policy"
+	case opSignPosPoP:
+		return "sign-pos-pop"
+	case opSetPosPolicy:
+		return "set-pos-policy"
 	}
 	return fmt.Sprintf("unknown(%d)", uint64(o))
+}
+
+type publishSessionRequest struct {
+	_       struct{} `cbor:",toarray"`
+	Target  string
+	Replace bool
+}
+
+type publishSessionResult struct {
+	_               struct{} `cbor:",toarray"`
+	Managed         bool
+	Issued          bool
+	ActiveAlternate string
 }
 
 type wireRequest struct {
@@ -170,6 +218,42 @@ type statusPayload struct {
 	KeyLost          bool
 	RootEpoch        uint64
 	ShardEpoch       uint64
+	// the proof-verified advance (#1085); an authority before it answers statusPayloadV2
+	LineagePinned bool
+	LineageEpoch  uint64
+	Retired       bool
+	SessionIssued bool
+}
+
+// statusPayloadV2 is the layout with the epochs and before the lineage fields.
+type statusPayloadV2 struct {
+	_                struct{} `cbor:",toarray"`
+	Generation       uint64
+	ReservedRound    uint64
+	HasReservation   bool
+	ResponseRetained bool
+	Faulted          bool
+	KeyLost          bool
+	RootEpoch        uint64
+	ShardEpoch       uint64
+}
+
+func statusPayloadOf(st signingauthority.Status) statusPayload {
+	return statusPayload{RootEpoch: st.RootEpoch, ShardEpoch: st.ShardEpoch, Generation: st.Generation, ReservedRound: st.ReservedRound,
+		HasReservation: st.HasReservation, ResponseRetained: st.ResponseRetained, Faulted: st.Faulted, KeyLost: st.KeyLost,
+		LineagePinned: st.LineagePinned, LineageEpoch: st.LineageEpoch, Retired: st.Retired, SessionIssued: st.SessionIssued}
+}
+
+// advanceResultPayload answers opAdvanceWithProof.
+type advanceResultPayload struct {
+	_            struct{} `cbor:",toarray"`
+	Epoch        uint64
+	Replay       bool
+	Advanced     bool
+	Retired      bool
+	RootEpoch    uint64
+	ShardEpoch   uint64
+	LineageEpoch uint64
 }
 
 // statusPayloadV1 is the first status layout, before the root and shard epochs were added: the six fields an authority built before
@@ -194,6 +278,11 @@ func decodeStatus(raw []byte) (statusPayload, error) {
 	currentErr := types.Cbor.Unmarshal(raw, &current)
 	if currentErr == nil {
 		return current, nil
+	}
+	var v2 statusPayloadV2
+	if err := types.Cbor.Unmarshal(raw, &v2); err == nil {
+		return statusPayload{Generation: v2.Generation, ReservedRound: v2.ReservedRound, HasReservation: v2.HasReservation, ResponseRetained: v2.ResponseRetained,
+			Faulted: v2.Faulted, KeyLost: v2.KeyLost, RootEpoch: v2.RootEpoch, ShardEpoch: v2.ShardEpoch}, nil
 	}
 	var v1 statusPayloadV1
 	if err := types.Cbor.Unmarshal(raw, &v1); err != nil {
@@ -235,6 +324,39 @@ type electionPoPPayload struct {
 	Attempt     uint64
 }
 
+// registrationPayload is the structured request of opSignRegistration: the domain, the owner, the identity and the registration. The digest
+// is computed by the authority; the deployment is pinned there.
+type registrationPayload struct {
+	_          struct{} `cbor:",toarray"`
+	Domain     string
+	Owner      []byte
+	ID         uint64
+	RootNodeID string
+	RootKey    []byte
+	EVMNodeID  string
+	EVMKey     []byte
+	Payee      []byte
+	Nonce      uint64
+}
+
+// registrationPolicyPayload is the structured request of opReloadRegistrationPolicy: the authorized registrations, never a deployment.
+type registrationPolicyPayload struct {
+	_ struct{} `cbor:",toarray"`
+	// the deployment the list is for: expected to equal the authority's pin
+	Network, ChainID, Registry []byte
+	Authorized                 []authorizedRegistration
+}
+
+type authorizedRegistration struct {
+	_          struct{} `cbor:",toarray"`
+	Domain     string
+	Owner      []byte
+	ID         uint64
+	RootNodeID string
+	RootKey    []byte
+	Payee      []byte
+}
+
 // delegationPayload is the structured request of opSignDelegationPossession: the admitDelegation payload and the election it is for.
 type delegationPayload struct {
 	_               struct{} `cbor:",toarray"`
@@ -251,6 +373,20 @@ type delegationPayload struct {
 	RoleNonce       uint64
 	DelegationNonce uint64
 	Expiry          uint64
+}
+
+// posPoPPayload is the structured request of opSignPosPoP: the frozen result's fields; the election, chain and network are the authority's pin.
+type posPoPPayload struct {
+	_                                struct{} `cbor:",toarray"`
+	ResultID, AssignmentID, Snapshot []byte
+	Attempt, ID, Generation          uint64
+}
+
+// posPolicyPayload is the structured request of opSetPosPolicy.
+type posPolicyPayload struct {
+	_                          struct{} `cbor:",toarray"`
+	Network, ChainID, Election []byte
+	IDs                        []uint64
 }
 
 type advanceEpochPayload struct {

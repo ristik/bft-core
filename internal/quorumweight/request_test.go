@@ -137,13 +137,13 @@ type member struct {
 func nodeInfos(t *testing.T, ms ...member) []*types.NodeInfo {
 	out := make([]*types.NodeInfo, len(ms))
 	for i, m := range ms {
-		out[i] = &types.NodeInfo{NodeID: m.id, SigKey: key(t, byte(i+1)), Stake: m.weight}
+		out[i] = &types.NodeInfo{NodeID: m.id, SigKey: key(t, i+1), Stake: m.weight}
 	}
 	return out
 }
 
-func key(t *testing.T, seed byte) []byte {
-	signer, err := abcrypto.NewInMemorySecp256K1SignerFromKey(append(make([]byte, 31), seed))
+func key(t *testing.T, seed int) []byte {
+	signer, err := abcrypto.NewInMemorySecp256K1SignerFromKey(append(make([]byte, 30), byte(seed>>8), byte(seed)))
 	require.NoError(t, err)
 	v, err := signer.Verifier()
 	require.NoError(t, err)
@@ -244,8 +244,8 @@ func coupled(t *testing.T, ws ...uint64) (*types.PartitionDescriptionRecord, *Co
 	root := make([]evmassign.RootMember, len(ws))
 	bind := make([]evmassign.Binding, len(ws))
 	for i, w := range ws {
-		evm[i] = &types.NodeInfo{NodeID: fmt.Sprintf("e%02d", i), SigKey: key(t, byte(i+1)), Stake: w}
-		root[i] = evmassign.RootMember{NodeID: fmt.Sprintf("r%02d", i), Key: key(t, byte(i+101)), Weight: w}
+		evm[i] = &types.NodeInfo{NodeID: fmt.Sprintf("e%03d", i), SigKey: key(t, i+1), Stake: w}
+		root[i] = evmassign.RootMember{NodeID: fmt.Sprintf("r%03d", i), Key: key(t, i+1001), Weight: w}
 		bind[i] = evmassign.Binding{RootNodeID: root[i].NodeID, EVMNodeID: evm[i].NodeID}
 	}
 	return pdr(evmassign.EVMPartitionTypeID, evm), &Coupling{RootEpoch: 7, RootBodyID: []byte("body-7"), Root: root, Bindings: bind}
@@ -391,7 +391,7 @@ func TestWeightedRequestContextRefusals(t *testing.T) {
 	})
 }
 
-// MaxValidators (64) members of at most 2^40 weigh at most 2^46, so through NewWeightedRequestContext the 2^48 total cap
+// MaxValidators (256) members of at most 2^40 weigh at most 2^46, so through NewWeightedRequestContext the 2^48 total cap
 // can not be hit; it is kept as an independent guard and exercised here below the member-count check.
 func TestTotalWeightCapIsAnIndependentGuard(t *testing.T) {
 	n := int(MaxTotalWeight/MaxMemberWeight) + 1 // 257 members of 2^40 weigh more than 2^48
@@ -426,7 +426,7 @@ func TestContextAccessorsReturnCopies(t *testing.T) {
 	ctx.NodeIDs()[0] = "x"
 	require.Equal(t, confHash(t, p), ctx.ConfHash())
 	require.Equal(t, []byte("body-7"), ctx.RootBodyID())
-	require.Equal(t, []string{"e00", "e01"}, ctx.NodeIDs())
+	require.Equal(t, []string{"e000", "e001"}, ctx.NodeIDs())
 	c.RootBodyID[0] ^= 0xff // the caller's slice is not aliased
 	require.Equal(t, []byte("body-7"), ctx.RootBodyID())
 }
@@ -449,7 +449,7 @@ func TestContextIsImmuneToConstructorInputMutation(t *testing.T) {
 	require.EqualValues(t, 9, ctx.TotalWeight())
 	require.EqualValues(t, 5, ctx.Threshold())
 	require.Equal(t, 4, ctx.MemberCount())
-	w, err := ctx.SignerWeight("e00")
+	w, err := ctx.SignerWeight("e000")
 	require.NoError(t, err)
 	require.EqualValues(t, 6, w)
 	_, err = ctx.SignerWeight("mutated")

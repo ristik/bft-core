@@ -40,8 +40,53 @@ type Health struct {
 	certifiedRecordReadinessDetail string
 	executionRecovery              string
 	executionRecoveryDetail        string
+	role                           string
+	roleEpoch                      uint64
+	binding                        *Binding
+	// roleSource and bindingSource, when set, are read at every snapshot: the report is the live role lease and the current binding, not
+	// the value of the last notification (bft-core#1061: a restart's replay published the role before the runtime completed the epoch,
+	// and nothing notified it afterwards)
+	roleSource    func() (epoch uint64, active bool)
+	bindingSource func() Binding
 
 	updatedAt time.Time
+}
+
+// Binding is what this node's health report is evidence OF (bft-core#1057): which node, of which network and shard, under which installed
+// shard configuration and which verified activation history. Orchestration compares it with what it expects and with an incumbent's; it
+// authorizes nothing here, and the node's role (RoleLease) and its signing authority stay the only signing decisions.
+type Binding struct {
+	NodeID string `json:"nodeId"`
+	// SigKey is the key the installed configuration names for this node (hex), empty while it does not name it (Member false).
+	SigKey      string `json:"sigKey,omitempty"`
+	NetworkID   uint64 `json:"networkId"`
+	PartitionID uint64 `json:"partitionId"`
+	ShardID     string `json:"shardId"`
+	// ShardEpoch and ShardConfHash (hex) are the installed (verified) shard configuration's.
+	ShardEpoch    uint64 `json:"shardEpoch"`
+	ShardConfHash string `json:"shardConfHash,omitempty"`
+	Member        bool   `json:"member"`
+	// History is the verified activation history (root epoch and V3 body id, hex) from the pinned genesis to the tip: the authenticated
+	// ancestry a later epoch is checked against. Empty without a Q3 runtime.
+	History []HistoryEntry `json:"history,omitempty"`
+}
+
+// HistoryEntry is one epoch of the verified activation history.
+type HistoryEntry struct {
+	Epoch  uint64 `json:"epoch"`
+	BodyID string `json:"bodyId"`
+}
+
+// UpdateBinding replaces the binding evidence (a copy is kept).
+func (h *Health) UpdateBinding(b Binding) {
+	if h == nil {
+		return
+	}
+	b.History = append([]HistoryEntry(nil), b.History...)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.binding = &b
+	h.updatedAt = time.Now()
 }
 
 func NewHealth() *Health {
@@ -68,11 +113,17 @@ type Snapshot struct {
 	CertifiedRecordDetail string `json:"certifiedRecordDetail,omitempty"`
 	// CertifiedRecordReadiness names the record gate's verdict for the last round it evaluated, and
 	// is empty without the gate.
-	CertifiedRecordReadiness       string    `json:"certifiedRecordReadiness,omitempty"`
-	CertifiedRecordReadinessDetail string    `json:"certifiedRecordReadinessDetail,omitempty"`
-	ExecutionRecovery              string    `json:"executionRecovery,omitempty"`
-	ExecutionRecoveryDetail        string    `json:"executionRecoveryDetail,omitempty"`
-	UpdatedAt                      time.Time `json:"updatedAt"`
+	CertifiedRecordReadiness       string `json:"certifiedRecordReadiness,omitempty"`
+	CertifiedRecordReadinessDetail string `json:"certifiedRecordReadinessDetail,omitempty"`
+	ExecutionRecovery              string `json:"executionRecovery,omitempty"`
+	ExecutionRecoveryDetail        string `json:"executionRecoveryDetail,omitempty"`
+	// Role is the published role ("active" or "follower") and RoleEpoch the completed activation epoch it was published at; empty without
+	// a role (a node that is not a root-free follower).
+	Role      string `json:"role,omitempty"`
+	RoleEpoch uint64 `json:"roleEpoch,omitempty"`
+	// Binding names the node, network, shard, installed configuration and verified history the report is about; nil until set.
+	Binding   *Binding  `json:"binding,omitempty"`
+	UpdatedAt time.Time `json:"updatedAt"`
 
 	// SecondsSinceUpdate is computed at snapshot time, not stored — see
 	// (*Health).Snapshot. It's the field worth alerting on: a healthy
@@ -169,6 +220,41 @@ func (h *Health) updateExecutionRecovery(outcome, detail string) {
 	h.updatedAt = time.Now()
 }
 
+// SetRoleSource makes every snapshot report the role the source gives at that moment (the live role lease, see RoleLease). It takes
+// precedence over UpdateRole.
+func (h *Health) SetRoleSource(f func() (epoch uint64, active bool)) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.roleSource = f
+}
+
+// SetBindingSource makes every snapshot report the binding the source gives at that moment. It takes precedence over UpdateBinding.
+func (h *Health) SetBindingSource(f func() Binding) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.bindingSource = f
+}
+
+// UpdateRole records the published role (see RoleLease) for operators and orchestration.
+func (h *Health) UpdateRole(active bool, epoch uint64) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.role, h.roleEpoch = "follower", epoch
+	if active {
+		h.role = "active"
+	}
+	h.updatedAt = time.Now()
+}
+
 func (h *Health) updateSubmitted(round uint64) {
 	if h == nil {
 		return
@@ -184,6 +270,20 @@ func (h *Health) updateSubmitted(round uint64) {
 func (h *Health) Snapshot() Snapshot {
 	if h == nil {
 		return Snapshot{}
+	}
+	h.mu.RLock()
+	roleSource, bindingSource := h.roleSource, h.bindingSource
+	h.mu.RUnlock()
+	// the sources are read outside the lock: they take the role's and the installed set's own locks
+	var live *Binding
+	if bindingSource != nil {
+		b := bindingSource()
+		live = &b
+	}
+	var liveEpoch uint64
+	var liveActive bool
+	if roleSource != nil {
+		liveEpoch, liveActive = roleSource()
 	}
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -203,7 +303,24 @@ func (h *Health) Snapshot() Snapshot {
 		CertifiedRecordReadinessDetail: h.certifiedRecordReadinessDetail,
 		ExecutionRecovery:              h.executionRecovery,
 		ExecutionRecoveryDetail:        h.executionRecoveryDetail,
+		Role:                           h.role,
+		RoleEpoch:                      h.roleEpoch,
 		UpdatedAt:                      h.updatedAt,
+	}
+	if h.binding != nil {
+		b := *h.binding
+		b.History = append([]HistoryEntry(nil), b.History...)
+		s.Binding = &b
+	}
+	if live != nil {
+		live.History = append([]HistoryEntry(nil), live.History...)
+		s.Binding = live
+	}
+	if roleSource != nil {
+		s.Role, s.RoleEpoch = "follower", liveEpoch
+		if liveActive {
+			s.Role = "active"
+		}
 	}
 	if !h.updatedAt.IsZero() {
 		s.SecondsSinceUpdate = time.Since(h.updatedAt).Seconds()

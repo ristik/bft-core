@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/peer"
+
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"golang.org/x/sync/errgroup"
@@ -92,6 +94,10 @@ func New(
 	}
 
 	round := NewRound(peer.ID().String(), partitionID, shardID, executor, disseminator, signer, client, log)
+	if source, ok := trustBaseStore.(interface{ RootActivationGate() *RootActivationGate }); ok {
+		round.activation = source.RootActivationGate()
+		client.activationGate = round.activation
+	}
 
 	if store != nil {
 		luc, err := store.LoadLUC()
@@ -177,8 +183,44 @@ func resumeFrom(client *BFTClient, round *Round, luc *types.UnicityCertificate) 
 // abstaining. Call after New, before Run. Callers should derive it from the shard's T2 with
 // AwaitTimeoutForT2 rather than picking a value: see that function for what a budget longer than T2
 // does to a validator whose leader has gone quiet.
+// SetFollowerRole makes the node a non-active follower while nonActive reports true: its client sends nothing to the roots and takes
+// certificates from FollowCertificate, and its round executes what is certified but never builds or signs. Call before Run.
+func (n *Node) SetFollowerRole(nonActive func() bool) { n.SetRole(funcRole{nonActive}) }
+
+// SetRole installs the published role lease (see RoleLease) on the client and the round. Call before Run.
+func (n *Node) SetRole(l RoleLease) {
+	n.client.SetRole(l)
+	n.round.SetRole(l)
+}
+
+// HeldPair is the certificate the node holds with its technical record (served to peers by the UC relay).
+func (n *Node) HeldPair() (*types.UnicityCertificate, *certification.TechnicalRecord) {
+	return n.client.Held()
+}
+
+// SetRelay enables the UC relay backup of the client (see BFTClient.SetRelay). Call before Run.
+func (n *Node) SetRelay(host StreamOpener, sources func() []peer.ID, after time.Duration) {
+	n.client.SetRelay(host, sources, after)
+}
+
+// RoleChanged tells the node that its follower predicate may have changed (see BFTClient.RoleChanged).
+func (n *Node) RoleChanged() { n.client.RoleChanged() }
+
+// Holds reports whether the node holds a durably admitted certificate at or past uc (see BFTClient.Holds).
+func (n *Node) Holds(uc *types.UnicityCertificate) bool { return n.client.Holds(uc) }
+
+// FollowCertificate offers a certificate from a non-root follow source (see BFTClient.FollowCertificate).
+func (n *Node) FollowCertificate(uc *types.UnicityCertificate, tr *certification.TechnicalRecord) bool {
+	return n.client.FollowCertificate(uc, tr)
+}
+
 func (n *Node) SetAwaitTimeout(d time.Duration) {
 	n.round.SetAwaitTimeout(d)
+}
+
+// SetBlockInterval sets the best-effort minimum interval between this node's blocks (Round.SetBlockInterval); zero disables it.
+func (n *Node) SetBlockInterval(d time.Duration) {
+	n.round.SetBlockInterval(d)
 }
 
 // SetMetrics attaches an optional Metrics recorder to both the round loop

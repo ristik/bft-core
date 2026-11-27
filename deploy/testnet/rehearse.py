@@ -10,16 +10,19 @@ refuses before the signer are sent. A real dispense is host-only. Needs docker c
 (host root on Linux, the files belong to UID 10001).
 """
 import argparse
+import concurrent.futures
 import datetime
 import hashlib
 import http.client
 import json
+import math
 import os
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -34,23 +37,20 @@ import pos_owner
 import pos_reject
 import pos_sample
 
-PUBLIC_RPC = '127.0.0.1:8545'
+PUBLIC_RPC = os.environ.get('TN_PUBLIC_RPC', '127.0.0.1:8545')   # a generation co-hosted beside another publishes its gateway elsewhere (its compose.yaml ports)
 
-# How long the survivors may take to mine a transaction while one validator is down (pod_restart). 240 s is what the PoA package (root epoch 1, reputation leader
-# selector) needs many times over: it mines in 4-6 s. From root epoch 2 the leader schedule is the fixed round-robin of bootstrap_leader.go, so a stopped root is
-# elected leader again every n-th round and each such slot costs two 10 s local timeouts; the shard's request is also lost in the round before the dead slot and
-# retried at the same phase every time (bft-core #886, see its phase-lock comment): 51-219 s over 42 samples (median ~96 s), one run beyond 240 s, and a run with
-# a 2 s local timeout that stopped for 10 min. The rotated-epoch stages (pos-restart, pos-restart-2) wait up to MINE_SECONDS_ROTATED: ~2.7 times the slowest sample,
-# so a chain that has really stopped still fails here. Every run logs the seconds it took (evidence/restart-latency.jsonl) and, for the rotated limit, marks anything
-# over SLOW_MINE_SECONDS, so the slowdown stays visible until the leader schedule is fixed (then lower this back to MINE_SECONDS).
+# How long the survivors may take to mine a transaction while one validator is down (pod_restart). 240 s is what the PoA package (root epoch 1) needs many times over.
+# Rotated epochs (pos-restart, pos-restart-2) wait the design's one-stage ceiling for a fault transition (bft-core #886, briefs: 360 s), so a red there means that ceiling was
+# exceeded, or a stopped chain: at bft pin 11051123 the slowest of 22 rotated transitions over five runs on one CI runner is 142 s (limit 600 s before, #888). A red between 360
+# and 480 s can be the design's two-stage T2-repeat shape, whose ceiling is not settled: the `window` row in evidence/restart-latency.jsonl tags the repeats, so it can be read as that.
+# Every rotated run logs the seconds it took, marks anything over SLOW_MINE_SECONDS and samples where the latency settles.
 MINE_SECONDS = 240
-MINE_SECONDS_ROTATED = 600
+MINE_SECONDS_ROTATED = 360
 SLOW_MINE_SECONDS = 30
-# Transactions sent one after another once the first is mined with the validator still down. The first one's time is the fault transition; these show where the
-# latency settles once the schedule has aged the stopped member out (bft-core #886's target: p95 <= 6 s, outside adaptation and recovery runs).
-# Settled-latency samples after a restart's fault transition. 0 until the package's bft pin contains #886: at an older pin the stopped root keeps its turn in the rotation, a
-# sample can wait out its whole limit, and the rehearsal would fail on a number it only records. The pin bump sets 12 (the milestone runs set it on their own branch).
-SETTLED_SAMPLES = 0
+# Transactions sent one after another once the first is mined with the validator still down. The first one's time is the fault transition; these show end-to-end receipts
+# from then on: the first ones can still be in the adaptation burst, the later ones are past it, and `since_stop` on each row tells them apart. They include the shard's own delay: bft-core #886's p95 <= 6 s is a root-side target and is not what these measure. 12 since the package's bft pin contains #886 (11051123). At an older pin the stopped root keeps its turn in the rotation, a
+# sample can wait out its whole limit and the rehearsal would fail on a number it only records: a branch that pins such a commit sets 0.
+AFTER_TRANSITION_SAMPLES = 12
 
 # bft-core #886 (epoch-1 note): the PoA pod-restart samples are bimodal (a few seconds, or 25-41 s) and the end-of-run compose logs are of a later generation, so nothing
 # says why. The stage therefore keeps the consensus logs of each stop window (below). They are uploaded with the evidence of a PUBLIC repository, so: (1) only the root and
@@ -61,13 +61,13 @@ CAPTURE_SERVICES = ('root', 'shard')
 CAPTURE_MAX_LINES = 6000          # per service and window; the rest is counted, not written
 SECRET_LINE = re.compile(r'(?i)(secret|priv(ate)?[ _-]?key|mnemonic|passphrase|password|credential|\.cred\b|keystore|authorization|bearer|api[ _-]?key|\btoken\b|\bseed\b|ciphertext)')
 WITHHELD_LINE = '[line withheld: it matches a secret pattern]'
-SECRET_FILE = re.compile(r'(?i)(^password$|secret|\.cred(\.|$)|\.key$|^keys?\.json$|^keystore\.json$|^priv|^jwt)')
-SECRET_DIRS = ('faucet-secrets', 'pos-owner-keys', 'auth', 'jwt')   # every file in these is a secret (auth and jwt are what the root and shard services mount besides their own state)
+SECRET_FILE = re.compile(r'(?i)(^password$|identity\.json$|secret|\.cred(\.|$)|\.key$|^keys?\.json$|^keystore\.json$|^priv|^jwt)')
+SECRET_DIRS = ('faucet-secrets', 'funder-secrets', 'pos-owner-keys', 'auth', 'jwt', 'ureth-key')   # every file in these is a secret (auth and jwt are what the root and shard services mount besides their own state; ureth-key, ureth's node key)
 
 
 class SecretScanError(Exception):
     """The scan for the generation's secrets could not be completed: nothing derived from the generation's services may be uploaded."""
-SECRET_FIELD = re.compile(r'(?i)(priv|secret|password|seed|mnemonic|ciphertext|crypto)')
+SECRET_FIELD = re.compile(r'(?i)(priv|secret|password|seed|mnemonic|ciphertext|crypto|owner[_-]?key|evm[_-]?key)')
 
 
 def _json_secrets(node, out, under_secret=False):
@@ -83,7 +83,7 @@ def _json_secrets(node, out, under_secret=False):
 
 
 def known_secrets(gen):
-    """The literal secrets of a generation: whole contents of the files that are secrets by name (faucet-secrets/*, pos-owner-keys/*, validator*/auth credentials and every
+    """The literal secrets of a generation: whole contents of the files that are secrets by name (faucet-secrets/*, funder-secrets/*, pos-owner-keys/*, validator*/auth credentials and every
     *.key/*.cred), and the private fields of its JSON key files. Shallow walk (depth 4, files under 256 KB): the chain data directories are not entered.
     Fails closed (SecretScanError): no generation directory, a walk error, a file of the secret kind that cannot be read, or a scan that finds nothing (a real generation
     always has its faucet password and Engine JWT, so an empty result means the scan did not see it)."""
@@ -116,6 +116,8 @@ def known_secrets(gen):
                 found.update(t for t in re.findall(r'[A-Za-z0-9+/=_.-]{16,}', text))
     if problems:
         raise SecretScanError('; '.join(problems[:5]))
+    if root.name.endswith('-restored'):   # its authorities stay mounted from the original generation, which pos-restore leaves beside it
+        found |= known_secrets(root.with_name(root.name[:-len('-restored')]))
     if not found:
         raise SecretScanError(f'no secret found under {gen}')
     return found
@@ -135,12 +137,40 @@ def redact_log(text, secrets=()):
         else:
             out.append(line)
     return out, scrubbed, withheld
-FAUCET = '127.0.0.1:8088'
+RESULT_RESERVED, RESULT_ACKNOWLEDGED = 1, 3   # ElectionPolicy.ResultState
+
+
+def next_open_result(open_result, done):
+    """The open result if a handoff can still use it: not none, and not the one the last handoff used."""
+    return open_result if open_result != '0x' + '00' * 32 and open_result != done else None
+
+
+FAUCET = os.environ.get('TN_FAUCET', '127.0.0.1:8088')   # with TN_PUBLIC_RPC: a co-hosted generation's faucet port
 PROXY_IPS = ('203.0.113.', '198.51.100.')   # documentation ranges: the client addresses the nginx in front would have set in X-Forwarded-For
 
 
 class Failure(Exception):
     pass
+
+
+def repeated_certificates(log):
+    """The T2 repeats a stop window's shard logs show: a certificate admitted for the shard round of the one before it, at a later root round. It makes a request built
+    on the earlier certificate stale, which is the shape of the #886 two-stage bound. Each once, however many shard nodes logged it."""
+    last, found = {}, {}
+    for line in log.splitlines():
+        name, _, text = line.partition('|')
+        try:
+            entry = json.loads(text)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict) or entry.get('message') != 'certificate admitted':
+            continue
+        node, seen = name.strip(), (entry.get('round'), entry.get('rootRound'))
+        before = last.get(node)
+        if before and before[0] == seen[0] and before[1] != seen[1]:
+            found.setdefault(seen[1], {'shardRound': seen[0], 'rootRound': seen[1], 'firstRootRound': before[1], 'time': entry.get('time')})
+        last[node] = seen
+    return [found[k] for k in sorted(found)]
 
 
 class Rehearsal:
@@ -154,9 +184,11 @@ class Rehearsal:
         self.reset_args = {}
         self.ubft = None
         self.restore_pin = None
+        self.restore_repeat_count, self.restore_control_limits = 20, (24, 16)   # pos-restore-repeat (#905)
         self.target = 2   # the root epoch the handoff being driven installs (pos-handoff-2 drives the next one, 3)
         self.joiners = set()   # entities started but not yet members of the committee that certifies (pos-joiner adds one, pos-advance clears them)
         self.committed_target = None   # the Abort target of the handoff pos-propose committed (pos-too-late)
+        self.recover_index = None   # vr-pos-recover: the validator whose authority is lost (default: the last)
 
     def members(self):
         """The entities of the committee that certifies now: every entity but the joiners."""
@@ -179,26 +211,97 @@ class Rehearsal:
         self.n = self.manifest['validators']
         self.chain_id, self.genesis = self.manifest['chain_id'], self.manifest['genesis_hash'].lower()
 
+    def reset_inventory_args(self, a):
+        """(reset.py flags, generator arguments) for the old generation's retired-key inventory (#1297): a generation with a signed history
+        supplies its own, the history its aggregator serves, verified against the pinned genesis and exported with --keys-out; a --no-utb
+        rehearsal generation has none and is reset as --disposable."""
+        utb = self.manifest.get('utb')
+        if not utb:
+            return ['--disposable'], []
+        _, _, bundle = self.utb_history('reset-inventory', utb['genesis_id'])
+        keys = self.evh() / 'utb-history-reset-inventory-keys.json'
+        run = subprocess.run([a['ubft'], 'trust-base', 'utb-verify', '--bundle', str(bundle), '--utb-genesis-id', utb['genesis_id'], '--keys-out', str(keys)],
+                             text=True, capture_output=True)
+        self.expect(run.returncode == 0 and keys.is_file(), 'the old generation\'s signed history exports its root keys (the reset inventory)', (run.stdout + run.stderr).strip()[-300:])
+        return [], ['--prior-generation', str(keys)]
+
+    def reset_utb_args(self):
+        """The signed-history profile of the old generation, for the replacement: --no-utb, or --utb with the aggregator variant its manifest records."""
+        utb = self.manifest.get('utb')
+        return ['--utb', '--utb-aggregator', utb.get('aggregator', 'integration')] if utb else ['--no-utb']
+
+    def block_interval_s(self):
+        """The generation's EVM block interval in seconds (generate.py --block-interval-ms, bft-core#1167); 0 for a fast package or one from before it."""
+        return ((self.manifest.get('evm_block') or {}).get('interval_ms') or 0) / 1000
+
     # --- recording -------------------------------------------------------------------------------------------------------------
+    def scrub(self, text, patterns=False):
+        """`text` for the job log: every known secret literal of the generation replaced; with `patterns` (service log tails) also every line that matches a secret pattern
+        withheld. Fails closed: if the generation cannot be scanned, or a literal survives, the text is replaced by a notice; never raises. The scan is made once per
+        generation directory (a cache keyed by it), not per line."""
+        try:
+            if getattr(self, '_scrub_gen', None) != getattr(self, 'gen', None):
+                self._scrub_secrets, self._scrub_gen = known_secrets(self.gen), self.gen
+            secrets = self._scrub_secrets
+            lines = redact_log(text, secrets)[0] if patterns else self._literals(text, secrets)   # the driver's own words may contain 'token' or 'credential': only service tails get the patterns
+            body = '\n'.join(lines)
+            if any(secret in body for secret in secrets):
+                return '[output withheld: a known secret literal survived the redaction]'
+            return body
+        except Exception as error:
+            return f'[output withheld: the secret scan failed: {error}]'
+
+    def rescan(self):
+        """Scan the generation again at the next `scrub`: a key or credential written after the last scan (a joiner's, a restarted authority's) is a secret from then on.
+        Called at the start of every stage and after the stages' own key writes."""
+        self._scrub_gen = None
+
+    @staticmethod
+    def _literals(text, secrets):
+        out = []
+        for line in text.splitlines():
+            for secret in sorted(secrets, key=len, reverse=True):
+                line = line.replace(secret, '[redacted]')
+            out.append(line)
+        return out
+
     def say(self, text):
-        line = f'{datetime.datetime.now(datetime.timezone.utc).strftime("%H:%M:%SZ")} {text}'
+        line = f'{datetime.datetime.now(datetime.timezone.utc).strftime("%H:%M:%SZ")} {self.scrub(text)}'
         print(line, flush=True)
         self.log.write(line + '\n')
         self.log.flush()
 
     def expect(self, condition, what, detail=''):
+        """A Failure's text is scrubbed where `stage` prints and records it, and a passing detail where `say` prints it; a service log tail is passed through `scrub(tail, True)` first."""
         if not condition:
             raise Failure(f'{what}' + (f': {detail}' if detail else ''))
         self.say(f'  ok   {what}' + (f' ({detail})' if detail else ''))
 
+    def election_state(self):
+        """The election's open result and attempt cursor, for the stage boundaries of the PoS stages (#1006: the attempts run in the system hook, their events are not in a
+        receipt, so a result that opened between two stages was not explainable afterwards). None where there is no election or it cannot be read."""
+        try:
+            election = json.loads((self.gen / 'network' / 'pos-deployment.json').read_text())['election']
+            return f'openResult {self.view_text(election, "openResult()(bytes32)").strip()}, attemptCursor {self.view(election, "attemptCursor()(uint64)")[0]}'
+        except Exception:
+            return None
+
     def stage(self, name, fn):
+        self.rescan()
         self.say(f'== {name}')
+        if name in POS_STAGE_NAMES and (state := self.election_state()):
+            self.say(f'  election at the start of {name}: {state}')
         try:
             fn()
         except Exception as error:   # a failed stage is recorded as failed, then the run stops: later stages depend on it
+            if name in POS_STAGE_NAMES and (state := self.election_state()):
+                self.say(f'  election at the failure of {name}: {state}')
+            self.rescan()   # a failure's text is printed after whatever the stage wrote
             self.say(f'FAIL {name}: {error}')
-            self.results.append((name, 'FAIL', str(error)))
+            self.results.append((name, 'FAIL', self.scrub(str(error))))   # result.json is uploaded with the evidence
             raise
+        if name in POS_STAGE_NAMES and (state := self.election_state()):
+            self.say(f'  election at the end of {name}: {state}')
         self.say(f'PASS {name}')
         self.results.append((name, 'PASS', ''))
 
@@ -245,13 +348,13 @@ class Rehearsal:
             status, text = self.rpc({'jsonrpc': '2.0', 'id': 1, 'method': method, 'params': list(params)}, ip)
             if status != 429 or attempt == 5:
                 break
-            self.say(f'  {method}: 429 from the per-client limit (10 requests/s), waiting 1 s ({attempt + 1}/5)')   # the limit is the package's; a driver that bursts waits for it
+            self.say(f'  {method}: 429 from the per-client limit (20 requests/s, burst 60), waiting 1 s ({attempt + 1}/5)')   # the limit is the package's; a driver that bursts waits for it
             time.sleep(1)
         if status != 200:
             raise Failure(f'{method} through the public gateway: {status} {text}')
         return json.loads(text).get('result')
 
-    def wait(self, what, probe, seconds):
+    def wait(self, what, probe, seconds, every=3):
         deadline = time.monotonic() + seconds
         last = None
         while time.monotonic() < deadline:
@@ -261,7 +364,7 @@ class Rehearsal:
                     return last
             except Exception as error:   # services start in any order; a probe that raises is "not yet"
                 last = error
-            time.sleep(3)
+            time.sleep(every)
         raise Failure(f'{what}: not within {seconds} s (last: {last})')
 
     def cast_run(self, *args):
@@ -283,12 +386,12 @@ class Rehearsal:
             self.say('  not running: ' + ' '.join(missing()))
             self.say(self.compose('ps', '-a', check=False))
             for name in missing()[:4]:
-                self.say(f'--- last log of {name}\n' + self.compose('logs', '--no-color', '--tail', '25', name, check=False))
+                self.say(f'--- last log of {name}\n' + self.scrub(self.compose('logs', '--no-color', '--tail', '25', name, check=False), True))
             raise
         running = set(self.compose('ps', '--services', '--status', 'running').split())
         self.expect(True, 'every non-authority service except the signer is running', f'{len(start)} services')
         self.expect('signer' not in running, 'the faucet signer is not running (no third-party call in the rehearsal)')
-        head = self.wait('the public gateway reports a head (every validator identity checked by the relay)',
+        head = self.wait('a pinned validator serves a public gateway head',
                          lambda: self.http(PUBLIC_RPC, 'GET', '/healthz')[0] == 200, 600)
         self.expect(head, 'the public gateway is healthy')
 
@@ -300,10 +403,9 @@ class Rehearsal:
         self.expect(int(self.call('eth_chainId'), 16) == self.chain_id, 'the public gateway reports the manifest chain id')
 
     def first_tx(self):
-        secrets = self.gen / 'faucet-secrets'
         to = '0x' + '11' * 20   # an ordinary account (0x..01 is the ecrecover precompile)
         before = int(self.call('eth_getBalance', [to, 'latest']), 16)
-        receipt = json.loads(self.send_via_gateway(secrets, to))
+        receipt = json.loads(self.send_via_gateway(to))
         self.expect(receipt['status'] == '0x1', 'the funded first transaction succeeded', json.dumps(receipt)[:600])
         self.expect(int(self.call('eth_getBalance', [to, 'latest']), 16) == before + 1, 'the recipient balance grew by the transferred wei')
         for i in range(1, self.n + 1):
@@ -311,15 +413,29 @@ class Rehearsal:
             self.expect(r['blockHash'] == receipt['blockHash'], f'validator {i} has it in the same block', r['blockHash'])
         self.tx = receipt
 
+    def funder_address(self):
+        """The generation's funder account (generate.py: funder-secrets/, manifest funder_address): it signs every transfer the tools make. The faucet key
+        is the eth-faucet signer's alone; a transaction from it anywhere else leaves the signer's nonce stale (bft-core#1287)."""
+        if 'funder_address' not in self.manifest:
+            raise Failure('the generation has no funder account (manifest funder_address, funder-secrets/): the faucet key is the faucet signer\'s alone')
+        return self.manifest['funder_address']
+
+    def funder_keys(self):
+        """(funder-secrets/ with keystore.json and password, the funder address)."""
+        secrets = self.gen / 'funder-secrets'
+        if not (secrets / 'keystore.json').is_file():
+            raise Failure(f'{secrets} has no keystore.json: the faucet key is the faucet signer\'s alone')
+        return secrets, self.funder_address()
+
     def raw_tx(self, to, nonce, price, value=1):
-        secrets = self.gen / 'faucet-secrets'
+        secrets, _ = self.funder_keys()
         return self.cast_run('mktx', '--keystore', str(secrets / 'keystore.json'), '--password-file', str(secrets / 'password'), '--legacy', '--nonce', str(nonce),
                              '--gas-price', str(price), '--gas-limit', '21000', '--chain', str(self.chain_id), '--value', str(value), to)
 
-    def send_via_gateway(self, secrets, to):
+    def send_via_gateway(self, to):
         # cast talks to the public gateway: the gateway only accepts the allow-listed methods, and the generated proxy peer is trusted only with X-Forwarded-For,
         # which cast cannot set: sign offline, then submit through the gateway ourselves
-        sender = self.manifest['faucet_address']
+        sender = self.funder_address()
         nonce = int(self.call('eth_getTransactionCount', [sender, 'latest']), 16)
         price = int(self.call('eth_gasPrice'), 16)
         sent = self.call('eth_sendRawTransaction', [self.raw_tx(to, nonce, price)])
@@ -346,8 +462,12 @@ class Rehearsal:
         s, _ = self.http(PUBLIC_RPC, 'POST', '/', json.dumps(ok).encode())
         self.expect(s == 400, 'a request without the proxy-set client address is refused', f'status {s}')
         burst = PROXY_IPS[0] + '30'
-        statuses = [self.rpc(ok, burst)[0] for _ in range(40)]
-        self.expect(429 in statuses, 'a burst from one client address is rate limited (10/s per address)', f'{statuses.count(200)}x200 {statuses.count(429)}x429')
+        # the bucket admits a burst of 60 and then 20/s: 100 requests at once (16 threads, the gateway's 8 workers) end in about 100 d / 8 for a
+        # round trip d, 0.6 s at 45 ms (a dozen tokens of refill); only a round trip above about 160 ms would leave none of them refused
+        with concurrent.futures.ThreadPoolExecutor(16) as pool:
+            statuses = list(pool.map(lambda _: self.rpc(ok, burst)[0], range(100)))
+        self.expect(429 in statuses and statuses.count(200) >= 60, 'a burst from one client address is served up to its bucket, then rate limited (burst 60, 20/s per address)',
+                    f'{statuses.count(200)}x200 {statuses.count(429)}x429')
         s, _ = self.rpc(ok, PROXY_IPS[1] + '31')
         self.expect(s == 200, 'ordinary requests from other clients are still served during the burst window')
         time.sleep(1.2)
@@ -385,15 +505,14 @@ class Rehearsal:
 
     def load(self):
         """Sustained load at the gateway's limits (loadgen.py, the tool the host runs too): 20 signed transfers a second for 20 s from four client addresses (5/s
-        each, under the 10/s per-address limit), every accepted transfer must be mined successfully and every validator must agree on the sender's nonce after."""
-        secrets, summary = self.gen / 'faucet-secrets', self.evidence / 'load.json'
+        each, under the 20/s per-address limit), every accepted transfer must be mined successfully and every validator must agree on the sender's nonce after."""
+        (secrets, sender), summary = self.funder_keys(), self.evidence / 'load.json'
         out = subprocess.run([sys.executable, str(Path(__file__).with_name('loadgen.py')), '--rpc', 'http://' + PUBLIC_RPC + '/', '--chain-id', str(self.chain_id),
-                              '--sender', self.manifest['faucet_address'], '--keystore', str(secrets / 'keystore.json'), '--password-file', str(secrets / 'password'),
+                              '--sender', sender, '--keystore', str(secrets / 'keystore.json'), '--password-file', str(secrets / 'password'),
                               '--cast', self.cast, '--rate', '20', '--duration', '20', '--ips', '4', '--min-accepted', '350', '--out', str(summary)],
                              text=True, capture_output=True)
         self.say(out.stdout.strip() or out.stderr.strip())
         self.expect(out.returncode == 0, 'the generated load was accepted and every accepted transfer mined successfully', (json.loads(summary.read_text()) if summary.exists() else {}).get('problems', out.stderr[-300:]))
-        sender = self.manifest['faucet_address']
         nonces = {i: self.ureth(i, 'eth_getTransactionCount', [sender, 'latest']) for i in range(1, self.n + 1)}
         self.wait('every validator has the same sender nonce', lambda: len({self.ureth(i, 'eth_getTransactionCount', [sender, 'latest']) for i in range(1, self.n + 1)}) == 1, 120)
         self.expect(True, 'every validator agrees on the sender nonce after the load', str(nonces))
@@ -418,7 +537,11 @@ class Rehearsal:
         self.expect(bool(pos), 'the manifest carries a pos block (this generation was made with --pos)')
         net = self.gen / 'network'
         self.expect((net / 'pos-genesis-assignment.txt').read_text().strip() == pos['genesis_assignment'], 'the shipped genesis assignment id is the manifest one', pos['genesis_assignment'])
-        deployment = json.loads((net / 'pos-deployment.json').read_text())
+        vr_profile = pos.get('profile') == 'vr-pos16'
+        deployment = json.loads((net / ('deployment.json' if vr_profile else 'pos-deployment.json')).read_text())
+        if vr_profile:
+            ids = json.loads(self.view_text(deployment['registry'], 'committeeIds()(uint64[])'))
+            self.expect(len(ids) == pos['committee_limits'][0], 'VR has four genesis members', str(ids))
         for name, address in (('registry', self.REGISTRY), ('custody', deployment['custody']), ('election', deployment['election'])):
             code = self.call('eth_getCode', [address, 'latest'])
             self.expect(len(code) > 100, f'the {name} contract has code at its genesis address', f'{address} {(len(code) - 2) // 2} bytes')
@@ -436,9 +559,50 @@ class Rehearsal:
         bad = [line for line in logs.splitlines() if 'AssignmentNotActive' in line or 'revert' in line.lower()]
         self.expect(not bad, 'no revert or AssignmentNotActive in any root or shard log', f'{len(bad)} lines' + (': ' + bad[0][:200] if bad else ''))
 
-    def faucet_send(self, to, wei):
-        """A value transfer from the faucet account through the public gateway (it is the only funded account: the PoS owners hold nothing at genesis)."""
-        sender = self.manifest['faucet_address']
+    def vr_pos_advance(self):
+        import vr_advance
+        vr_advance.advance(self.gen, self.target, self.evh())
+
+    def vr_pos_publish(self):
+        """The next election, published by the genesis members' own proofs (vr_recover.py), for a generation without participant containers."""
+        import vr_recover
+        vr_recover.vr_pos_publish(self)
+
+    def vr_late_joiner(self):
+        """#1309: a joiner's shard node restored from an epoch-1 pin after two root handoffs, as the validator container starts it, then restarted (vr_late_joiner.py)."""
+        import vr_late_joiner
+        vr_late_joiner.vr_late_joiner(self)
+
+    def vr_pop_miss(self):
+        """#1319: an incumbent that stops answering its handoff PoP is parked by a certified miss (vr_pop_miss.py)."""
+        import vr_pop_miss
+        vr_pop_miss.vr_pop_miss(self)
+
+    def vr_joiner_exit(self):
+        """#1316: the late joiner's exit: no election transaction after its retirement request, the first claim attempt after maturity succeeds
+        (vr_late_joiner.py; waits out custody's 3,600 s time floor)."""
+        import vr_late_joiner
+        vr_late_joiner.vr_joiner_exit(self)
+
+    def vr_finalizer(self):
+        """#1323: two elections with every member's participation at once, first without the finalizer order (the pre-#1323 race), then with
+        it; counts the finalizeCandidate and VR.publish transactions and their reverts (vr_late_joiner.py)."""
+        import vr_late_joiner
+        vr_late_joiner.vr_finalizer(self)
+
+    def vr_reject(self):
+        """#1311: an elected joiner that never sends its handoff PoP; its output expires and the roots reject it themselves (vr_reject.py)."""
+        import vr_reject
+        vr_reject.vr_reject(self)
+
+    def vr_pos_recover(self):
+        """#1286: one genesis validator's authority is lost; the identity recovers in place on a fresh EVM node identity (vr_recover.py)."""
+        import vr_recover
+        vr_recover.vr_pos_recover(self)
+
+    def funder_send(self, to, wei):
+        """A value transfer from the funder account through the public gateway (the PoS owners hold nothing at genesis)."""
+        sender = self.funder_address()
         nonce = int(self.call('eth_getTransactionCount', [sender, 'latest']), 16)
         sent = self.call('eth_sendRawTransaction', [self.raw_tx(to, nonce, int(self.call('eth_gasPrice'), 16), wei)])
         receipt = self.wait(f'the funding of {to} is mined', lambda: self.call('eth_getTransactionReceipt', [sent]), 180)
@@ -481,7 +645,7 @@ class Rehearsal:
         return run.returncode, run.stderr
 
     def pos_rewards(self):
-        """The owner keys the ceremony generated, used: an owner and a payee funded from the faucet account, the reward pool funded by the relayer (its balance
+        """The owner keys the ceremony generated, used: an owner and a payee funded from the funder account, the reward pool funded by the relayer (its balance
         rises by exactly the funding), `reward settle` run against a chain with no root record yet (it must find nothing to close and say so), and a claim by a
         payee with no credit (nothing may leave the pool). Credits, a paid claim and an owner's custody calls (top-up, exit, withdrawal) need root records or an
         election and are later stages."""
@@ -494,7 +658,7 @@ class Rehearsal:
         keys = self.gen / pos['owner_keys'] / f'identity-{identity["stakingId"]}'
         for role in ('owner', 'payee'):
             self.expect(self.balance(identity[role]) == 0, f'the {role} of identity {identity["stakingId"]} holds nothing at genesis', identity[role])
-            self.faucet_send(identity[role], 10 ** 18)
+            self.funder_send(identity[role], 10 ** 18)
         funding = 10 ** 15
         before = self.balance(pool)
         self.say(f'  reward pool balance {before}')
@@ -509,6 +673,10 @@ class Rehearsal:
         status, out = self.relayer(keys / 'payee.key', 'reward', 'claim', '--amount-wei', '1', '--to', recipient)
         self.say(f'  claim without credit: exit {status}')
         self.expect(self.balance(recipient) == 0 and self.balance(pool) == after, 'a claim by a payee without credit moves nothing out of the pool', f'recipient {self.balance(recipient)}, pool {self.balance(pool)}')
+
+    def result_state(self, election, result):
+        """The stored ResultState of a result."""
+        return int(self.call('eth_call', [{'to': election, 'data': self.cast_run('calldata', 'result(bytes32)', result)}, 'latest'])[2:66], 16)
 
     def pos_election(self):
         """The election reserves a result. The first design gave an identity two units by a second bond; the package's caps are (16, 1, 6): lMax is ONE lot per
@@ -530,7 +698,7 @@ class Rehearsal:
         live = self.view(election, 'liveCount()(uint32)')[0]
         self.expect(live == self.n, 'the election\'s live index holds every genesis identity', str(live))
         if self.balance(identity['owner']) < 10 ** 17:   # pos-rewards funds the owner; this stage must not depend on it
-            self.faucet_send(identity['owner'], 10 ** 18)
+            self.funder_send(identity['owner'], 10 ** 18)
         # a second lot for an existing identity: an eth_call from the owner (one wei is enough, the lot limit is checked after the zero-value check)
         status, text = self.rpc({'jsonrpc': '2.0', 'id': 1, 'method': 'eth_call', 'params': [{
             'from': identity['owner'], 'to': custody, 'value': '0x1', 'data': self.cast_run('calldata', 'bond(uint64)', str(identity['stakingId']))}, 'latest']},
@@ -546,12 +714,11 @@ class Rehearsal:
             self.say('  election clock: ' + clock())
             return open_result()
         result = before or self.wait('the election reserves a result', reserved, 1500)
-        raw = self.call('eth_call', [{'to': election, 'data': self.cast_run('calldata', 'result(bytes32)', result)}, 'latest'])
-        state = int(raw[2:66], 16)   # ResultState: 1 Reserved
+        state = self.result_state(election, result)
         members = self.view_text(election, 'frozenMembers(bytes32)((uint64,uint64,uint64,uint64,bytes32)[])', result)
         (self.evidence / 'pos-election-frozen-members.txt').write_text(members + '\n')
         self.say(f'  result {result}, state {state}: {members}')
-        self.expect(state == 1, 'the open result is Reserved', str(state))
+        self.expect(state == RESULT_RESERVED, 'the open result is Reserved', str(state))
         self.expect(members.count('(') - members.count('((') == self.n, f'the reserved result freezes {self.n} members', members[:200])
         self.expect(before is None, 'no result was open before the stage started', str(before))
 
@@ -660,6 +827,7 @@ class Rehearsal:
         zero = '0x' + '00' * 32
         result = self.view_text(election, 'openResult()(bytes32)').strip()
         self.expect(result != zero, 'the election has a reserved result (run pos-election first)')
+        (work / f'result-epoch-{self.target}.txt').write_text(result + '\n')
         ids = self.entity_ids()
         # 1 the next root trust base (a joiner's authority had to start at its scope, so pos-joiner made it already: the same inputs)
         if self.joiners and (work / f'trust-base-epoch{self.target}.json').exists():
@@ -691,7 +859,7 @@ class Rehearsal:
             # 3 submit the proofs and finalize the result: the funded owner key of a genesis identity pays
             identity = json.loads((net / 'pos-plan.json').read_text())['identities'][0]
             if self.balance(identity['owner']) < 10 ** 17:
-                self.faucet_send(identity['owner'], 10 ** 18)
+                self.funder_send(identity['owner'], 10 ** 18)
             owner_key = self.gen / pos['owner_keys'] / f'identity-{identity["stakingId"]}' / 'owner.key'
             subprocess.run(['chown', '-R', '10001:10001', str(work)], check=True)
             for step, extra in (('submit-pops', ['--evm-pops', '/work/evm-pops-collected.json']), ('finalize', [])):
@@ -781,7 +949,7 @@ class Rehearsal:
                               '--readiness-receipts', ','.join(receipts), '--intent-delay', '1.5',
                               *(['--committee', ','.join(map(str, self.members()))] if self.joiners else [])], text=True, capture_output=True)
         self.evh()
-        (self.evh() / 'propose.log').write_text(run.stdout + run.stderr)
+        self.keep_redacted(self.evh() / 'propose.log', run.stdout + run.stderr)
         if run.returncode:   # the root's refusal is one line for many causes: report what each root holds, so the refusal can be located
             for i in range(1, self.n + 1):
                 for path in ('/api/v1/q3/status', '/api/v1/q3/signers'):
@@ -820,13 +988,13 @@ class Rehearsal:
         held = subprocess.run([sys.executable, ops, 'hold', str(self.gen), '--ubft', str(self.ubft), '--old-trust-base', str(self.previous_trust_base()), '--next-trust-base', str(work / f'trust-base-epoch{self.target}.json'),
                                '--next-evm-assignment', str(work / 'published-assignment.json'), '--readiness-receipts', ','.join(receipts)], text=True, capture_output=True)
         self.evh()
-        (self.evh() / 'abort-hold.log').write_text(held.stdout + held.stderr)
+        self.keep_redacted(self.evh() / 'abort-hold.log', held.stdout + held.stderr)
         self.expect(held.returncode == 0, 'one root endorsed the plan, the others hold its intent (the handoff is prepared, not frozen)', (held.stdout + held.stderr).strip()[-500:])
         target = json.loads(held.stdout.strip().splitlines()[-1])
         (self.evh() / 'abort-target.json').write_text(json.dumps(target, indent=1, sort_keys=True) + '\n')
         self.say(f'  target: attempt {target["attempt"]}, old epoch {target["oldEpoch"]}, successor body {target["nextBodyId"]}')
         # the EVM is frozen from the Prepare: a transaction sent now is not mined (a few seconds, well inside the 24 rounds before the freeze lapses) ...
-        sender, to = self.manifest['faucet_address'], '0x' + '33' * 20
+        sender, to = self.funder_address(), '0x' + '33' * 20
         frozen_at = int(self.call('eth_blockNumber'), 16)
         nonce = int(self.call('eth_getTransactionCount', [sender, 'latest']), 16)
         sent = self.call('eth_sendRawTransaction', [self.raw_tx(to, nonce, int(self.call('eth_gasPrice'), 16), 1)])
@@ -837,7 +1005,7 @@ class Rehearsal:
         aborted = subprocess.run([sys.executable, ops, 'abort', str(self.gen), '--', '--network', str(target['network']), '--old-epoch', str(target['oldEpoch']),
                                   '--predecessor-body-id', target['predecessorBodyId'], '--attempt', str(target['attempt']), '--next-body-id', target['nextBodyId'],
                                   '--timeout', '90s'], text=True, capture_output=True)
-        (self.evh() / 'abort.log').write_text(aborted.stdout + aborted.stderr)
+        self.keep_redacted(self.evh() / 'abort.log', aborted.stdout + aborted.stderr)
         committed = [line for line in aborted.stdout.splitlines() if 'committed Abort record' in line]
         self.expect(aborted.returncode == 0 and len(committed) == self.n, f'all {self.n} roots report the committed Abort record', (aborted.stdout + aborted.stderr).strip()[-500:])
         self.expect(len({line.split('record ')[1].split()[0] for line in committed}) == 1, 'they name one Abort record', committed[0])
@@ -858,16 +1026,29 @@ class Rehearsal:
     def pos_too_late(self):
         """5b step 14 after H: the handoff proposed by pos-propose is committed (the roots still certify at the old epoch, the install has not run). An Abort naming that
         exact handoff is not ordered: every root answers "too late" and the CLI exits non-zero, no Abort record is committed, the epoch does not move and the install
-        (the next stage) still works. Run right after pos-propose."""
+        (the next stage) still works. Run right after pos-propose.
+
+        bft-core#1095: a staying root switches into the committed epoch inside its process at its own commit. The roots that did (switched_roots: q3/status shows the
+        switch published Running or Following in the target) are installed by the commit itself and certify the target epoch; for them the Abort must not change
+        that. Every other root has not installed anything: it still certifies the old epoch, before and after the Abort. The epochs are read only once every switch
+        has settled: a root read in the middle of its switch answers with neither epoch."""
         target = self.committed_target
         self.expect(target is not None, 'the committed handoff\'s target was read by pos-propose (context before the plan)', str(target))
         (self.evh() / 'too-late-target.json').write_text(json.dumps(target, indent=1, sort_keys=True) + '\n')
-        before = [self.root_epoch(i) for i in range(1, self.n + 1)]
+        transport = handoff_ops.DockerTransport(self.gen)
+        switched = self.switched_roots(transport)
+        if switched:
+            self.say(f'  switched into epoch {self.target} in process at the commit: roots {sorted(switched)}')
+        before = self.too_late_epochs(switched, transport)
+        self.expect(all(e == self.target for i, e in enumerate(before, 1) if i in switched),
+                    f'every root that switched at the commit reports its switch into epoch {self.target} published', str(before))
+        self.expect(all(e == self.target - 1 for i, e in enumerate(before, 1) if i not in switched),
+                    f'a root that did not switch has installed nothing: it certifies epoch {self.target - 1}', str(before))
         ops = str(Path(__file__).resolve().parent / 'handoff_ops.py')
         aborted = subprocess.run([sys.executable, ops, 'abort', str(self.gen), '--', '--network', str(target['network']), '--old-epoch', str(target['oldEpoch']),
                                   '--predecessor-body-id', target['predecessorBodyId'], '--attempt', str(target['attempt']), '--next-body-id', target['nextBodyId'],
                                   '--timeout', '30s'], text=True, capture_output=True)
-        (self.evh() / 'too-late.log').write_text(aborted.stdout + aborted.stderr)
+        self.keep_redacted(self.evh() / 'too-late.log', aborted.stdout + aborted.stderr)
         self.say(f'  abort after H: exit {aborted.returncode}: {(aborted.stdout + aborted.stderr).strip()[-600:]}')
         out = aborted.stdout + aborted.stderr
         # handoff_ops.py abort prints one block per entity: "entity i: exit N" and then that root's output
@@ -875,7 +1056,22 @@ class Rehearsal:
         self.expect(aborted.returncode != 0 and sorted(blocks) == list(range(1, self.n + 1)) and all(code != 0 and 'too late' in text for code, text in blocks.values()),
                     f'each of the {self.n} roots answers "too late" and exits non-zero, and so does the abort', out.strip()[-500:])
         self.expect('committed Abort record' not in out and 'Abort already committed' not in out, 'no Abort record was committed')
-        self.expect([self.root_epoch(i) for i in range(1, self.n + 1)] == before, 'no root changed epoch', str(before))
+        after = self.too_late_epochs(switched, transport)
+        self.expect(all(e == self.target for i, e in enumerate(after, 1) if i in switched),
+                    f'after the Abort every root that switched still reports its switch into epoch {self.target} published', str(after))
+        self.expect(after == before, 'no root changed epoch (a root that switched at the commit stays in it, every other one in the old epoch)', f'{before} -> {after}')
+        self.expect(all(handoff.switch_complete(self.q3_status(i, transport), self.target) for i in switched), 'every root that switched still reports the switch published')
+
+    def too_late_epochs(self, switched, transport):
+        """pos-too-late's epoch of each root: the target for a root that switched into it at the commit (its published switch, which the Abort must not undo), else
+        the epoch of its committed certificate, which must stay the old one."""
+        out = []
+        for i in range(1, self.n + 1):
+            if i in switched:
+                out.append(self.target if self.switch_published(i, transport) else None)
+            else:
+                out.append(self.root_epoch(i, transport))
+        return out
 
     def pos_handoff_2(self):
         """The second handoff, root epoch 2 to 3, from the epoch-2 network the earlier stages left (pos-stale restored its credentials): the election reserves the next
@@ -885,14 +1081,20 @@ class Rehearsal:
         transport = handoff_ops.DockerTransport(self.gen)
         self.expect(all(self.root_epoch(i, transport) == 2 for i in range(1, self.n + 1)), 'every root certifies at epoch 2 (run the first handoff first)')
         deployment = json.loads((self.gen / 'network' / 'pos-deployment.json').read_text())
-        election, zero = deployment['election'], '0x' + '00' * 32
-        done = self.view_text(election, 'openResult()(bytes32)').strip()
-        self.say(f'  open result at the start: {done} (the first handoff\'s result is {"still open" if done != zero else "closed"})')
+        election = deployment['election']
+        # the id the first handoff recorded, not what is open now: a slow pos-restart can outlast the cadence, and then the open result is already the next one
+        recorded = self.gen / 'network' / 'handoff' / 'result-epoch-2.txt'
+        self.expect(recorded.is_file(), 'the first handoff recorded its result (run pos-proposal first)')
+        done = recorded.read_text().strip()
+        self.say(f'  the first handoff\'s result: {done}; open result at the start: {self.view_text(election, "openResult()(bytes32)").strip()}')
         def next_result():
             out = self.view_text(election, 'openResult()(bytes32)').strip()
             self.say(f'  openResult {out}, progress {self.view(self.REGISTRY, "progress()(uint64)")[0]}')
-            return out if out != zero and out != done else None
+            return next_open_result(out, done)
         self.wait('the election reserves the next result', next_result, 1500)
+        # the contract clears openResult on any outcome, so a next result alone does not say how the first one ended
+        state = self.result_state(election, done)
+        self.expect(state == RESULT_ACKNOWLEDGED, 'the first handoff\'s result is Acknowledged', str(state))
         self.target = 3
         try:
             self.pos_proposal()
@@ -902,6 +1104,42 @@ class Rehearsal:
         finally:
             self.target = 2
 
+    _bundle_lock = threading.Lock()   # the drive advances entities in parallel and they share the bundle files
+
+    def activation_bundles(self, after):
+        """The roots' activation bundles of epochs after..target (q3/bundle of root 1, which serves every epoch it installed from its journal), each kept
+        once as network/handoff/q3-bundle-<N>.cbor for every authority to read. They are evidence, not trust: an authority verifies each one itself
+        from its own pin (bft-core#1085), so a bundle written here and a bundle from anywhere else are refused or accepted alike."""
+        transport = getattr(self, 'transport', None) or handoff_ops.DockerTransport(self.gen)
+        work = self.gen / 'network' / 'handoff'
+        files = []
+        with self._bundle_lock:
+            for epoch in range(int(after) + 1, self.target + 1):
+                path = work / f'q3-bundle-{epoch}.cbor'
+                if not path.exists():
+                    status, body = transport.post(1, '/api/v1/q3/bundle', json.dumps({'epoch': epoch}).encode())
+                    self.expect(status == 200, f'root 1 serves the activation bundle of epoch {epoch}', body[:200].decode(errors='replace'))
+                    raw = bytes.fromhex(json.loads(body)['bundle'])
+                    tmp = path.with_name(f'.{path.name}.tmp')
+                    tmp.write_bytes(raw)
+                    os.chmod(tmp, 0o644)
+                    os.replace(tmp, path)
+                files.append(path)
+        return files
+
+    def advance_with_proof(self, i, operator):
+        """Entity i's pinned authority advanced by the one proof-verified order (bft-core#1085): the bundles from its lineage tip to the target (always the
+        target's), verified by the authority itself, then its next session. Returns the order's report."""
+        status = json.loads(self.exec_in(f'authority{i}', 'ubft', 'signing-authority', 'status', *operator))
+        files = self.activation_bundles(min(status.get('lineageEpoch') or 1, self.target - 1))
+        report = json.loads(self.exec_in(f'authority{i}', 'ubft', 'signing-authority', 'advance-with-proof', *operator,
+                                         *[a for f in files for a in ('--proof', f'/network/handoff/{f.name}')],
+                                         '--out', '/authority/client.cred', '--client-socket', '/authority/client.sock'))
+        status = json.loads(self.exec_in(f'authority{i}', 'ubft', 'signing-authority', 'status', *operator))
+        self.expect(not report.get('retired') and status.get('rootEpoch') == self.target, f'authority {i} verified the activation and holds root epoch {self.target}',
+                    str(report)[:300])
+        return report
+
     def root_epoch(self, i, transport=None):
         """The epoch of root i's committed certificate, or None while it does not answer."""
         transport = transport or handoff_ops.DockerTransport(self.gen)
@@ -910,6 +1148,39 @@ class Rehearsal:
             return json.loads(body).get('epoch') if status == 200 else None
         except (handoff_ops.HandoffError, ValueError):
             return None
+
+    def q3_status(self, i, transport):
+        """Root i's q3/status answer, or None while it does not answer."""
+        try:
+            status, body = transport.post(i, '/api/v1/q3/status', b'{}')
+            return json.loads(body) if status == 200 else None
+        except (handoff_ops.HandoffError, ValueError):
+            return None
+
+    def switched_roots(self, transport):
+        """The roots that switched into the target epoch in process (bft-core#1086): a root that reports a switch state is waited for (handoff.switched_in_process:
+        an unavailable or Switching answer is no evidence; a declined, faulted or late switch is not a switch); a root that reports none is not one."""
+        out = set()
+        for i in range(1, self.n + 1):
+            # PR 2: a joiner or follower whose image acquires the activation from a root peer is waited for as long as handoff.awaits_switch says; one
+            # on an older image is restarted at once
+            wait = handoff.awaits_switch(self.q3_status(i, transport), True)
+            switch = None if wait is None else handoff.switched_in_process(lambda i=i: self.q3_status(i, transport), self.target, wait=wait)
+            # evidence of the in-process switch itself: its target is this epoch (a root restarted into the epoch reports Running in it with no target)
+            if switch is not None and switch.get('target') == self.target:
+                out.add(i)
+        return out
+
+    def switch_published(self, i, transport, tries=10):
+        """Whether root i reports its in-process switch into the target published (Running or Following, target and epoch the target). An unavailable or
+        other answer is asked again, within `tries`; it is never taken for the switch."""
+        for attempt in range(tries):
+            view = self.q3_status(i, transport)
+            if handoff.switch_complete(view, self.target) and view['switch'].get('target') == self.target:
+                return True
+            if attempt + 1 < tries:
+                time.sleep(0.5)
+        return False
 
     def root_listens(self, i, transport):
         try:
@@ -927,14 +1198,23 @@ class Rehearsal:
         work = self.gen / 'network' / 'handoff'
         self.expect((work / 'v3-body-id.txt').is_file(), 'the candidate files exist (run pos-propose first)')
         transport = handoff_ops.DockerTransport(self.gen)
+        # bft-core#1086: a root that switched into the epoch inside its process at its own commit (q3/status: the switch published Running or Following in
+        # it) is installed and is not restarted; every other root is, and none of those may hold a certificate of the epoch before its install restart
+        switched = self.switched_roots(transport)
         for i in self.members():
+            if i in switched:
+                continue
             self.expect(self.root_epoch(i, transport) == self.target - 1, f'root {i} has no certificate of epoch {self.target} before its install restart')
+        if switched:
+            self.say(f'  switched into epoch {self.target} in process (not restarted): roots {sorted(switched)}')
         override = self.gen / f'compose.install-epoch-{self.target}.json'
         if not override.exists():
             override.write_text(json.dumps(handoff.install_override(compose, self.target), indent=1) + '\n')
         base = handoff_ops.compose_files(self.gen)
         files = base + ['-f', str(override)]
         for i in range(1, self.n + 1):
+            if i in switched:
+                continue
             self.say(f'  installing epoch {self.target} in root {i}')
             subprocess.run(['docker', 'compose', *base, 'stop', f'root{i}'], check=True, capture_output=True)
             state = self.gen / f'validator{i}' / 'root'
@@ -988,7 +1268,13 @@ class Rehearsal:
         self.exec_in('root1', 'ubft', 'q3', 'shard-conf', '--root-rpc', root_rpc, '--epoch', str(shard_epoch), '--out', '/tmp/shard-conf.json')
         conf = json.loads(self.exec_in('root1', 'cat', '/tmp/shard-conf.json'))
         self.expect(conf.get('epoch') == shard_epoch and conf.get('partitionId') == 8, f'a root holds the EVM shard configuration of epoch {shard_epoch}', str(conf)[:200])
-        (work / f'shard-conf-{shard_epoch}.json').write_text(json.dumps(conf, indent=1) + '\n')
+        # published atomically before any authority advances: a temporary name the lock-proof endpoint's scanner does not match, closed and made
+        # readable, then renamed into place (bft-core#996: the endpoint picks the new configuration up from this directory without a restart)
+        tmp = work / f'.shard-conf-{shard_epoch}.json.tmp'
+        with open(tmp, 'w') as f:
+            f.write(json.dumps(conf, indent=1) + '\n')
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, work / f'shard-conf-{shard_epoch}.json')
         subprocess.run(['chmod', '-R', 'a+rX', str(work)], check=True)
         # 12 the authorities and the shard nodes, one entity at a time
         for i in range(1, self.n + 1):
@@ -998,16 +1284,24 @@ class Rehearsal:
             if i in self.joiners:
                 self.advance_joiner(i, operator, shard_epoch)
                 continue
+            auth = self.gen / f'validator{i}' / 'auth'
+            pinned = json.loads(self.exec_in(f'authority{i}', 'ubft', 'signing-authority', 'status', *operator)).get('lineagePinned')
+            if pinned:
+                # bft-core#1085: a generated authority verifies the activation itself (its operator-trusted advance is a recovery policy it was not started with)
+                shutil.copy(auth / 'client.cred', auth / f'client.cred.pre-epoch-{self.target}')   # kept for pos-stale
+                os.chmod(auth / f'client.cred.pre-epoch-{self.target}', 0o600)
+                self.advance_with_proof(i, operator)
+                self.compose('start', f'shard{i}')
+                continue
             self.exec_in(f'authority{i}', 'ubft', 'signing-authority', 'advance-epoch', *operator, '--trust-base', f'/network/handoff/trust-base-epoch{self.target}.json',
                          '--shard-conf', f'/network/handoff/shard-conf-{shard_epoch}.json')
-            auth = self.gen / f'validator{i}' / 'auth'
             shutil.copy(auth / 'client.cred', auth / f'client.cred.pre-epoch-{self.target}')   # kept for pos-stale; a credential, so only in the entity's own auth directory
             os.chmod(auth / f'client.cred.pre-epoch-{self.target}', 0o600)
             self.exec_in(f'authority{i}', 'ubft', 'signing-authority', 'replace-session', *operator, '--out', '/authority/client.cred')
             self.compose('start', f'shard{i}')
         # 13 paid work at the new epoch
         self.wait('the public gateway is healthy', lambda: self.http(PUBLIC_RPC, 'GET', '/healthz')[0] == 200, 300)
-        receipt = json.loads(self.send_via_gateway(self.gen / 'faucet-secrets', '0x' + '44' * 20))
+        receipt = json.loads(self.send_via_gateway('0x' + '44' * 20))
         self.expect(receipt['status'] == '0x1', 'a transaction through the gateway is mined after the switch', receipt['transactionHash'])
         for i in range(1, self.n + 1):
             r = self.wait(f'validator {i} has it', lambda i=i: self.ureth(i, 'eth_getTransactionReceipt', [receipt['transactionHash']]), 180)
@@ -1019,6 +1313,94 @@ class Rehearsal:
             return count if count == self.view(deployment['custody'], 'recordCursor()(uint64)')[0] else None
         self.say(f'  recordCount == recordCursor == {self.wait("the custody has applied every root record", lambda: applied() is not None, 300) and applied()}')
         self.joiners.clear()   # the successor committee is active: a joiner is a member now
+
+    PID_SAMPLE_SECONDS = 0.25
+
+    def pid_counters(self, container):
+        """The container cgroup's pid counters (threads count: a Go thread is a task): (current, peak or None, events max or None), or None when the cgroup is not readable."""
+        for base in (Path(f'/sys/fs/cgroup/system.slice/docker-{container}.scope'), Path(f'/sys/fs/cgroup/docker/{container}'), Path(f'/sys/fs/cgroup/pids/docker/{container}')):
+            if not (base / 'pids.current').exists():
+                continue
+            try:
+                current = int((base / 'pids.current').read_text())
+                peak = int((base / 'pids.peak').read_text()) if (base / 'pids.peak').exists() else None
+                events = None
+                if (base / 'pids.events').exists():
+                    events = int(dict(line.split() for line in (base / 'pids.events').read_text().splitlines()).get('max', 0))
+                return current, peak, events
+            except (OSError, ValueError):
+                return None
+        return None
+
+    ABORT_LINES = re.compile(r'SIGABRT|pthread_create|fatal error|runtime/cgo|\bpanic:|out of memory|PC=')
+
+    def observe_restore(self, i, tag, seconds=30):
+        """Watch the joiner's restore start for `seconds`: the effective pid limit of its container (docker inspect, not what was asked for), the cgroup's pid counters
+        sampled four times a second, and its whole log (the first crash is at the start of it, #905). Returns the record, also appended to restore-repeat.jsonl."""
+        container = self.compose('ps', '-q', f'shard{i}', check=False).strip()
+        limit = None
+        if container:
+            inspect = subprocess.run(['docker', 'inspect', '--format', '{{.HostConfig.PidsLimit}}', container], text=True, capture_output=True)
+            limit = int(inspect.stdout.strip()) if inspect.returncode == 0 and inspect.stdout.strip().lstrip('-').isdigit() else None
+        current_max, peak, events, samples, end = 0, None, 0, 0, time.time() + seconds
+        while time.time() < end:
+            got = self.pid_counters(container) if container else None
+            if got:
+                samples += 1
+                current_max = max(current_max, got[0])
+                peak = max(peak or 0, got[1] or 0) or peak
+                events = max(events, got[2] or 0)
+            time.sleep(self.PID_SAMPLE_SECONDS)
+        running = f'shard{i}' in self.compose('ps', '--status', 'running', '--services').split()
+        whole = self.compose('logs', '--no-color', '--timestamps', f'shard{i}', check=False)
+        self.keep_redacted(self.evh() / f'joiner-shard-{i}-restore-whole-{tag}.log', whole)
+        lines = whole.splitlines()
+        record = {'tag': tag, 'pidsLimit': limit, 'running': running, 'samples': samples, 'currentMax': current_max, 'peak': peak, 'eventsMax': events,
+                  'peakOrMax': max(current_max, peak or 0), 'pthreadCreateFailed': any('pthread_create failed' in l for l in lines),
+                  'freshDirRefusal': any('restore requires a fresh BFT data directory' in l for l in lines),
+                  'head': [l[:220] for l in lines if self.ABORT_LINES.search(l)][:6]}
+        with (self.evh() / 'restore-repeat.jsonl').open('a') as out:
+            out.write(json.dumps(record) + '\n')
+        self.say(f'  restore {tag}: limit {limit} peak {record["peakOrMax"]} (current max {current_max}, pids.events max {events}, {samples} samples) {"running" if running else "NOT running"}'
+                 + (' PTHREAD_CREATE FAILED' if record['pthreadCreateFailed'] else ''))
+        return record
+
+    def expect_restore_running(self, i):
+        """The joiner's restore is up after 30 s. Its whole log is kept either way: the first crash is at the start of it, each restart only adds a refusal (#905), and a
+        container in a restart loop can read as running at the moment of the look."""
+        record = self.observe_restore(i, 'main')
+        logs = self.compose('logs', '--no-color', '--tail', '60', f'shard{i}', check=False)
+        self.keep_redacted(self.evh() / f'joiner-shard-{i}-restore.log', logs)
+        self.say(f'  joiner shard {i} restoring after 30 s: {"running" if record["running"] else "NOT running"}: ' + self.scrub(' | '.join(logs.strip().splitlines()[-3:])[-500:], True))
+        self.keep_redacted(self.evh() / f'joiner-shard-{i}-restore-whole.log', self.compose('logs', '--no-color', '--timestamps', f'shard{i}', check=False))
+        self.expect(record['running'], f'the joiner\'s shard node {i} runs as a restore under its new session', self.scrub(logs.strip()[-500:], True))
+
+    def pos_restore_repeat(self):
+        """#905: the joiner's restore repeated at the package's pid limit, with the pid evidence of each, then at deliberately low limits as the control, then once more in full.
+        Needs pos-advance first (the joiner is a member and has been restored once). The repeats and controls are start-up probes (the crash was in the first seconds):
+        each empties the joiner's state (a restore refuses a node that has state, the documented way is a fresh directory) and starts `shard-node restore` again; the final
+        restore is the whole stage, catch-up included, and leaves an ordinary node. The control must reproduce `pthread_create failed` at its lowest limit, or the run says
+        nothing about the limit (the experiment is then reported as invalid, not as a pass)."""
+        i = self.n
+        repeat, controls = self.restore_repeat_count, self.restore_control_limits
+        self.expect(repeat >= 1 and controls, 'pos-restore-repeat needs --restore-repeat >= 1 and at least one --restore-controls limit')
+        (self.evh() / 'restore-repeat.jsonl').unlink(missing_ok=True)
+        base = [self.restore_joiner(i, tag=f'n{n}', probe=True) for n in range(1, repeat + 1)]
+        low = [self.restore_joiner(i, tag=f'lim{limit}', limit=limit, probe=True) for limit in sorted(controls, reverse=True)]
+        bad = [r['tag'] for r in base if not r['running'] or r['pthreadCreateFailed'] or r['eventsMax'] or r['head']]
+        counters = [r for r in base if r['samples'] and r['pidsLimit']]
+        summary = {'package': {'repeats': len(base), 'limit': sorted({r['pidsLimit'] for r in base}), 'peakMax': max((r['peakOrMax'] for r in base), default=None),
+                               'peakAll': [r['peakOrMax'] for r in base], 'failed': bad},
+                   'controls': [{k: r[k] for k in ('tag', 'pidsLimit', 'peakOrMax', 'running', 'pthreadCreateFailed', 'freshDirRefusal', 'eventsMax', 'head')} for r in low]}
+        (self.evh() / 'restore-repeat.json').write_text(json.dumps(summary, indent=1) + '\n')
+        self.expect(len(counters) == len(base), 'the shard container\'s pid counters and effective limit were readable for every repeat (cgroup path)', json.dumps(summary['package']))
+        self.expect(not bad, f'every restore at the package limit ran without an abort, a pthread_create failure or a pids.events max: failed {bad}', json.dumps(summary['package']))
+        self.expect(all(r['peakOrMax'] < r['pidsLimit'] for r in base), 'every repeat stayed under the package pid limit', json.dumps(summary['package']))
+        lowest = min(low, key=lambda r: r['pidsLimit'] or 0)
+        self.expect(lowest['pthreadCreateFailed'], f'the control reproduces pthread_create failed at its lowest limit {lowest["pidsLimit"]} (if not, the control is INVALID and the repeats prove nothing about the limit)', json.dumps(summary['controls']))
+        crashed = [r for r in low if r['pthreadCreateFailed']]
+        self.expect(all(r['freshDirRefusal'] for r in crashed), 'a crashed restore is refused on restart until the directory is fresh (the documented partial-restore refusal)', json.dumps(summary['controls']))
+        self.restore_joiner(i, tag='final')
 
     def advance_joiner(self, i, operator, shard_epoch):
         """The joiner's authority is pending (the genesis shard configuration does not name it) and holds no session. It started at the successor scope, so after the Commit
@@ -1035,7 +1417,7 @@ class Rehearsal:
         step('complete-enrollment', 'complete-enrollment', *operator, '--shard-conf', f'/network/handoff/shard-conf-{shard_epoch}.json')
         rc = step('replace-session', 'replace-session', *operator, '--out', '/authority/client.cred')
         step('status after', 'status', *operator)
-        (self.evh() / f'joiner-authority-{i}.log').write_text('\n'.join(log))
+        self.keep_redacted(self.evh() / f'joiner-authority-{i}.log', '\n'.join(log))
         self.expect(rc == 0, f'the joiner\'s authority {i} advanced, enrolled and issued its session', log[-1][-400:])
         self.restore_joiner(i)
 
@@ -1044,7 +1426,7 @@ class Rehearsal:
         records = [json.loads(path.read_text()) for path in sorted(self.evidence.glob('handoff*/activation-record-*.json'))]
         return ','.join(f"{r['epoch']}={r['v3BodyId']}" for r in sorted(records, key=lambda r: r['epoch']))
 
-    def restore_joiner(self, i):
+    def restore_joiner(self, i, tag=None, limit=None, probe=False):
         """The joiner's shard node after the Commit. Its staging run left a candidate without the certificates a node needs (run 40087359371: "durable state is damaged or
         untrusted"), and the genesis configuration does not name it: it comes back by RESTORING, as the native lane does: its execution client and node state are emptied,
         the pin (latest certified record, its technical record and the trust history's body id) is read from a survivor's immutable archive, and the node starts as
@@ -1097,14 +1479,16 @@ class Rehearsal:
         entry += ['--tip-uc', '/state/tip.uc.cbor', '--tip-tr', '/state/tip.tr.cbor', '--trust-body-id', found.group(1)]
         restore_file = self.gen / handoff_ops.RESTORE_OVERRIDE
         try:
-            restore_file.write_text(json.dumps({'services': {f'shard{i}': {'entrypoint': entry}}}, indent=1) + '\n')
+            restore_file.write_text(json.dumps({'services': {f'shard{i}': {'entrypoint': entry, **({'pids_limit': limit} if limit else {})}}}, indent=1) + '\n')
             self.compose('up', '-d', '--no-deps', '--force-recreate', f'shard{i}')
-            time.sleep(30)
-            logs = self.compose('logs', '--no-color', '--tail', '60', f'shard{i}', check=False)
-            (self.evh() / f'joiner-shard-{i}-restore.log').write_text(logs)
-            running = f'shard{i}' in self.compose('ps', '--status', 'running', '--services').split()
-            self.say(f'  joiner shard {i} restoring after 30 s: {"running" if running else "NOT running"}: ' + ' | '.join(logs.strip().splitlines()[-3:])[-500:])
-            self.expect(running, f'the joiner\'s shard node {i} runs as a restore under its new session', logs.strip()[-500:])
+            if probe:   # #905 repeats and controls: observe the start-up only; the next call empties the state again
+                record = self.observe_restore(i, tag)
+                if record['pthreadCreateFailed'] and not record['freshDirRefusal']:   # the restart policy retries, and the retry is the refusal
+                    time.sleep(20)
+                    later = self.observe_restore(i, tag + '-after', seconds=1)   # the whole log now holds the crash and the refusals
+                    record = later | {'tag': tag, 'peakOrMax': max(record['peakOrMax'], later['peakOrMax']), 'samples': record['samples'], 'head': record['head'] or later['head']}
+                return record
+            self.expect_restore_running(i)
             survivor = self.wait(f'the joiner\'s execution client {i} catches up with validator 1', lambda: int(self.ureth(i, 'eth_blockNumber'), 16) + 5 >= int(self.ureth(1, 'eth_blockNumber'), 16), 300)
             self.expect(survivor, f'the joiner\'s execution client {i} is at validator 1\'s block')
             # an ordinary node from here on: the restore flags go, the state stays
@@ -1112,7 +1496,7 @@ class Rehearsal:
             self.compose('up', '-d', '--no-deps', '--force-recreate', f'shard{i}')
             time.sleep(20)
             running = f'shard{i}' in self.compose('ps', '--status', 'running', '--services').split()
-            (self.evh() / f'joiner-shard-{i}-run.log').write_text(self.compose('logs', '--no-color', '--tail', '60', f'shard{i}', check=False))
+            self.keep_redacted(self.evh() / f'joiner-shard-{i}-run.log', self.compose('logs', '--no-color', '--tail', '60', f'shard{i}', check=False))
             self.expect(running, f'the restored shard node {i} runs again as an ordinary node')
         finally:
             restore_file.unlink(missing_ok=True)   # a failed restore leaves no override behind for the next Compose call
@@ -1121,13 +1505,112 @@ class Rehearsal:
         run = subprocess.run(['docker', 'compose', *handoff_ops.compose_files(self.gen), 'exec', '-T', service, *command], text=True, capture_output=True)
         return run.returncode, run.stdout, run.stderr
 
+    UTB_VERIFIED = re.compile(r'^ok: epochs (\d+)\.\.(\d+), tip (0x[0-9a-f]{64})$', re.M)
+
+    def utb_page(self, query):
+        """(status, bytes) of GET /api/v1/trustbases?query through the public gateway, as a client behind the proxy. The body is binary CBOR: it is never decoded as text."""
+        conn = http.client.HTTPConnection(PUBLIC_RPC, timeout=20)
+        try:
+            conn.request('GET', '/api/v1/trustbases?' + query, headers={'X-Forwarded-For': PROXY_IPS[0] + '10'})
+            response = conn.getresponse()
+            return response.status, response.read()
+        finally:
+            conn.close()
+
+    def utb_verify(self, path, pin):
+        """(ok, first epoch, tip epoch, tip EntryID, output) of the pinned ubft's offline verifier on a bundle file: genesis EntryID equals the pin, epochs contiguous, every entry
+        linked to its predecessor's EntryID and signed by a quorum of the predecessor (strict), nothing after the tip."""
+        run = subprocess.run([self.ubft, 'trust-base', 'utb-verify', '--bundle', str(path), '--utb-genesis-id', pin], text=True, capture_output=True)
+        found = self.UTB_VERIFIED.search(run.stdout)
+        if run.returncode or not found:
+            return False, None, None, None, (run.stdout + run.stderr).strip()[-300:]
+        return True, int(found.group(1)), int(found.group(2)), found.group(3), run.stdout.strip()
+
+    def utb_genesis_epoch(self):
+        """The epoch of the generation's genesis trust base (network/trust-base.json, `epoch`; 1 when the file does not say), the first epoch the served history must start at."""
+        try:
+            return int(json.loads((self.gen / 'network' / 'trust-base.json').read_text()).get('epoch', 1))
+        except (OSError, ValueError, AttributeError):
+            return 1
+
+    def utb_history(self, label, pin, snapshot=None):
+        """The aggregator's served history as ONE complete page from the genesis (a bundle: status OK, no cursor), verified offline by `ubft trust-base utb-verify` against the
+        pinned genesis EntryID. `snapshot` = (tip epoch, tip EntryID) asks the server to answer for exactly that history (snapshotEnd / snapshotEntryId): an answer that is not
+        the held history is refused, so a replay of the same history is idempotent and a conflicting replacement cannot pass. Returns (tip epoch, tip EntryID, file)."""
+        query = f'from={self.utb_genesis_epoch()}&maxEntries=64' + (f'&snapshotEnd={snapshot[0]}&snapshotEntryId={snapshot[1]}' if snapshot else '')
+        status, body = self.utb_page(query)
+        self.expect(status == 200 and len(body) > 0, f'the aggregator serves its history ({label})', f'HTTP {status}, {len(body)} bytes')
+        path = self.evh() / f'utb-history-{label}.cbor'
+        path.write_bytes(body)
+        ok, first, tip, tip_id, out = self.utb_verify(path, pin)
+        self.expect(ok, f'the served history verifies offline against the pinned genesis ({label})', out)
+        self.expect(first == self.utb_genesis_epoch(), f'the history starts at the genesis epoch ({label})', f'first {first}, genesis {self.utb_genesis_epoch()}')
+        if snapshot:
+            self.expect((tip, tip_id) == tuple(snapshot), f'the replay answers for exactly the first history ({label})', f'{tip} {tip_id}')
+        return tip, tip_id, path
+
+    def utb_live(self):
+        """The live UTB source on the package built with --utb (the integration aggregator; the upstream one when its feeder is merged): the aggregator's SERVED history, not its
+        log lines, is the evidence. After the handoffs the roots certify at epoch E; the history the aggregator serves must (1) reach at least E (it may be ahead: a finalized
+        future entry is allowed, so the tip is NOT compared with the active epoch), (2) verify offline from the pinned genesis EntryID to its tip: one entry per epoch,
+        contiguous, each linked to its predecessor and signed by the predecessor's quorum, (3) answer a replay of the same history (snapshot = that tip and EntryID) with the
+        same history, so nothing was replaced, (4) be refused when the snapshot names a different EntryID (control: the replay check can fail), and (5) fail the offline
+        verifier when one byte is changed (control: the verifier checks). The aggregator's own log is kept as supplementary evidence and must show no refused update and no
+        version 1 fallback; how many log lines an epoch produced is not asserted (restarts and replicas replay). Needs the handoffs first and --ubft."""
+        utb = self.manifest.get('utb')
+        self.expect(utb is not None, 'the generation has the signed trust-base profile (generate.py --utb)')
+        self.expect(bool(self.ubft), 'the stage needs --ubft (the offline verifier)')
+        pin = utb['genesis_id']
+        transport = handoff_ops.DockerTransport(self.gen)
+        epoch = self.root_epoch(1, transport)
+        self.expect(epoch is not None and epoch >= 2 and all(self.root_epoch(i, transport) == epoch for i in range(1, self.n + 1)), 'every root certifies at the same switched epoch', str(epoch))
+        def reached():
+            status, body = self.utb_page(f'from={self.utb_genesis_epoch()}&maxEntries=64')
+            if status != 200 or not body:
+                return None
+            probe = self.evh() / 'utb-history-probe.cbor'
+            probe.write_bytes(body)
+            ok, _, tip, _, _ = self.utb_verify(probe, pin)
+            return tip if ok and tip >= epoch else None
+        self.wait(f'the aggregator serves a verifying history reaching epoch {epoch}', reached, 180)   # raises Failure on timeout
+        tip, tip_id, first_file = self.utb_history('first', pin)
+        self.expect(tip >= epoch, 'the verified tip is at least the roots\' epoch', f'tip {tip}, roots {epoch}')
+        # replay: the same history again, asked for by its tip and EntryID
+        again_tip, again_id, again_file = self.utb_history('replay', pin, (tip, tip_id))
+        self.expect((again_tip, again_id) == (tip, tip_id), 'the replay is the same history (same tip epoch and EntryID; a different valid witness of the same EntryID is a replay)')
+        # control 1: a snapshot naming another EntryID must not be answered with the history
+        wrong = '0x' + ('00' if not tip_id.endswith('00') else '01') * 32
+        status, body = self.utb_page(f'from={self.utb_genesis_epoch()}&maxEntries=64&snapshotEnd={tip}&snapshotEntryId={wrong}')
+        control = self.evh() / 'utb-history-wrong-snapshot.cbor'
+        control.write_bytes(body)
+        ok, _, _, control_id, _ = self.utb_verify(control, pin)
+        self.expect(not (status == 200 and ok and control_id == tip_id), 'a replay naming another EntryID is not answered with the held history (control)', f'HTTP {status}')
+        # control 2: the offline verifier refuses a changed byte
+        raw = bytearray(first_file.read_bytes())
+        raw[len(raw) // 2] ^= 0x01
+        tampered = self.evh() / 'utb-history-tampered.cbor'
+        tampered.write_bytes(bytes(raw))
+        self.expect(not self.utb_verify(tampered, pin)[0], 'the offline verifier refuses a history with one changed byte (control)')
+        # supplementary: the aggregator's own log, kept; refusals and the version 1 fallback are failures
+        lines = []
+        for raw_line in self.compose('logs', '--no-color', 'aggregator', check=False).splitlines():
+            at = raw_line.find('{')
+            if at < 0: continue
+            try: lines.append(json.loads(raw_line[at:]))
+            except ValueError: continue
+        refused = [line for line in lines if line.get('msg') in ('dropping an invalid trust-base update',) or 'version 1' in str(line.get('error', ''))]
+        self.expect(not refused, 'no trust-base update was refused and no version 1 trust base was consulted', json.dumps(refused)[:300])
+        self.keep_redacted(self.evh() / 'utb-live-aggregator.log', '\n'.join(json.dumps(line) for line in lines if 'trust-base' in str(line.get('msg', ''))) + '\n')
+        (self.evh() / 'utb-live-steps.json').write_text(json.dumps({'rootsEpoch': epoch, 'tipEpoch': tip, 'tipEntryId': tip_id, 'genesisId': pin, 'aggregator': utb.get('aggregator', 'integration'),
+                                                                     'checked': ['verifies offline from the pinned genesis', 'contiguous, one entry per epoch', 'replay answers the same history', 'wrong-snapshot control', 'tampered-byte control']}, indent=1) + '\n')
+
     def pos_restart(self, epoch=2):
         """The TN-1 pod-restart stage on the switched PoS network: one entity at a time (--pods) its execution client, root and shard node are stopped, the survivors
         certify a transaction, the entity is started again (`start`: the roots keep the container they were recreated with, install flag included) and converges; then every
         root still certifies at the root epoch and the custody has applied every root record. Needs pos-advance first (pos-handoff-2 for epoch 3)."""
         transport = handoff_ops.DockerTransport(self.gen)
         self.expect(all(self.root_epoch(i, transport) == epoch for i in range(1, self.n + 1)), f'every root certifies at epoch {epoch} (run the handoff first)')
-        self.pod_restart(mine_within=MINE_SECONDS_ROTATED)
+        self.pod_restart(rotated=True)
         for i in range(1, self.n + 1):
             self.wait(f'root {i} certifies at epoch {epoch} again', lambda i=i: self.root_epoch(i, transport) == epoch, 180)
         deployment = json.loads((self.gen / 'network' / 'pos-deployment.json').read_text())
@@ -1173,7 +1656,7 @@ class Rehearsal:
                 return one and three and one['epoch'] == epoch and three['epoch'] == epoch and one['round'] > start + 3 and three['round'] > start + 3 and three['quorum'] and len(three['signers']) == self.n - 1
             self.wait(f'with root 2 stopped the committed round advances at epoch {epoch} on roots 1 and 3, signed by the three live roots', advanced, 240)
         except Exception:
-            (self.evh() / 'recreate-root.log').write_text(self.compose('logs', '--no-color', '--tail', '80', 'root1', check=False))
+            self.keep_redacted(self.evh() / 'recreate-root.log', self.compose('logs', '--no-color', '--tail', '80', 'root1', check=False))
             raise
         finally:
             self.compose('start', 'root2')
@@ -1197,13 +1680,31 @@ class Rehearsal:
             full = json.loads(self.exec_in(f'authority{i}', 'ubft', 'signing-authority', 'status', *operator))
             return {k: full[k] for k in ('authorityId', 'networkId', 'partitionId', 'shardEpoch', 'rootEpoch', 'shardConfHash', 'generation', 'signingKeyFingerprint', 'enrollmentComplete')}
         before = status(1)
+        pinned = json.loads(self.exec_in('authority1', 'ubft', 'signing-authority', 'status', *operator)).get('lineagePinned')
         rc, out, err = self.exec_rc('authority1', 'ubft', 'signing-authority', 'advance-epoch', *operator, '--trust-base', '/network/trust-base.json',
                                     '--shard-conf', '/network/full-shard-conf.json')
         self.say(f'  advance back to epoch 1: exit {rc}: {(out + err).strip()[-300:]}')
         (self.evh() / 'stale-trust-base.txt').write_text(f'exit {rc}\n{out}{err}')
-        self.expect(rc != 0 and 'signing-context-mismatch' in err, 'the authority refuses to be advanced back to the epoch-1 trust base and shard configuration (signing-context-mismatch)', (out + err).strip()[-300:])
+        # a pinned authority refuses the operator-trusted route outright, whatever its input (bft-core#1085); an unpinned one refuses this stale context
+        refusal = 'signing-advance-recovery-only' if pinned else 'signing-context-mismatch'
+        self.expect(rc != 0 and refusal in err, f'the authority refuses to be advanced back to the epoch-1 trust base and shard configuration ({refusal})',
+                    (out + err).strip()[-300:])
         after = status(1)
         self.expect(after == before, 'the refused advance changes nothing in the authority status', f'{before} -> {after}')
+        if pinned:
+            # the proof route: every authentic activation it already holds, the current one and the older ones, is an idempotent replay (astra on #1090):
+            # it is accepted and changes neither the scope nor the generation (no session is issued: the current credential is the admitted one)
+            for epoch in range(2, self.target + 1):
+                path = net / 'handoff' / f'q3-bundle-{epoch}.cbor'
+                self.expect(path.is_file(), f'the activation bundle of epoch {epoch} was kept by pos-advance', str(path))
+                report = json.loads(self.exec_in('authority1', 'ubft', 'signing-authority', 'advance-with-proof', *operator, '--proof', f'/network/handoff/{path.name}',
+                                                 '--out', '/authority/client.cred', '--client-socket', '/authority/client.sock'))
+                (self.evh() / f'replay-proof-{epoch}.json').write_text(json.dumps(report, indent=1) + '\n')
+                steps = report.get('steps') or []
+                self.expect(len(steps) == 1 and steps[0].get('Replay') and not steps[0].get('Advanced') and not report.get('sessionIssued'),
+                            f'the retained activation of epoch {epoch} is a replay that advances nothing and issues no session', str(report)[:300])
+                replayed = status(1)
+                self.expect(replayed == before, f'the replay of epoch {epoch} leaves the scope and the generation as they were', f'{before} -> {replayed}')
         # (2) the old client credential
         auth = self.gen / 'validator1' / 'auth'
         old, current = auth / 'client.cred.pre-epoch-2', auth / 'client.cred'
@@ -1216,7 +1717,7 @@ class Rehearsal:
         time.sleep(30)
         logs = self.compose('logs', '--no-color', '--since', started, 'shard1', check=False)
         fenced = [line for line in logs.splitlines() if 'signing-session-fenced' in line]
-        (self.evh() / 'stale-client-credential-shard1.log').write_text('\n'.join(fenced[:40]) + '\n')
+        self.keep_redacted(self.evh() / 'stale-client-credential-shard1.log', '\n'.join(fenced[:40]) + '\n')
         self.say(f'  shard 1 with the pre-advance credential: {len(fenced)} lines "restored authority refused readiness ... signing-session-fenced"')
         self.expect(len(fenced) > 0, 'the authority fences the old client session: the shard node reads signing-session-fenced and abstains', f'{len(fenced)} of {len(logs.splitlines())} log lines are signing-session-fenced' if fenced else f'{len(logs.splitlines())} log lines, none fenced')
         # put the current credential back: the entity signs again, and the fence is not in the log after the restart
@@ -1224,7 +1725,7 @@ class Rehearsal:
         shutil.copy(auth / 'client.cred.epoch-2', current)
         restored = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='microseconds').replace('+00:00', 'Z')   # sub-second: a whole-second stamp reaches back to lines of the same second
         self.compose('start', 'shard1')
-        receipt = json.loads(self.send_via_gateway(self.gen / 'faucet-secrets', '0x' + '55' * 20))
+        receipt = json.loads(self.send_via_gateway('0x' + '55' * 20))
         self.expect(receipt['status'] == '0x1', 'a transaction through the gateway is mined with the current credential back', receipt['transactionHash'])
         self.wait('validator 1 has it', lambda: self.ureth(1, 'eth_getTransactionReceipt', [receipt['transactionHash']]), 180)
         time.sleep(20)
@@ -1232,11 +1733,11 @@ class Rehearsal:
         self.expect(not again, 'with the current credential the shard node is not fenced', f'{len(again)} fenced lines')
 
     def observe(self):
-        """The observation sampler (observe.py) as a smoke: four samples five seconds apart on the running generation. It must exit 0 (no alert), write four samples
+        """The observation sampler (observe.py) as a smoke: four samples five seconds apart (two block intervals on a paced package) on the running generation. It must exit 0 (no alert), write four samples
         with a certified head from every root, and see the certified round move between the first and the last sample. The faucet guard is not sampled: its /healthz
         needs the signer, which a rehearsal does not start. The 24-hour interval is the host's."""
         out = self.evidence / 'observe'
-        run = subprocess.run([sys.executable, str(Path(__file__).resolve().parent / 'observe.py'), str(self.gen), '--out', str(out), '--samples', '4', '--interval', '5', '--no-faucet'],
+        run = subprocess.run([sys.executable, str(Path(__file__).resolve().parent / 'observe.py'), str(self.gen), '--out', str(out), '--samples', '4', '--interval', str(max(5, math.ceil(2 * self.block_interval_s()))), '--no-faucet'],
                              text=True, capture_output=True)
         self.say(f'  observe.py: exit {run.returncode}: {(run.stdout + run.stderr).strip()[-400:]}')
         self.expect(run.returncode == 0, 'the sampler raised no alert on the healthy package', (run.stdout + run.stderr).strip()[-400:])
@@ -1252,8 +1753,7 @@ class Rehearsal:
         self.expect(blocks[-1] > blocks[0], 'the execution chain\'s block moved between the first and the last sample (an idle chain still produces blocks)', str(blocks))
 
     def send_to_survivors(self, survivors, raw, tx):
-        """The gateway's fan-out with a validator down, each reply checked. The validators have no peers, so a pool that is not sent a transaction never holds it: sent to one
-        survivor it waits for that survivor's turn to lead."""
+        """Send the latency samples directly so each survivor's acceptance can be checked."""
         for j in survivors:
             reply = self.inner_reply(f'http://ureth{j}:8545', 'eth_sendRawTransaction', [raw])
             error = str(reply.get('error', '')).lower()
@@ -1261,26 +1761,54 @@ class Rehearsal:
             known = 'already known' in error or ('nonce too low' in error and self.ureth(j, 'eth_getTransactionReceipt', [tx]) is not None)
             self.expect(reply.get('result') == tx or known, f'survivor {j} accepts the transaction', json.dumps(reply)[:200])
 
-    def settled_latency(self, i, survivors, mine_within):
-        """With validator i still down and the fault transition over: SETTLED_SAMPLES transactions, one at a time, each timed from its acceptance to the first survivor's receipt.
-        Rounds pass while they run, so the later ones are past the history lag. Recorded, phase 'settled', never judged here: the numbers go to the #886 report."""
-        sender, to = self.manifest['faucet_address'], '0x' + '44' * 20
+    def after_transition_latency(self, i, survivors, mine_within, stopped_at):
+        """With validator i still down: AFTER_TRANSITION_SAMPLES transactions, one at a time, each timed from its acceptance to the first survivor's receipt. The first ones can still be in
+        the adaptation burst: they start when the transition transaction mines, which can be 37 s after its acceptance with the burst running about 80 s more, and a T2 repeat in
+        the burst took one sample 81.7 s (bft-core #886, run 41862942889). So phase 'after_transition' says only when they start, and runs before this name call it
+        'settled'. Each row's `since_stop` and `accepted_at` let the report split them. Recorded, never judged here: the numbers go to the #886 report."""
+        sender, to = self.funder_address(), '0x' + '44' * 20
         tx = None
-        for k in range(SETTLED_SAMPLES):
+        for k in range(AFTER_TRANSITION_SAMPLES):
             nonce = int(self.ureth(survivors[0], 'eth_getTransactionCount', [sender, 'latest']), 16)
             raw = self.raw_tx(to, nonce, int(self.ureth(survivors[0], 'eth_gasPrice'), 16))
             tx = self.cast_run('keccak', raw)
             self.send_to_survivors(survivors, raw, tx)
-            accepted = time.monotonic()
-            self.wait(f'survivor {survivors[0]} mines settled sample {k}', lambda: self.ureth(survivors[0], 'eth_getTransactionReceipt', [tx]), mine_within)
+            accepted, accepted_at = time.monotonic(), self.utc_stamp()
+            self.wait(f'survivor {survivors[0]} mines after-transition sample {k}', lambda: self.ureth(survivors[0], 'eth_getTransactionReceipt', [tx]), mine_within)
             with (self.evidence / 'restart-latency.jsonl').open('a') as out:
-                out.write(json.dumps({'validator_down': i, 'phase': 'settled', 'sample': k, 'seconds_to_mine': round(time.monotonic() - accepted, 1), 'tx': tx}) + '\n')
+                out.write(json.dumps({'validator_down': i, 'phase': 'after_transition', 'sample': k, 'seconds_to_mine': round(time.monotonic() - accepted, 1), 'since_stop': round(accepted - stopped_at, 1), 'accepted_at': accepted_at, 'tx': tx}) + '\n')
         return tx
 
     @staticmethod
     def utc_stamp(plus=0):
         """An RFC 3339 UTC time with microseconds (what `docker compose logs --since/--until` takes)."""
         return (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=plus)).isoformat(timespec='microseconds').replace('+00:00', 'Z')
+
+    def keep_stop_window(self, i, window):
+        """The rotated epochs' stop window in evidence/stop-window-<target>-v<i>.log, redacted as at CAPTURE_SERVICES. Fails closed: a failed scan or a literal that survives
+        writes nothing and says so; never fails the stage."""
+        name = f'stop-window-{self.target}-v{i}.log'
+        if (self.evidence / name).exists():   # pos-restart-2 runs with the target back at 2: it must not overwrite the first window
+            name = f'stop-window-{self.target}-v{i}-again.log'
+        self.keep_redacted(self.evidence / name, window)
+
+    def keep_redacted(self, path, text):
+        """`text` in the file `path`, redacted as at CAPTURE_SERVICES. Fails closed: a failed scan or a literal that survives writes nothing and says so; never fails the stage."""
+        name = path.name
+        try:
+            gen = getattr(self, 'gen', None)
+            if not gen:
+                raise SecretScanError('no generation to scan for secrets')
+            secrets = known_secrets(gen)
+            lines, _, withheld = redact_log(text, secrets)
+            body = '\n'.join(lines)
+            if any(secret in body for secret in secrets):
+                self.say(f'  {name} NOT kept: a known secret literal survived the redaction')
+                return
+            path.write_text(body + '\n')
+            self.say(f'  kept {name} ({len(lines)} lines, {withheld} withheld)')
+        except Exception as error:   # evidence is best effort; the stage's verdict is about the package
+            self.say(f'  {name} not kept: {error}')
 
     def capture_restart_window(self, i, start, stall):
         """Keep the consensus logs (root and shard services only) of the window in which validator i was down, redacted as described at CAPTURE_SERVICES, in
@@ -1312,54 +1840,57 @@ class Rehearsal:
         except Exception as error:   # evidence is best effort; the stage's verdict is about the package
             self.say(f'  pod-restart logs of validator {i} not kept: {error}')
 
-    def record_restart_latency(self, i, stall, mine_within, tx):
-        """The seconds the survivors needed to mine a transaction with validator i down: a log line (marked SLOW with the #886 note when the rotated limit is in force and
-        the time is over SLOW_MINE_SECONDS: the note is wrong for a slow PoA run at epoch 1) and a line in evidence/restart-latency.jsonl."""
-        slow = mine_within > MINE_SECONDS and stall > SLOW_MINE_SECONDS
-        self.say(f'  survivors mined it {stall} s after accepting it with validator {i} down' + (f' (SLOW, bft-core #886: a stopped root is elected leader again every {self.n}th round of a handoff epoch)' if slow else ''))
+    def record_restart_latency(self, i, stall, rotated, tx):
+        """The seconds the survivors needed to mine a transaction with validator i down: a log line (marked SLOW with the #886 note in a rotated epoch when the time is over
+        SLOW_MINE_SECONDS: the note is wrong for a slow PoA run at epoch 1) and a line in evidence/restart-latency.jsonl."""
+        slow = rotated and stall > SLOW_MINE_SECONDS
+        self.say(f'  survivors mined it {stall} s after accepting it with validator {i} down' + (' (SLOW, bft-core #886: the schedule is still adapting to the stopped root, or in its recovery run)' if slow else ''))
         with (self.evidence / 'restart-latency.jsonl').open('a') as out:
-            out.write(json.dumps({'validator_down': i, 'phase': 'transition', 'seconds_to_mine': stall, 'limit': mine_within, 'tx': tx}) + '\n')
+            out.write(json.dumps({'validator_down': i, 'phase': 'transition', 'seconds_to_mine': stall, 'limit': MINE_SECONDS_ROTATED if rotated else MINE_SECONDS, 'tx': tx}) + '\n')
 
-    def pod_restart(self, mine_within=MINE_SECONDS, capture_logs=None):
+    def pod_restart(self, rotated=False, capture_logs=None):
         """One validator entity at a time: stop its execution client, root and shard node (its signing authority stays live, as the README requires), check what the
-        package promises, start them again and check they rejoin. The PUBLIC gateway fails closed while a validator is down (it checks every validator's identity
-        before it serves or broadcasts): that is asserted, not worked around; the survivors are driven directly, as the gateway would fan out."""
-        capture_logs = (mine_within == MINE_SECONDS) if capture_logs is None else capture_logs   # the PoA stage keeps the logs of each stop window (bft-core #886), the rotated epochs do not
-        sender, to = self.manifest['faucet_address'], '0x' + '22' * 20
+        public gateway availability and survivor agreement, then start them again and check they rejoin."""
+        capture_logs = (not rotated) if capture_logs is None else capture_logs   # the PoA stage keeps the logs of each stop window (bft-core #886), the rotated epochs do not
+        sender, to = self.funder_address(), '0x' + '22' * 20
         for i in self.pods:
             names = [f'ureth{i}', f'root{i}', f'shard{i}']
             survivors = [j for j in range(1, self.n + 1) if j != i]
             window_start = self.utc_stamp()
             self.say(f'  stopping validator {i}: {" ".join(names)}')
             stopped = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')
+            stopped_at = time.monotonic()
             self.compose('stop', *names)
-            self.wait('the public gateway refuses while a validator is down (fail closed)', lambda: self.http(PUBLIC_RPC, 'GET', '/healthz')[0] == 503, 120)
-            self.expect(True, f'validator {i} down: the public gateway fails closed (503), no partial broadcast')
-            nonce = int(self.ureth(survivors[0], 'eth_getTransactionCount', [sender, 'latest']), 16)
-            price = int(self.ureth(survivors[0], 'eth_gasPrice'), 16)
+            self.wait('the public gateway is healthy with one validator down', lambda: self.http(PUBLIC_RPC, 'GET', '/healthz')[0] == 200, 120)
+            self.expect(int(self.call('eth_chainId'), 16) == self.chain_id, f'validator {i} down: public chain ID is readable')
+            nonce = int(self.call('eth_getTransactionCount', [sender, 'latest']), 16)
+            price = int(self.call('eth_gasPrice'), 16)
             raw = self.raw_tx(to, nonce, price)
-            # the hash is the transaction's own (keccak of the raw bytes), not what a node answers: a survivor the transaction has already reached by gossip answers
-            # "already known" with no result, which is acceptance of the same transaction; "nonce too low" counts only with the receipt (below); any other error is a refusal
             tx = self.cast_run('keccak', raw)
-            self.send_to_survivors(survivors, raw, tx)
-            self.say(f'  the {len(survivors)} survivors accept transaction {tx}')
+            self.expect(self.call('eth_sendRawTransaction', [raw]) == tx, f'validator {i} down: the gateway acknowledges the signed transaction', tx)
             blocks = set()
             accepted = time.monotonic()
             for j in survivors:
-                r = self.wait(f'survivor {j} mines it with validator {i} down', lambda j=j: self.ureth(j, 'eth_getTransactionReceipt', [tx]), mine_within)
+                r = self.wait(f'survivor {j} mines it with validator {i} down', lambda j=j: self.ureth(j, 'eth_getTransactionReceipt', [tx]), MINE_SECONDS_ROTATED if rotated else MINE_SECONDS)
                 self.expect(r['status'] == '0x1', f'survivor {j} has a successful receipt', r['blockHash'])
                 blocks.add(r['blockHash'])
             stall = round(time.monotonic() - accepted)
-            self.record_restart_latency(i, stall, mine_within, tx)
+            self.record_restart_latency(i, stall, rotated, tx)
             if capture_logs:
                 self.capture_restart_window(i, window_start, stall)
             self.expect(len(blocks) == 1, 'the survivors agree on the including block')
+            receipt = self.call('eth_getTransactionReceipt', [tx])
+            self.expect(receipt is not None and receipt['blockHash'] in blocks, 'the gateway serves the receipt during the outage')
+            self.expect(self.call('eth_sendRawTransaction', [raw]) == tx, 'resubmitting the included transaction returns the same hash', tx)
             last = tx
-            if mine_within > MINE_SECONDS:
-                last = self.settled_latency(i, survivors, mine_within) or tx
+            if rotated:
+                last = self.after_transition_latency(i, survivors, MINE_SECONDS_ROTATED, stopped_at) or tx
                 # the whole stop window of the survivors' roots and shards: the end-of-run log tail does not reach back to it
                 roots = [f'{kind}{j}' for j in survivors for kind in ('root', 'shard')]
-                (self.evidence / f'stop-window-{self.target}-v{i}.log').write_text(self.compose('logs', '--no-color', '--since', stopped, *roots, check=False))
+                window = self.compose('logs', '--no-color', '--since', stopped, *roots, check=False)
+                self.keep_stop_window(i, window)
+                with (self.evidence / 'restart-latency.jsonl').open('a') as out:   # tags the window's samples for the #886 two-stage bound
+                    out.write(json.dumps({'validator_down': i, 'phase': 'window', 'repeats': repeated_certificates(window)}) + '\n')
             self.say(f'  starting validator {i}')
             self.compose('start', *names)
             r = self.wait(f'validator {i} catches up to the transaction mined without it', lambda: self.ureth(i, 'eth_getTransactionReceipt', [tx]), 300)
@@ -1367,7 +1898,7 @@ class Rehearsal:
             # the gateway reads the sender's nonce from a validator: wait until the restarted one has everything mined without it
             self.wait(f'validator {i} catches up to the last transaction mined without it', lambda: self.ureth(i, 'eth_getTransactionReceipt', [last]), 300)
             self.wait('the public gateway is healthy again', lambda: self.http(PUBLIC_RPC, 'GET', '/healthz')[0] == 200, 120)
-            receipt = json.loads(self.send_via_gateway(self.gen / 'faucet-secrets', '0x' + '33' * 20))
+            receipt = json.loads(self.send_via_gateway('0x' + '33' * 20))
             self.expect(receipt['status'] == '0x1', f'a transaction through the public gateway succeeds after validator {i} rejoined', receipt['transactionHash'])
             for j in range(1, self.n + 1):
                 r = self.wait(f'validator {j} has it', lambda j=j: self.ureth(j, 'eth_getTransactionReceipt', [receipt['transactionHash']]), 120)
@@ -1381,9 +1912,9 @@ class Rehearsal:
         archive = self.gen.parent / 'backups' / (self.gen.name + '.tar.gz')
         archive.parent.mkdir(mode=0o700, exist_ok=True)
         restored = self.gen.parent / (self.gen.name + '-restored')
-        marker = json.loads(self.send_via_gateway(self.gen / 'faucet-secrets', '0x' + '44' * 20))
+        marker = json.loads(self.send_via_gateway('0x' + '44' * 20))
         self.expect(marker['status'] == '0x1', 'a transaction before the backup', marker['transactionHash'])
-        sender = self.manifest['faucet_address']
+        sender = self.funder_address()
         nonce_before = int(self.call('eth_getTransactionCount', [sender, 'latest']), 16)
         out = subprocess.run([sys.executable, str(backup), 'backup', str(self.gen), str(archive)], check=True, text=True, capture_output=True).stdout
         self.say('  ' + out.strip())
@@ -1406,7 +1937,7 @@ class Rehearsal:
         s, text = self.http(FAUCET, 'GET', '/api/network')
         pin = json.loads(text) if s == 200 else {}
         self.expect(pin.get('genesis_hash', '').lower() == self.genesis, 'the faucet guard publishes the same network pin after the restore')
-        after = json.loads(self.send_via_gateway(self.gen / 'faucet-secrets', '0x' + '55' * 20))
+        after = json.loads(self.send_via_gateway('0x' + '55' * 20))
         self.expect(after['status'] == '0x1', 'a fresh transaction through the public gateway succeeds from the restored generation', after['transactionHash'])
         self.expect(int(after['blockNumber'], 16) > int(marker['blockNumber'], 16), 'it lands after the pre-backup block')
         for i in range(1, self.n + 1):
@@ -1421,19 +1952,25 @@ class Rehearsal:
         missing = [k for k in need if not self.reset_args.get(k)]
         if missing:
             raise Failure('the reset stage needs --reset-' + ', --reset-'.join(m.replace('_', '-') for m in missing))
-        old, old_genesis, old_faucet, old_tx = self.gen, self.genesis, self.manifest['faucet_address'], getattr(self, 'tx', None)
+        old, old_genesis, old_faucet, old_funder, old_tx = self.gen, self.genesis, self.manifest['faucet_address'], self.funder_address(), getattr(self, 'tx', None)
         new = Path(self.reset_args['out'])
         a = self.reset_args
-        out = subprocess.run([sys.executable, str(Path(__file__).with_name('reset.py')), '--old', str(old), '--lose-all-assets', '--', '--out', str(new),
+        reset_flags, inventory = self.reset_inventory_args(a)
+        out = subprocess.run([sys.executable, str(Path(__file__).with_name('reset.py')), '--old', str(old), '--lose-all-assets', *reset_flags,
+                              '--', '--out', str(new), *inventory,
                               '--validators', str(self.n), '--chain-id', str(self.chain_id), '--ubft', a['ubft'], '--b1genesis', a['b1genesis'], '--keygen', a['keygen'],
-                              '--captcha-sitekey', a['captcha_sitekey'], '--captcha-secret-file', a['captcha_secret_file']], check=True, text=True, capture_output=True).stdout
+                              '--captcha-sitekey', a['captcha_sitekey'], '--captcha-secret-file', a['captcha_secret_file'],
+                              # the replacement keeps the selected signed-history profile (generate.py's default is on)
+                              *self.reset_utb_args(),
+                              # the new network keeps the old one's block interval (bft-core#1167): a generation from before it has none, the cadence it ran at
+                              '--block-interval-ms', str(round(self.block_interval_s() * 1000))], check=True, text=True, capture_output=True).stdout
         self.say('  ' + out.strip().splitlines()[-1])
         self.expect(not old.exists(), 'the old generation directory is gone')
         retired = old.with_suffix('.retired-manifest.json')
         self.expect(retired.is_file() and json.loads(retired.read_text())['genesis_hash'].lower() == old_genesis, 'the old public manifest was kept beside it')
         self.adopt(new)
         self.expect(self.genesis != old_genesis, 'the block-zero hash changed', f'{old_genesis[:12]}.. -> {self.genesis[:12]}..')
-        self.expect(self.manifest['faucet_address'] != old_faucet, 'the funded (faucet) account is a new one')
+        self.expect(self.manifest['faucet_address'] != old_faucet and self.funder_address() != old_funder, 'the faucet and funder accounts are new ones')
         self.up()
         self.identity()
         if old_tx:
@@ -1448,7 +1985,7 @@ class Rehearsal:
         self.expect(s == 400 and 'hCaptcha' in text, 'a wallet on the new pin passes the network check and stops at the captcha (the signer is not started)', f'status {s}')
         pin = json.loads(self.http(FAUCET, 'GET', '/api/network')[1])
         self.expect(pin['genesis_hash'].lower() == self.genesis, 'the faucet guard publishes the new pin')
-        receipt = json.loads(self.send_via_gateway(self.gen / 'faucet-secrets', '0x' + '66' * 20))
+        receipt = json.loads(self.send_via_gateway('0x' + '66' * 20))
         self.expect(receipt['status'] == '0x1', 'a paid transfer on the new network succeeds', receipt['transactionHash'])
         self.say('  note the old generation\'s surviving authority directories (the restore pointed at them) are left on disk by reset.py; a host removes them by hand')
 
@@ -1463,7 +2000,12 @@ Rehearsal.pos_join_signs = pos_join.pos_join_signs
 Rehearsal.pos_joiner = pos_join.pos_joiner   # the joiner stages live in pos_join.py; they are not in the default list of the main generation (the join has its own)
 Rehearsal.pos_owner = pos_owner.pos_owner   # the owner-key stage lives in pos_owner.py
 Rehearsal.pos_reject = pos_reject.pos_reject   # the automatic RejectResult (#857), opt-in: it waits out a reservation lifetime
-POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-observe', 'pos_observe'), ('pos-rewards', 'pos_rewards'), ('pos-joiner', 'pos_joiner'), ('pos-election', 'pos_election'), ('pos-reject', 'pos_reject'), ('pos-proposal', 'pos_proposal'), ('pos-abort', 'pos_abort'), ('pos-propose', 'pos_propose'), ('pos-too-late', 'pos_too_late'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'), ('pos-join-signs', 'pos_join_signs'), ('pos-restart', 'pos_restart'), ('pos-join-heavy', 'pos_join_heavy'), ('pos-stale', 'pos_stale'), ('pos-handoff-2', 'pos_handoff_2'), ('pos-restart-2', 'pos_restart_2'), ('pos-recreate', 'pos_recreate'), *pos_crash.STAGES, ('pos-resources', 'pos_resources'), ('pos-owner', 'pos_owner'))
+# The order here is the order they run in: --stages only selects. pos-join-heavy is before pos-restart: it needs the next election attempt, and a slow pos-restart can outlast the cadence, leaving an attempt open that never sees the joiner.
+POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-observe', 'pos_observe'), ('pos-rewards', 'pos_rewards'), ('pos-joiner', 'pos_joiner'), ('pos-election', 'pos_election'), ('pos-reject', 'pos_reject'), ('pos-proposal', 'pos_proposal'), ('pos-abort', 'pos_abort'), ('pos-propose', 'pos_propose'), ('pos-too-late', 'pos_too_late'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'), ('pos-join-heavy', 'pos_join_heavy'), ('pos-restore-repeat', 'pos_restore_repeat'), ('pos-join-signs', 'pos_join_signs'), ('pos-restart', 'pos_restart'), ('pos-stale', 'pos_stale'), ('pos-handoff-2', 'pos_handoff_2'), ('pos-restart-2', 'pos_restart_2'), ('pos-recreate', 'pos_recreate'), *pos_crash.STAGES, ('pos-resources', 'pos_resources'), ('pos-owner', 'pos_owner'))
+POS_STAGE_NAMES = frozenset(n for n, _ in POS_STAGES)
+# Stages of the package built with --utb (the signed trust-base history, either aggregator): not in the hosted-runner rehearsal, whose package is the one without it. They run after the PoS stages.
+UTB_STAGES = (('utb-live', 'utb_live'),)
+VR_STAGES = (('vr-pos-publish', 'vr_pos_publish'), ('vr-pos-advance', 'vr_pos_advance'), ('vr-pos-recover', 'vr_pos_recover'), ('vr-late-joiner', 'vr_late_joiner'), ('vr-joiner-exit', 'vr_joiner_exit'), ('vr-finalizer', 'vr_finalizer'), ('vr-reject', 'vr_reject'), ('vr-pop-miss', 'vr_pop_miss'))
 
 
 def main():
@@ -1476,20 +2018,34 @@ def main():
         p.add_argument('--reset-' + name, help='the reset stage passes this to generate.py as --' + name + ' (--out: the new generation directory)')
     p.add_argument('--ubft', type=Path, help='the pinned ubft binary, for the handoff stages (they write and read files with it)')
     p.add_argument('--restore-pin', type=Path, help='scripts/h4-restore-pin built from the pinned source: the joiner\'s shard node is restored from a survivor\'s archive with it')
-    p.add_argument('--stages', default=','.join(s for s, _ in STAGES), help='comma separated, in order (the default is the PoA stages; POS_STAGES are named explicitly)')
+    p.add_argument('--restore-repeat', type=int, default=20, help='pos-restore-repeat: restores at the package pid limit (#905)')
+    p.add_argument('--vr-target-epoch', type=int, default=2, help='certified root epoch to install in the incumbent authorities for vr-pos-advance')
+    p.add_argument('--vr-recover-validator', type=int, help='vr-pos-recover: the genesis validator whose authority is lost (default: the last)')
+    p.add_argument('--restore-controls', default='24,16', help='pos-restore-repeat: deliberately low pid limits, the control; the lowest must reproduce pthread_create failed')
+    p.add_argument('--stages', default=','.join(s for s, _ in STAGES), help='comma separated; selects stages, which always run in the order of STAGES + POS_STAGES (the default is the PoA stages; POS_STAGES are named explicitly)')
     a = p.parse_args()
     r = Rehearsal(a.generation, a.evidence, a.cast)
     r.ubft = a.ubft.resolve() if a.ubft else None
     r.restore_pin = a.restore_pin.resolve() if a.restore_pin else None
+    r.restore_repeat_count = a.restore_repeat
+    r.restore_control_limits = tuple(int(x) for x in a.restore_controls.split(',') if x)
     r.pods = tuple(int(x) for x in a.pods.split(',') if x)
+    r.recover_index = a.vr_recover_validator
     r.reset_args = {k[len('reset_'):]: v for k, v in vars(a).items() if k.startswith('reset_')}
     wanted = a.stages.split(',')
-    unknown = set(wanted) - {s for s, _ in STAGES + POS_STAGES}
+    ordered = STAGES + POS_STAGES + VR_STAGES + UTB_STAGES
+    unknown = set(wanted) - {s for s, _ in ordered}
     if unknown:
         p.error(f'unknown stages {sorted(unknown)}')
+    if (r.manifest.get('pos') or {}).get('profile') == 'vr-pos16':
+        unsupported = (set(wanted) & POS_STAGE_NAMES) - {'pos-smoke', 'pos-observe'}
+        if unsupported:
+            p.error(f'legacy PoS stages are unavailable for VR: {sorted(unsupported)}')
+    if 'vr-pos-advance' in wanted:
+        r.target = a.vr_target_epoch
     code = 0
     try:
-        for name, method in STAGES + POS_STAGES:
+        for name, method in ordered:
             if name in wanted:
                 r.stage(name, getattr(r, method))
     except Exception:

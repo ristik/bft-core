@@ -3,12 +3,12 @@ package cmd
 import (
 	"bytes"
 	"context"
-	"crypto"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/unicitynetwork/bft-core/activationproof"
 	"net/http"
 	"sync"
 
@@ -42,49 +42,11 @@ var ErrQ3ShardEpoch = errors.New("shard node: V3 activation is not installed")
 // assignment of that body's own committee.
 var ErrQ3Candidate = errors.New("shard node: the delivered candidate is not the one the activated V3 body binds")
 
-// authenticateQ3Candidate checks the delivered candidate preimage against the verified entry before anything is installed from it: its digest
-// is the one the body's change record binds (for this network, predecessor, attempt and earliest activation), it is the candidate of THIS
-// handoff, its coupled assignment is valid, and its root members are exactly the body's committee, entity for entity and weight for weight.
-// An absent preimage must be the operator candidate the body's own members derive (a root-only change), so a candidate cannot be dropped.
+// authenticateQ3Candidate checks the delivered candidate preimage against the verified entry before anything is installed from it
+// (activationproof.AuthenticateCandidate, the rule the signing authority applies too). Its refusal is ErrQ3Candidate.
 func authenticateQ3Candidate(entry q3format.Entry, r evmroot.OrderedHandoffRecord, candidate []byte) error {
-	body, err := q3format.DecodeBody(entry.BodyEncoding())
-	if err != nil {
+	if err := activationproof.AuthenticateCandidate(entry, r, candidate); err != nil {
 		return errors.Join(ErrQ3Candidate, err)
-	}
-	var digest [32]byte
-	if len(candidate) != 0 {
-		digest = sha256.Sum256(candidate)
-	} else if digest, err = evmroot.D4OperatorCandidateDigest(body.Members); err != nil {
-		return errors.Join(ErrQ3Candidate, err)
-	}
-	if !bytes.Equal(body.ChangeRecordHash, evmroot.D4CandidateContextHash(r.Network, r.PredecessorBodyID, r.Attempt, digest[:], body.EarliestActivation)) {
-		return fmt.Errorf("%w: its digest is not the body's change record", ErrQ3Candidate)
-	}
-	if len(candidate) == 0 {
-		return nil
-	}
-	c, err := evmassign.DecodeCandidate(candidate)
-	if err != nil {
-		return errors.Join(ErrQ3Candidate, err)
-	}
-	if c.Network != r.Network || !bytes.Equal(c.Predecessor, r.PredecessorBodyID) || c.Attempt != r.Attempt {
-		return fmt.Errorf("%w: it is the candidate of another handoff", ErrQ3Candidate)
-	}
-	if _, err := c.Successor(); err != nil { // the assignment's own validity, proofs of possession and coupling
-		return errors.Join(ErrQ3Candidate, err)
-	}
-	if len(c.RootMembers) != len(body.Members) {
-		return fmt.Errorf("%w: %d root members for a committee of %d", ErrQ3Candidate, len(c.RootMembers), len(body.Members))
-	}
-	committee := make(map[string]evmroot.Member, len(body.Members))
-	for _, m := range body.Members {
-		committee[m.NodeID] = m
-	}
-	for _, m := range c.RootMembers {
-		b, ok := committee[m.NodeID]
-		if !ok || b.Weight != m.Weight || !bytes.Equal(b.ConsensusKey, m.Key) {
-			return fmt.Errorf("%w: root member %q is not the body's", ErrQ3Candidate, m.NodeID)
-		}
 	}
 	return nil
 }
@@ -125,21 +87,10 @@ func (s *shardQ3Sink) HoldsVerifiedEpoch(entry q3format.Entry) error {
 	return nil
 }
 
-// q3NextConf is the full shard configuration hash the root certifies once the activation takes effect: the candidate's activated assignment
-// for a coupled change, the unchanged one otherwise (the same rule handoffdelivery.Verify applies to a V2 bundle).
+// q3NextConf is the full shard configuration hash the root certifies once the activation takes effect (activationproof.NextConf).
 func q3NextConf(active []byte, record handoff.OldCommitProof, candidate []byte) ([]byte, error) {
-	if len(candidate) == 0 {
-		return bytes.Clone(active), nil
-	}
-	_, activated, err := evmassign.ActivatedFromPreimage(candidate, record.Record.ActivationRound)
-	if err != nil {
-		return nil, fmt.Errorf("candidate: %w", err)
-	}
-	h, err := activated.Hash(crypto.SHA256)
-	if err != nil || len(h) != 32 {
-		return nil, errors.New("activated configuration hash")
-	}
-	return h, nil
+	h, _, err := activationproof.NextConf(active, record, candidate)
+	return h, err
 }
 
 // shardCatchUp is the restore's catch-up through the root handoffs: the V2 follower's or the V3 follower's. The restore has exactly one call
@@ -177,6 +128,7 @@ type shardQ3Installer struct {
 	InstallAssignment    func(view handoffdelivery.Bundle, step handoff.AssignmentStep) error
 	NoteJoiner           func(view handoffdelivery.Bundle, step handoff.AssignmentStep) error
 	InstallEVMTransition func(raw []byte) error
+	Begin                func(epoch uint64) error
 	Activate             func(epoch uint64) error
 	Log                  func(epoch uint64)
 
@@ -229,6 +181,11 @@ func (i *shardQ3Installer) Apply(ctx context.Context, entry q3format.Entry, proo
 	view := handoffdelivery.Bundle{Proof: proof, Snapshot: head, Candidate: candidate}
 	if err := checkTerminalCertificate(view, verified); err != nil {
 		return err
+	}
+	if i.Begin != nil {
+		if err := i.Begin(newEpoch); err != nil {
+			return err
+		}
 	}
 	if err := i.Terminal(ctx, verified); err != nil {
 		return err
@@ -392,7 +349,7 @@ func (s *shardQ3Staging) announceStaged(req shardQ3StageRequest) error {
 	if s.onStaged == nil || len(req.Preimage) == 0 {
 		return nil
 	}
-	c, err := evmassign.DecodeCandidate(req.Preimage)
+	c, err := evmassign.DecodeCommittedCandidate(req.Preimage)
 	if err != nil {
 		return errors.Join(ErrQ3StageBody, err)
 	}
@@ -430,7 +387,7 @@ func (s *shardQ3Staging) checkStaged(body q3format.BodyV3, digest [32]byte, req 
 		}
 	}
 	if len(req.Preimage) != 0 && s.self != "" {
-		c, err := evmassign.DecodeCandidate(req.Preimage)
+		c, err := evmassign.DecodeCommittedCandidate(req.Preimage)
 		if err != nil {
 			return errors.Join(ErrQ3StageBody, err)
 		}

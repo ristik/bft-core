@@ -74,7 +74,7 @@ h3_advance_authorities() { # root epoch, shard epoch, ids...
   local rootEpoch=$1 shardEpoch=$2 pdr; shift 2
   pdr=$(h3_pdr_file "$shardEpoch") || return 1
   local retained=() joiners=() i
-  for i in "$@"; do if [ "$i" -ge 5 ] || [[ " ${H3_RESTORE_RESTART:-} " == *" $i "* ]]; then joiners+=("$i"); else retained+=("$i"); fi; done
+  for i in "$@"; do if [ "$i" -gt "${VR_INCUMBENTS:-4}" ] || [[ " ${H3_RESTORE_RESTART:-} " == *" $i "* ]]; then joiners+=("$i"); else retained+=("$i"); fi; done
   if [ "${#retained[@]}" -gt 0 ]; then
     # The archive-replica catch-up wait (m2_advance_authorities) is the rule for every lane, and this helper serves the lanes that hold validators down on
     # purpose (the H3 lane; the T6 coupled rotation, where the retired validator is stopped and the joiner has not started): their replicas cannot
@@ -86,8 +86,8 @@ h3_advance_authorities() { # root epoch, shard epoch, ids...
   # is bound from the verified handoff history), under its advanced authority.
   for i in ${joiners[@]+"${joiners[@]}"}; do
     stop_one_evm_validator "$i" 2>/dev/null || true
-    build/ubft signing-authority advance-epoch --operator-socket "test-nodes/auth$i/operator.sock" \
-      --operator-credential "test-nodes/auth$i/operator.cred" --trust-base "test-nodes/trust-base-epoch${rootEpoch}.json" --shard-conf "$pdr" || return 1
+    source helper.sh
+    authority_advance_scope "$i" "$rootEpoch" "test-nodes/trust-base-epoch${rootEpoch}.json" "$pdr" || return 1
     h3_restore_validator "$i" 2 || return 1
     echo "joiner $i advanced to root epoch $rootEpoch and restored"
   done
@@ -253,25 +253,26 @@ h3_restart_roots() {
     # the others start CONCURRENTLY (m2_start_root waits 2-3 s per root for its listener, so one after the other the roots before the last could form the quorum and run the
     # switch while the last one is still starting). Any four of five can make a quorum, so the start of the last root is within the same few hundred milliseconds as the others'.
     local first pids=() rc=0 p; first=$(h3_first_root)
-    m2_start_root "$first" "$epoch" "" || return 1
+    # H3_BOOT_ROOT: a running root the restarted ones bootstrap to (roots that switched into the epoch in process, bft-core#1086)
+    m2_start_root "$first" "$epoch" "${H3_BOOT_ROOT:+$(m2_root_addr "$H3_BOOT_ROOT")}" || return 1
     for i in $H3_ROOTS; do
       [ "$i" != "$first" ] || continue
       ( m2_start_root "$i" "$epoch" "$(m2_root_addr "$first")" ) & pids+=($!)
     done
     for p in "${pids[@]}"; do wait "$p" || rc=1; done
     [ "$rc" = 0 ] || return 1
-    m2_wait_root_epoch "$(h3_first_root)" "$epoch"
+    m2_wait_root_epoch "${H3_WAIT_ROOT:-$(h3_first_root)}" "$epoch"
     return
   fi
   for i in $H3_ROOTS; do
-    prev=$(echo "$H3_ROOTS" | tr ' ' '\n' | grep -vx "$i" | head -1)
+    prev=${H3_BOOT_ROOT:-$(echo "$H3_ROOTS" | tr ' ' '\n' | grep -vx "$i" | head -1)}
     boot=$(m2_root_addr "$prev")
     stop_pidfile "test-nodes/root$i/pid" 'ubft root-node' || return 1
     for _ in $(seq 1 50); do lsof -nP -iTCP:"$(m2_rpc_port "$i")" -sTCP:LISTEN >/dev/null 2>&1 || break; sleep 0.2; done
     m2_archive_root_state "$i" "$epoch" || return 1
     m2_start_root "$i" "$epoch" "$boot" || return 1
   done
-  m2_wait_root_epoch "$(h3_first_root)" "$epoch"
+  m2_wait_root_epoch "${H3_WAIT_ROOT:-$(h3_first_root)}" "$epoch"   # H3_WAIT_ROOT: a member of the epoch when only some roots restart (bft-core#1086)
 }
 
 # reth_trust / reth_untrust (definitions only): every lane that reaches h3_start_reth needs them, not only the paired devnet that sources them first
@@ -281,10 +282,11 @@ h3_start_reth() { # spare execution client i, peered with the running ones
   local i=$1 j enode
   openssl rand -hex 32 >"test-nodes/evm$i/jwt.hex"
   mkdir -p "test-nodes/reth$i"
+  lane_preflight_ports "reth$i" $((rethEngineBase + i - 1)) $((rethEthBase + i - 1)) "$((rethP2PBase + i - 1))@0.0.0.0" || return 1
   "$URETH_BIN" node --chain "$chainSpec" --datadir "test-nodes/reth$i/dd" \
     --authrpc.jwtsecret "test-nodes/evm$i/jwt.hex" --authrpc.addr 127.0.0.1 --authrpc.port $((rethEngineBase + i - 1)) \
     --http --http.addr 127.0.0.1 --http.port $((rethEthBase + i - 1)) --http.api eth,net,web3,admin,debug \
-    --rpc.eth-proof-window 64 --port $((rethP2PBase + i - 1)) --disable-discovery --ipcdisable \
+    $(urethPinStateProofFlags) --port $((rethP2PBase + i - 1)) --disable-discovery --ipcdisable \
     --engine.persistence-threshold "$d2cPersistenceThreshold" --builder.gaslimit "${URETH_BUILDER_GASLIMIT:-30000000}" \
     $(urethPinUnicityFlags) >"test-nodes/reth$i/reth.log" 2>&1 &
   echo $! >"test-nodes/reth$i/pid"
@@ -306,12 +308,42 @@ h3_restore_validator() {
   # No default: an empty trust base would restore against the wrong anchor. The caller sets it before any path that can restore
   # (h3_advance_authorities restores the H3_RESTORE_RESTART validators too).
   [ -n "${H3_RESTORE_TRUST_BASE:-}" ] || { echo "h3_restore_validator $i: H3_RESTORE_TRUST_BASE is not set" >&2; return 1; }
+  # Journal metadata pins these limits. Forward the same overrides as the ordinary start, without its other extra flags.
+  local -a journalOverrides=()
+  # Use the same word splitting as start_one_evm_validator.
+  set -- ${EVM_EXTRA_ARGS:-}
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --) break ;;
+      --journal-candidates|--journal-observations|--journal-bytes)
+        [ "$#" -ge 2 ] || { echo "h3_restore_validator $i: $1 needs a value" >&2; return 1; }
+        journalOverrides+=("$1" "$2")
+        shift ;;
+      --journal-candidates=*|--journal-observations=*|--journal-bytes=*)
+        journalOverrides+=("$1") ;;
+    esac
+    shift
+  done
   # The restored node lives in the validator's own home, with the paths a plain start uses (journal, archive store, debug.log), so the
   # lane's later authority-advance restarts (start_one_evm_validator) find it where they expect it. Its stale state is cleared first.
   local evidence="test-nodes/evm$i" bodyID rootBoot bootnodes peers=() p
   # a lane that keeps its execution journals elsewhere (the post-M2a lanes) names the root; the H3 lane keeps it in the home
   local journal="$evidence/execution-journal.db"
   [ -z "${EVM_EXECUTION_JOURNAL_ROOT:-}" ] || journal="$EVM_EXECUTION_JOURNAL_ROOT/evm$i.db"
+  # VT-11 preflight: a restore from a seed is checked BEFORE anything of the validator is stopped or cleared. The seed is verified, the BodyID of the
+  # checkpoint's root epoch is resolved from authenticated history (the genesis trust base and the activation bundles H3_RESTORE_SEED_BUNDLES names, in epoch
+  # order, for epochs 2 and later), and the exact UC and TR files the restore will read are staged and loaded back with the restore's own loader.
+  local seedPin= pinOut b
+  local -a bundleArgs=()
+  if [ -n "${H3_RESTORE_SEED_DIR:-}" ]; then
+    mkdir -p test-nodes
+    seedPin=$(mktemp -d "test-nodes/seed-pin-XXXXXX")/pin
+    for b in ${H3_RESTORE_SEED_BUNDLES:-}; do bundleArgs+=(--bundle "$b"); done
+    pinOut=$(build/ubft seed restore-pin --dir "$H3_RESTORE_SEED_DIR" --utb-genesis-id "$(tr -d '[:space:]' <test-nodes/utb-genesis.id)" \
+      --trust-base "$H3_RESTORE_TRUST_BASE" --full-shard-conf "$EVM_FULL_SHARD_CONF" ${bundleArgs[@]+"${bundleArgs[@]}"} --out "$seedPin" 2>&1) \
+      || { echo "h3_restore_validator $i: the seed's restore pin is refused; nothing of the validator was touched: $pinOut" >&2; return 1; }
+    bodyID=${pinOut##*bodyID=}
+  fi
   stop_one_evm_validator "$i" 2>/dev/null || true
   stop_pidfile "test-nodes/reth$i/pid" 'reth.* node' 2>/dev/null || true
   # Clearing state under a live node can corrupt it (and the evidence): every process that owns this validator's node home or its
@@ -319,7 +351,7 @@ h3_restore_validator() {
   # last process started, not one that is still shutting down).
   local waited=0 alive
   while :; do
-    alive=$(pgrep -f -- "--home test-nodes/evm$i( |$)|test-nodes/reth$i/dd" 2>/dev/null | tr '\n' ' ')
+    alive=$(owned_pids "--home test-nodes/evm$i( |\$)|test-nodes/reth$i/dd" | tr '\n' ' ')   # this checkout's only: another lane's trees use the same relative paths
     [ -z "$alive" ] && break
     waited=$((waited + 1))
     if [ "$waited" -ge 120 ]; then echo "validator $i: process(es) $alive still running after 60s: refusing to clear its state" >&2; return 1; fi
@@ -332,7 +364,7 @@ h3_restore_validator() {
   # A staging-only joiner (H3_STAGING_JOINER=1, #520) or a restore before the Commit (H3_RESTORE_NO_SESSION=1) takes no session: its authority is
   # pending and issues none, and the node reads the credential lazily, when a verified install binds its key. The restore after the Commit enrolls
   # the authority and takes the session.
-  if [ "${H3_STAGING_JOINER:-0}" != 1 ] && [ -z "${H3_RESTORE_NO_SESSION:-}" ]; then
+  if [ "${SIGNING:-local}" = authority ] && [ "${H3_STAGING_JOINER:-0}" != 1 ] && [ -z "${H3_RESTORE_NO_SESSION:-}" ]; then
     build/ubft signing-authority replace-session --operator-socket "test-nodes/auth$i/operator.sock" \
       --operator-credential "test-nodes/auth$i/operator.cred" --out "test-nodes/auth$i/client.cred" || return 1
   fi
@@ -343,12 +375,20 @@ h3_restore_validator() {
   cp "$evidence/jwt.hex" "test-nodes/evm$i/jwt.hex"
   h3_start_reth "$i" || return 1
   cp "test-nodes/evm$i/jwt.hex" "$evidence/jwt.hex"   # h3_start_reth drew a new secret for the new execution client
+  if [ -n "$seedPin" ]; then
+    # VT-11: the pin is the preflight's staged files (the verified seed's checkpoint), never the replica's files
+    cp "$seedPin.uc.cbor" "$evidence/tip.uc.cbor" && cp "$seedPin.tr.cbor" "$evidence/tip.tr.cbor" || return 1
+    echo "seed pin: $H3_RESTORE_SEED_DIR bodyID=$bodyID" >"$evidence/pin.txt"
+  else
   lane_go_run h4-restore-pin "$H3_ARCHIVES/evm$replica" "$H3_RESTORE_TRUST_BASE" "$evidence/tip" >"$evidence/pin.txt" || return 1
   bodyID=$(tr ' ' '\n' <"$evidence/pin.txt" | sed -n 's/^bodyID=//p')
+  fi
   rootBoot=$(m2_root_addr "$(h3_first_root)")
   bootnodes=$(evm_bootnodes_for_peers "$rootBoot" "$i" $H3_ONLINE) || return 1
   # exactly two replicas: each is two array elements (the flag and the node id)
   for p in $H3_ONLINE; do [ "$p" = "$i" ] || [ "${#peers[@]}" -ge 4 ] || peers+=(--archive-replica "$(evm_validator_id "$p")"); done
+  local -a signingArgs=()   # a local-signing lane (the VR lane) has no authority: the node signs with its own key
+  if [ "${SIGNING:-local}" = authority ]; then signingArgs=(--signing-authority-socket "test-nodes/auth$i/client.sock" --signing-authority-credential "test-nodes/auth$i/client.cred"); fi
   local -a layoutArgs=(--registry-layout "$(registry_layout)")
   [ -z "${EVM_B1_PROFILE:-}" ] || layoutArgs=(--b1-profile "$EVM_B1_PROFILE")   # a fresh-B1 deployment: the profile selects registry layout 3
   local -a utbArgs=()
@@ -363,7 +403,8 @@ h3_restore_validator() {
     --eth-url "http://127.0.0.1:$((rethEthBase+i-1))" --jwt-secret "$evidence/jwt.hex" \
     --engine-fee-collector "$EVM_ENGINE_FEE_COLLECTOR" --execution-journal "$journal" \
     --archive-store "$H3_ARCHIVES/evm$i" --archive-prune --trust-history-profile-2 --journal-candidates "${EVM_JOURNAL_CANDIDATES:-32}" \
-    --signing-authority-socket "test-nodes/auth$i/client.sock" --signing-authority-credential "test-nodes/auth$i/client.cred" \
+    ${journalOverrides[@]+"${journalOverrides[@]}"} \
+    ${signingArgs[@]+"${signingArgs[@]}"} \
     "${peers[@]}" --tip-uc "$evidence/tip.uc.cbor" --tip-tr "$evidence/tip.tr.cbor" --trust-body-id "$bodyID" \
     $([ "${Q3_B1:-0}" != 1 ] || echo --q3-lane --rpc-server-address "$(evm_validator_rpc_addr "$i")") \
     ${utbArgs[@]+"${utbArgs[@]}"} \

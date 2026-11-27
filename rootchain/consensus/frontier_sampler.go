@@ -251,7 +251,7 @@ func (x *ConsensusManager) buildFrontierSample(req FrontierRequest) (*FrontierSa
 	if req.NetworkID != s.trust.NetworkID || x.orchestration.NetworkID() != s.trust.NetworkID {
 		return nil, fmt.Errorf("%w: network mismatch", ErrFrontierUnavailable)
 	}
-	view, err := x.blockStore.ReadFrontierStorageView(req.PartitionID, req.ShardID)
+	view, err := x.blockStore().ReadFrontierStorageView(req.PartitionID, req.ShardID)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrFrontierUnavailable, err)
 	}
@@ -314,9 +314,13 @@ func frontierTrustHash(trust *types.RootTrustBaseV1) ([32]byte, error) {
 	return sha256.Sum256(b), nil
 }
 
+// maxFrontierRoots is the committee ceiling of the frontier trust base: the native 256 (owner §49), the trust base entry's member bound. It is a
+// resource bound; quorum and signature validity are unchanged.
+const maxFrontierRoots = 256
+
 func validateFrontierTrustBounds(trust *types.RootTrustBaseV1) error {
-	if trust == nil || len(trust.RootNodes) == 0 || len(trust.RootNodes) > 64 || len(trust.Signatures) > 64 {
-		return errors.New("frontier root committee must contain 1..64 roots")
+	if trust == nil || len(trust.RootNodes) == 0 || len(trust.RootNodes) > maxFrontierRoots || len(trust.Signatures) > maxFrontierRoots {
+		return fmt.Errorf("frontier root committee must contain 1..%d roots", maxFrontierRoots)
 	}
 	total := len(trust.StateHash) + len(trust.ChangeRecordHash) + len(trust.PreviousEntryHash)
 	for _, n := range trust.RootNodes {

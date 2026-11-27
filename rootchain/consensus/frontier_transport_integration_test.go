@@ -103,7 +103,7 @@ func TestFrontierTransportRealManagersAndCommittedCutEndToEnd(t *testing.T) {
 				if decodeErr != nil {
 					return nil, decodeErr
 				}
-				cut, readErr := manager.blockStore.ReadFrontierCutSnapshot(request.Context.PartitionID, shard)
+				cut, readErr := manager.blockStore().ReadFrontierCutSnapshot(request.Context.PartitionID, shard)
 				if readErr != nil {
 					return nil, readErr
 				}
@@ -142,7 +142,7 @@ func TestFrontierTransportRealManagersAndCommittedCutEndToEnd(t *testing.T) {
 	require.True(t, candidate.Valid())
 
 	require.Eventually(t, func() bool {
-		cut, readErr := cms[0].blockStore.ReadFrontierCutSnapshot(partitionID, shardID)
+		cut, readErr := cms[0].blockStore().ReadFrontierCutSnapshot(partitionID, shardID)
 		return readErr == nil && cut.RootRound >= candidate.Floor()
 	}, 5*time.Second, 20*time.Millisecond)
 	binding := collector.AcquisitionBinding()

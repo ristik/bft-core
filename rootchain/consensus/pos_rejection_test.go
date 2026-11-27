@@ -72,7 +72,7 @@ func TestARejectionTheRootStateRefusesIsLeftOut(t *testing.T) {
 func TestNoRejectionWhereTheBlockOrdersAHandoffRecordOrAlreadyHasOne(t *testing.T) {
 	cm := retirementCM(t)
 	w := []byte("queued")
-	require.NoError(t, cm.blockStore.StoreWitness(w))
+	require.NoError(t, cm.blockStore().StoreWitness(w))
 	cm.posQueue.items = []posSubmission{{control: rejection(w), witness: sha256.Sum256(w), expires: 1 << 40, key: []byte{1}}}
 	withRecord := proposalBlock()
 	withRecord.Payload.HandoffRecords = [][]byte{{1}}
@@ -108,10 +108,10 @@ func TestANonLeadersDueRejectionReachesTheLeaderAndIsOrderedBeforeAFreshPrepare(
 	// what the network delivers to the leader: the signed submission; the leader pulls the witness from the submitter
 	p, ok := svc.Ready(rc)
 	require.True(t, ok)
-	require.NoError(t, leader.blockStore.StoreWitness(p.Witness))
+	require.NoError(t, leader.blockStore().StoreWitness(p.Witness))
 	require.NoError(t, leader.onPosControlSubmission(context.Background(), signed(t, other, *offered[0])))
 
-	parentQC := leader.blockStore.GetHighQc()
+	parentQC := leader.blockStore().GetHighQc()
 	round := parentQC.GetRound() + 1
 	require.False(t, leader.preferRejectionWith(context.Background(), parentQC.GetRound(), round, parentQC,
 		func(*drctypes.BlockData) error { return storage.ErrRejectNotQuiet }), "a rejection the root state refuses never holds a Prepare back")
@@ -125,7 +125,7 @@ func TestANonLeadersDueRejectionReachesTheLeaderAndIsOrderedBeforeAFreshPrepare(
 // Nothing ready, nothing preferred: a leader with no rejection never holds a Prepare back.
 func TestWithoutARejectionThePrepareIsNotHeldBack(t *testing.T) {
 	cm := retirementCM(t)
-	parentQC := cm.blockStore.GetHighQc()
+	parentQC := cm.blockStore().GetHighQc()
 	require.False(t, cm.preferRejectionWith(context.Background(), parentQC.GetRound(), parentQC.GetRound()+1, parentQC,
 		func(*drctypes.BlockData) error { t.Fatal("no trial for nothing"); return nil }))
 }
@@ -134,7 +134,7 @@ func TestWithoutARejectionThePrepareIsNotHeldBack(t *testing.T) {
 func TestACommittedResolutionEndsTheOffers(t *testing.T) {
 	cm := retirementCM(t)
 	rp := &fakeRejections{pending: [][32]byte{{1}, {2}}}
-	svc := cm.blockStore.PosServices()
+	svc := cm.blockStore().PosServices()
 	svc.Rejections = rp
 	cm.forgetResolvedRejections()
 	require.Empty(t, rp.resolved, "the committed root here resolved neither")

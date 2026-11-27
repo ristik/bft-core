@@ -159,6 +159,8 @@ Rows for the PoS profile of the same package: four entities at unit weight, an e
 
 ## 15. TN-B bridge slice (container package with the bridge) (#429, #438)
 
+**Historical.** The protocol 6/7 bridge and the files named in this section (`deploy/testnet/bridge/rehearse_bridge.py`, `RECOVERY.md`, the lock-proof endpoint) were removed by bft-core#1106 and #1139. The rows record evidence of that bridge at the pins and runs they name; read the procedures at a revision before #1139 (for example `53dd94d26`). The native bridge v2 lanes are `deploy/testnet/bridge/nb2/` (`deploy/testnet/bridge/README.md`).
+
 Rows for the bridge on the same package: the vault and verifier deployed after genesis, one aggregator-go on partition 7 with its MongoDB (owner
 decision 40), the stateless lock-proof endpoint, and the native-bridge-plugins driver and tester in the bridge tools image. The evidence is
 `deploy/testnet/bridge/rehearse_bridge.py`, run by `.github/workflows/testnet-bridge.yml` on a GitHub-hosted runner: run `40051018512`

@@ -21,6 +21,15 @@ func (a *Authority) AdvanceEpoch(ctx context.Context, conf *types.PartitionDescr
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	fence, err := a.fenceGate()
+	if err != nil {
+		return err
+	}
+	if successor != nil {
+		if err := fence.Check(ctx, successor.Epoch); err != nil {
+			return fmt.Errorf("advancing to root epoch %d: %w", successor.Epoch, err)
+		}
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.signer == nil {
@@ -29,6 +38,14 @@ func (a *Authority) AdvanceEpoch(ctx context.Context, conf *types.PartitionDescr
 	if a.state != healthActive || a.rec.checkInvariants() != nil || a.generation == math.MaxUint64 || a.scopeVersion == math.MaxUint64 {
 		a.state = healthFaulted
 		return ErrStateUntrusted
+	}
+	if a.lineage != nil && !a.uncheckedAdvance {
+		// an authority that verifies its own lineage does not install an operator's successor context unless it was started under the
+		// explicit recovery policy (#1085): AdvanceWithProof is its advance
+		return fmt.Errorf("%w: this authority advances by advance-with-proof; the operator-trusted advance needs the recovery policy", ErrRecoveryOnly)
+	}
+	if a.retired {
+		return fmt.Errorf("%w: the successor configuration does not name this authority's key", ErrRetired)
 	}
 	old := a.enroll
 	if !old.complete() {
@@ -117,19 +134,27 @@ func (a *Authority) AdvanceEpoch(ctx context.Context, conf *types.PartitionDescr
 	}
 	// The high-water record is not cleared, and old reservations cannot be
 	// signed or released after the context changes.
-	if conf.Epoch > old.ShardEpoch {
-		// A new shard epoch: if this authority acknowledged (operated at) the epoch it leaves, that is the input-record epoch to expect
-		// while the successor's acknowledgement is pending; otherwise the base it had stays (or stays unknown).
+	a.publishScopeLocked(old, conf.Epoch, hash, &owned)
+	return nil
+}
+
+// publishScopeLocked installs a successor scope, for the operator-trusted advance and the proof-verified one alike. The high-water
+// record is not cleared, and old reservations cannot be signed or released after the context changes (their scope version is the old
+// one). The input-record acknowledgement state follows the shard epoch: a new shard epoch keeps, as the input-record epoch to expect
+// while the successor's acknowledgement is pending, the epoch this authority acknowledged (operated at), if it did. The client is
+// fenced; the next session is the operator's to issue.
+func (a *Authority) publishScopeLocked(old Enrollment, shardEpoch uint64, confHash []byte, successor *types.RootTrustBaseV1) {
+	if shardEpoch > old.ShardEpoch {
 		if a.irAckSeen {
 			a.irBase, a.irBaseKnown = old.ShardEpoch, true
 		}
 		a.irAckSeen = false
 	}
-	a.enroll.ShardEpoch = conf.Epoch
-	a.enroll.ShardConfHash = bytes.Clone(hash)
-	a.enroll.RootEpoch = PinRootEpoch(owned.Epoch)
-	a.trust = currentTrust{base: &owned}
+	a.enroll.ShardEpoch = shardEpoch
+	a.enroll.ShardConfHash = bytes.Clone(confHash)
+	a.enroll.RootEpoch = PinRootEpoch(successor.Epoch)
+	a.trust = currentTrust{base: successor}
 	a.scopeVersion++
 	a.generation++
-	return nil
+	a.sessionIssued = false
 }

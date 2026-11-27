@@ -84,7 +84,7 @@ func (h *PeerGatedHost) acquire(ctx context.Context, id peer.ID) (func(), error)
 		}, nil
 	case <-ctx.Done():
 		releaseRef()
-		return nil, fmt.Errorf("%w: %v", ErrPeerGate, ctx.Err())
+		return nil, fmt.Errorf("%w: %w", ErrPeerGate, ctx.Err()) // the caller's time ran out waiting: it can tell that from a refusal
 	}
 }
 

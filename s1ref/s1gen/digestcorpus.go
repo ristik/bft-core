@@ -120,12 +120,12 @@ func (g *gen) digestVote(w *world, id, desc string, e *ev) DigestVote {
 	dg := sha256.Sum256(e.pv)
 	out := DigestVote{ID: id, Description: desc, Signer: e.author, Key: hx(v.pub), Epoch: dec(e.epoch), Round: dec(e.round), Parent: dec(e.parent),
 		Exec: hx(e.exec[:]), Timestamp: dec(e.ts), CommitRound: dec(e.sealRound), VoteInfo: hx(vi), VoteInfoHash: hx(e.prev), Preimage: hx(e.pv), Digest: hx(dg[:]),
-		Sig64: hx(e.voteSig), Sig65: hx(v.signV(e.pv)), SigHighS: hx(highS(e.voteSig))}
+		Sig64: hx(e.voteSig[:64]), Sig65: hx(v.signV(e.pv)), SigHighS: hx(highS(e.voteSig[:64]))}
 	if e.committing() {
 		h := hx(e.hash)
 		out.CommitHash = &h
 		out.Seal = &DigestSeal{Network: dec(e.net), Round: dec(e.sealRound), Epoch: dec(e.sealEpoch), Timestamp: dec(e.sealTS), PreviousHash: hx(e.prev), Hash: h,
-			SigBytes: hx(e.sealBytes()), Signature: hx(e.sealSig)}
+			SigBytes: hx(e.sealBytes()), Signature: hx(e.sealSig[:64])}
 	}
 	return out
 }

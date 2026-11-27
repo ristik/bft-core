@@ -44,9 +44,9 @@ else
   [ -z "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=no)" ] || fail "the checkout has uncommitted changes: an evidence run needs a clean one"
   [ -x "$REPO_ROOT/build/ubft" ] || fail "build/ubft is missing (make build)"
   head=$(git -C "$REPO_ROOT" rev-parse HEAD)
-  lane_buildinfo "$REPO_ROOT/build/ubft" | grep -q "vcs.revision=$head" || fail "build/ubft is not built from HEAD $head (make build)"
+  lane_buildinfo "$REPO_ROOT/build/ubft" | grep -q "vcs.revision=${LANE_PRODUCT_COMMIT:-$head}" || fail "build/ubft is not built from ${LANE_PRODUCT_COMMIT:-$head} (HEAD $head unless a pinned product run; make build)"
   ! lane_buildinfo "$REPO_ROOT/build/ubft" | grep -q 'vcs.modified=true' || fail "build/ubft was built from a modified tree"
-  RUN_MODE="RUN MODE: evidence run: attested prebuilt Ureth $M2_URETH_BIN sha256=$got commit=$M2_URETH_COMMIT (provenance $PROVENANCE); everything else from this checkout at $head"
+  RUN_MODE="RUN MODE: evidence run: attested prebuilt Ureth $M2_URETH_BIN sha256=$got commit=$M2_URETH_COMMIT (provenance $PROVENANCE); everything else from this checkout at $head${LANE_PRODUCT_COMMIT:+; ubft and the Go tools from the pinned product bft-core $LANE_PRODUCT_COMMIT}"
 fi
 
 if [ "${P85_LANE_LOCKED:-0}" != 1 ]; then
@@ -62,9 +62,9 @@ printf '%s %s\n' "$PPID" "$$" >"$EVIDENCE_DIR/.runner-pids"
 echo "$RUN_MODE" | tee "$EVIDENCE_DIR/run-mode.txt"
 [ -z "${PROVENANCE:-}" ] || cp -R "$PROVENANCE" "$EVIDENCE_DIR/ureth-provenance"
 host_evidence before "$(host_evidence_file "$EVIDENCE_DIR" before)"
-echo "bft-core head=$(git rev-parse HEAD) ureth=$M2_URETH_COMMIT ubft sha256=$(shasum -a 256 build/ubft | cut -d' ' -f1)" | tee "$EVIDENCE_DIR/heads.txt"
+echo "bft-core head=${LANE_PRODUCT_COMMIT:-$(git rev-parse HEAD)}${LANE_PRODUCT_COMMIT:+ harness=$(git rev-parse HEAD)} ureth=$M2_URETH_COMMIT ubft sha256=$(shasum -a 256 build/ubft | cut -d' ' -f1)" | tee "$EVIDENCE_DIR/heads.txt"
 if [ "${ANYAGE_LANE:-0}" = 1 ]; then
-  echo "contracts head=$(git -C "$P85_CONTRACTS" rev-parse HEAD) nbp head=$(git -C "${NBP_DIR:?set NBP_DIR}" rev-parse HEAD) aggregator sha256=$(shasum -a 256 "${AGG_BIN:?set AGG_BIN}" | cut -d' ' -f1) dnb-tool sha256=$(shasum -a 256 "${DNB_TOOL:?set DNB_TOOL}" | cut -d' ' -f1)" | tee -a "$EVIDENCE_DIR/heads.txt"
+  echo "contracts head=$(git -C "$P85_CONTRACTS" rev-parse HEAD) aggregator sha256=$(shasum -a 256 "${AGG_BIN:?set AGG_BIN}" | cut -d' ' -f1)" | tee -a "$EVIDENCE_DIR/heads.txt"
 fi
 
 # A signal to the lane stops the scenario child and waits for its own teardown (an orphaned child keeps restarting nodes in this checkout).
@@ -119,7 +119,7 @@ for f in test-nodes/evm*/debug.log test-nodes/reth*/reth.log; do [ -f "$f" ] && 
 # the history, not only the tail (bft-core#876: a stalled node's log tail is all repetition and the cause is hours earlier): every distinct line shape of each validator's node log from the
 # START, at most 5 of each (time, block hashes and goroutine ids ignored), 6000 lines in all
 for f in test-nodes/evm*/debug.log; do [ -f "$f" ] && awk '{k=$0; sub(/^time=[^ ]* /,"",k); gsub(/[0-9a-f]{16,}/,"H",k); sub(/go_id=[0-9]+/,"",k); if (++n[substr(k,1,150)]<=5) print}' "$f" | head -n 6000 >"$EVIDENCE_DIR/exec-logs/$(basename "$(dirname "$f")")-history.log" 2>/dev/null || true; done   # head closes the pipe after 6000 lines: awk's SIGPIPE (141) under pipefail + set -e ended the whole lane runner with status 141 (campaign run 7)
-if [ "$ANYAGE_LANE" = 1 ]; then mkdir -p "$EVIDENCE_DIR/aggregator"; for d in test-nodes/agg test-nodes/agg[0-9]; do [ -d "$d" ] && { mkdir -p "$EVIDENCE_DIR/aggregator/$(basename "$d")"; cp "$d"/stdout.log "$d"/logs/*.log "$EVIDENCE_DIR/aggregator/$(basename "$d")/" 2>/dev/null || true; }; done; cp test-nodes/lane-config.json test-nodes/bridge-addresses.json "$EVIDENCE_DIR/" 2>/dev/null || true; fi
+if [ "$ANYAGE_LANE" = 1 ]; then mkdir -p "$EVIDENCE_DIR/aggregator"; for d in test-nodes/agg test-nodes/agg[0-9]; do [ -d "$d" ] && { mkdir -p "$EVIDENCE_DIR/aggregator/$(basename "$d")"; cp "$d"/stdout.log "$d"/logs/*.log "$EVIDENCE_DIR/aggregator/$(basename "$d")/" 2>/dev/null || true; }; done; fi
 # what the lane's helpers read, kept so a failure can be replayed offline (go run ./scripts/h3-pdr, the weight checks, the trust-base tools): the roots'
 # databases and public node info, the trust bases, the lane's flow directories; not the execution clients' data, the authorities' credentials or keys
 rsync -a --exclude 'reth*/' --exclude 'evm*/' --exclude 'auth*/' --exclude '*.log' --exclude 'keys.json' --exclude '*.sock' --exclude '*.cred' \

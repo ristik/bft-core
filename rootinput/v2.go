@@ -20,11 +20,15 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
+// MaxObservationRoots is the committee ceiling of the root trust base in the configured-progress observation context: the native 256 (owner
+// §49). It is not B1 gas pricing, and the existing 1 MiB aggregate context budget is unchanged.
+const MaxObservationRoots = 256
+
 // ObservationProfileBindingV2 identifies an owned fixed observation context
 // and root trust base. It is process-local comparison metadata and grants no
 // authority by itself.
 func ObservationProfileBindingV2(c ObservationContextV2, tb *types.RootTrustBaseV1) ([32]byte, error) {
-	if tb == nil || c.NetworkID == 0 || c.PartitionID == 0 || c.ShardID.Length() > 4096 || len(c.ShardConfHash) != 32 || c.RootEpoch == 0 || len(tb.RootNodes) == 0 || len(tb.RootNodes) > 64 {
+	if tb == nil || c.NetworkID == 0 || c.PartitionID == 0 || c.ShardID.Length() > 4096 || len(c.ShardConfHash) != 32 || c.RootEpoch == 0 || len(tb.RootNodes) == 0 || len(tb.RootNodes) > MaxObservationRoots {
 		return [32]byte{}, ErrV2Context
 	}
 	for _, n := range tb.RootNodes {
@@ -32,7 +36,7 @@ func ObservationProfileBindingV2(c ObservationContextV2, tb *types.RootTrustBase
 			return [32]byte{}, ErrV2Context
 		}
 	}
-	if len(tb.Signatures) > 64 {
+	if len(tb.Signatures) > MaxObservationRoots {
 		return [32]byte{}, ErrV2Context
 	}
 	total := len(tb.StateHash) + len(tb.ChangeRecordHash) + len(tb.PreviousEntryHash)

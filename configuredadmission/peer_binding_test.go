@@ -78,4 +78,22 @@ func TestPeerEntryWithLinkedParentButForgedRawHashUsesRealBinding(t *testing.T) 
 	image, err := store.LoadJournal(context.Background(), journalCtx, limits)
 	require.NoError(t, err)
 	require.Empty(t, image.Candidates, "raw-hash mismatch is rejected before durable admission")
+
+	// A bad response from local execution cannot establish the candidate is invalid.
+	attempts := 0
+	exec.binder = engineapi.NewAdapter(engineapi.Config{EthURL: eth.URL, Verifier: verifier,
+		ResolveCollector: func(context.Context, *engineapi.EthClient, shardnode.BlockRef) ([20]byte, error) {
+			attempts++
+			return [20]byte{}, engineapi.ErrFeeProofOversized
+		},
+	}, nil)
+	entries, err := recovery.fetch(t.Context(), "malicious", shardnode.JournalFetchRequest{})
+	require.NoError(t, err)
+	_, _, err = recovery.verifyFetched(t.Context(), genesis, entries[0])
+	require.ErrorIs(t, err, ErrRecoveryUnavailable)
+	require.ErrorIs(t, err, engineapi.ErrFeeProofOversized)
+	require.NotErrorIs(t, err, ErrRecoveryInvalid)
+	require.False(t, recovery.Terminal(err))
+	require.Equal(t, 2, attempts)
+
 }

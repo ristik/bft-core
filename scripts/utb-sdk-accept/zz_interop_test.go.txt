@@ -1,0 +1,86 @@
+package gateway
+
+// Scratch interop harness (NOT committed to the aggregator): serves several GROWN trust-base histories over loopback HTTP, each opened from a bundle of
+// `bundle` entries and then extended by Append up to `grown`, and writes manifest.json. Copy to internal/gateway/zz_interop_test.go in
+// ristik/aggregator-go utb/trustbases-v2 (afa2c4b or later), then:
+//   UTB_INTEROP_DIR=<dir> go test ./internal/gateway/ -run TestZZServeForSDKs -timeout 0 -count=1 -v
+// Stop with SIGINT (send it to the go test binary too). The SDK tests read AGG_MANIFEST=<dir>/manifest.json.
+
+import (
+	"context"
+	"encoding/hex"
+	"encoding/json"
+	"net/http/httptest"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-go-base/types"
+
+	"github.com/unicitynetwork/aggregator-go/internal/config"
+	"github.com/unicitynetwork/aggregator-go/internal/logger"
+	"github.com/unicitynetwork/aggregator-go/internal/trustbase/utb"
+	"github.com/unicitynetwork/aggregator-go/internal/trustbase/utb/utbtest"
+)
+
+func TestZZServeForSDKs(t *testing.T) {
+	dir := os.Getenv("UTB_INTEROP_DIR")
+	if dir == "" {
+		t.Skip("scratch")
+	}
+	type entry struct {
+		URL          string `json:"url"`
+		Bundle       string `json:"bundle"`
+		Pin          string `json:"pin"`
+		Epochs       uint64 `json:"epochs"`       // the served tip
+		BundleEpochs uint64 `json:"bundleEpochs"` // entries in the bundle file (the rest were appended)
+		Network      uint32 `json:"network"`
+	}
+	manifest := map[string]entry{}
+	serve := func(name string, chain *utbtest.Chain, network types.NetworkID, bundle, grown int, v1 *types.RootTrustBaseV1) {
+		path := filepath.Join(dir, name+".cbor")
+		require.NoError(t, os.WriteFile(path, chain.Bundle(t, bundle), 0o600))
+		hist, err := utb.Open(context.Background(), utb.LoadConfig{Path: path, Pin: chain.Pin(t), Network: network}, utbtest.NewMemStore())
+		require.NoError(t, err)
+		for _, raw := range chain.Raw[bundle:grown] {
+			out, err := hist.Append(context.Background(), raw)
+			require.NoError(t, err)
+			require.Equal(t, utb.Appended, out)
+		}
+		log, err := logger.New("error", "text", "stdout", false)
+		require.NoError(t, err)
+		cfg := &config.Config{}
+		cfg.Server = config.ServerConfig{ConcurrencyLimit: 10, EnableCORS: true}
+		cfg.Sharding.Mode = config.ShardingModeStandalone
+		svc := &utbService{}
+		svc.latest = v1
+		srv := NewServer(cfg, log, svc)
+		srv.SetTrustBaseHistory(utb.NewGuard(hist, svc.GetLatestTrustBase))
+		ts := httptest.NewServer(srv.router)
+		t.Cleanup(ts.Close)
+		pin := chain.Pin(t)
+		tip, _ := hist.Tip()
+		manifest[name] = entry{URL: ts.URL, Bundle: path, Pin: "0x" + hex.EncodeToString(pin[:]), Epochs: tip, BundleEpochs: uint64(bundle), Network: uint32(network)}
+	}
+	a := utbtest.NewChain(t, 4, 12, 0)
+	serve("a", a, utbtest.Network, 1, 12, nil)                                // a genesis-only bundle grown to 12
+	serve("a3", a, utbtest.Network, 3, 12, nil)                               // a 3-entry bundle grown to 12
+	serve("older", a, utbtest.Network, 1, 6, nil)                             // a shorter replica, also grown
+	serve("fork", utbtest.NewChain(t, 4, 12, 1), utbtest.Network, 1, 12, nil) // same genesis, other entries from epoch 2
+	serve("big", utbtest.NewChain(t, 256, 52, 0), utbtest.Network, 1, 52, nil)
+	serve("othernet", utbtest.NewChainOn(t, 6, 4, 12, 0), 6, 1, 12, nil)
+	serve("behind", a, utbtest.Network, 1, 4, a.V1(6)) // the active V1 epoch (6) is past the grown history (4): the prefix is served
+	bad := a.V1(3)
+	bad.EpochStart++
+	serve("conflict", a, utbtest.Network, 1, 8, bad) // contradicts the aggregator's own authority: Unavailable
+	b, err := json.Marshal(manifest)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "manifest.json"), b, 0o600))
+	t.Log("serving; manifest written")
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	<-sig
+}

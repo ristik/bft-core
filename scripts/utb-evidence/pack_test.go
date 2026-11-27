@@ -17,7 +17,6 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/util"
 
-	"github.com/unicitynetwork/bft-core/gettrustbase"
 	testcertificates "github.com/unicitynetwork/bft-core/internal/testutils/certificates"
 	"github.com/unicitynetwork/bft-core/internal/testutils/utbchain"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
@@ -84,9 +83,9 @@ func buildPack(t *testing.T, ubft, tool string) string {
 
 	// the histories
 	g, _ := chain.Genesis.MarshalCBOR()
-	initial, err := gettrustbase.EncodeBundle([][]byte{g})
+	initial, err := types.EncodeTrustBaseBundle([][]byte{g})
 	require.NoError(t, err)
-	final, err := gettrustbase.EncodeBundle(append([][]byte{g}, chain.Entries...))
+	final, err := types.EncodeTrustBaseBundle(append([][]byte{g}, chain.Entries...))
 	require.NoError(t, err)
 	put("bundle/initial.cbor", initial)
 	put("bundle/final.cbor", final)
@@ -129,7 +128,6 @@ func buildPack(t *testing.T, ubft, tool string) string {
 	put("proofs/original-proof.sha256", []byte(hex.EncodeToString(sum[:])+"\n"))
 	hist := run(t, tool, "uc-verify", "--token", filepath.Join(pack, "proofs", "token.cbor"), "--bundle", filepath.Join(pack, "bundle", "final.cbor"), "--shard-conf", filepath.Join(pack, "manifest", "shard-conf.json"))
 	put("proofs/historical-verify.log", []byte(strings.TrimSuffix(hist, "\n")))
-	put("proofs/bridge-receipt.json", []byte(`{"redeem":{"gasUsed":"12345"},"claim":{"gasUsed":"6789"}}`))
 
 	// the post-recovery certificate: epoch 3, in the activation interval of its entry, signed by that committee
 	cert3 := testcertificates.CreateUnicityCertificate(t, chain.Members[0].Signer, &types.InputRecord{Version: 1, RoundNumber: 9, Hash: bytes.Repeat([]byte{1}, 32),
@@ -175,7 +173,7 @@ type utbManifestJSON struct {
 func check(t *testing.T, ubft, tool, pack string) (string, error) {
 	cmd := exec.Command("bash", "-c", "source scripts/lib/utb-lib.sh; utb_check_evidence \"$1\"", "bash", pack)
 	cmd.Dir = repoRoot(t)
-	cmd.Env = append(os.Environ(), "UBFT="+ubft, "UTB_EVIDENCE="+tool)
+	cmd.Env = append(os.Environ(), "UBFT="+ubft, "UTB_VERIFIER="+tool)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
@@ -227,9 +225,6 @@ func TestEvidencePackIsCheckedByTheToolsAndEveryBadByteIsRefused(t *testing.T) {
 		"a historical log that is not the tool's output": {func(p string) { write(t, p, "proofs/historical-verify.log", []byte("verified\n")) }, "not the verifier's output"},
 		"a client reload without the final digest":       {func(p string) { write(t, p, "history/client-reload.log", []byte("tip now 3\n")) }, "client-reload.log"},
 		"a client that fetched one entry at a time":      {func(p string) { write(t, p, "catchup/client-gap-two-entries.log", []byte("client: appended [3]\n")) }, "epochs 2 and 3 fetched in one sync"},
-		"a failed redemption": {func(p string) {
-			write(t, p, "proofs/bridge-receipt.json", []byte(`{"redeem":{"gasUsed":"0"},"claim":{"gasUsed":"1"}}`))
-		}, "successful redemption"},
 		"a trust base other than the manifest's": {func(p string) {
 			write(t, p, "manifest/trust-base.json", append(read(t, p, "manifest/trust-base.json"), ' '))
 		}, "manifest does not check out"},
@@ -239,7 +234,7 @@ func TestEvidencePackIsCheckedByTheToolsAndEveryBadByteIsRefused(t *testing.T) {
 		"an edited refusal text":                                                                  {func(p string) { write(t, p, "history/client-before-sync.txt", []byte("refused\n")) }, "not the verifier's refusal"},
 		"a synced history that stops at epoch 2": {func(p string) {
 			g, _ := chain.Genesis.MarshalCBOR()
-			b, err := gettrustbase.EncodeBundle([][]byte{g, chain.Entries[0]})
+			b, err := types.EncodeTrustBaseBundle([][]byte{g, chain.Entries[0]})
 			require.NoError(t, err)
 			write(t, p, "history/client-synced.cbor", b)
 		}, "does not end at tip 3"},

@@ -28,6 +28,7 @@
 # ./setup-evm-nodes.sh has generated test-nodes/evm-genesis.json.
 
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/lane-slot.sh" || exit 2   # LANE_SLOT: every port below is shifted into this lane's slot
 
 blocks=${1:-160}
 genesis=test-nodes/evm-genesis.json
@@ -101,8 +102,8 @@ pyget() { python3 -c "import sys,json; d=json.load(sys.stdin); print(d$1)"; }
 run_control() {
   local label=$1 csv=$2; shift 2
   local dd="$workDir/$label" jwt="$workDir/$label.jwt"
-  local enginePort=18551 ethPort=18545
-  [ "$label" = "pinned-gaslimit" ] && { enginePort=18561; ethPort=18555; }
+  local enginePort=$((18551+LANE_PORT_OFFSET)) ethPort=$((18545+LANE_PORT_OFFSET))
+  [ "$label" = "pinned-gaslimit" ] && { enginePort=$((18561+LANE_PORT_OFFSET)); ethPort=$((18555+LANE_PORT_OFFSET)); }
   local engineURL="http://127.0.0.1:$enginePort" ethURL="http://127.0.0.1:$ethPort"
 
   openssl rand -hex 32 >"$jwt"
@@ -121,7 +122,7 @@ run_control() {
   reth node --chain "$genesis" --datadir "$dd" \
     --authrpc.jwtsecret "$jwt" --authrpc.addr 127.0.0.1 --authrpc.port "$enginePort" \
     --http --http.addr 127.0.0.1 --http.port "$ethPort" --http.api eth,net,web3 \
-    --disable-discovery --ipcdisable --port $((30399 + enginePort - 18551)) "$@" \
+    --disable-discovery --ipcdisable --port $((30399 + LANE_PORT_OFFSET + enginePort - (18551+LANE_PORT_OFFSET))) "$@" \
     >"$workDir/$label.log" 2>&1 &
   rethPid=$!
 

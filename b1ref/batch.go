@@ -8,11 +8,11 @@ import (
 // evalBatch is the staged evaluator of a scanned and decoded CERT_BATCH_V2 request (briefs/b1-any-age-contract.md section 3). It
 // returns the batch's false reason (nil when valid) or an infrastructure error, in the contract's precedence:
 //
-//  1. the common words (Registry/Host first); then phase 1 or no usable origin yet is false, with no epoch read;
-//  2. every requested epoch in [g, U], in first-use order, read and validated once with its keys parsed (Registry/Host first);
+//  1. the common words (Registry/Host first); then phase 1 is false, with no epoch read;
+//  2. every requested epoch in [g, I], in first-use order, read and validated once with its keys parsed (Registry/Host first);
 //  3. every distinct claim, in first-use order: binding and folds, and conflict with an earlier different claim for the same
 //     (partition, shard) under the same seal;
-//  4. every distinct complete seal, in first-use order: network, epoch admissibility, start <= r, r < end when closed, r <= O, then
+//  4. every distinct complete seal, in first-use order: network, epoch admissibility, start <= r, r < end when closed, then
 //     every supplied signature and the weighted quorum.
 //
 // All of 3 and 4 is evaluated, so the work done depends on the request and state, not on which check fails first; the reason is
@@ -25,13 +25,10 @@ func evalBatch(pl *plan, claims []claim, st State, pins Pins) (error, error) {
 	if c.phase == 1 {
 		return ErrPhase, nil
 	}
-	if !c.ready {
-		return ErrOriginNotReady, nil
-	}
 	epochs := make(map[uint64]*epochAuth, pl.e)
 	for i := uint64(0); i < pl.k; i++ {
 		e := pl.occ[i].epoch
-		if _, seen := epochs[e]; seen || e < c.g || e > c.origin {
+		if _, seen := epochs[e]; seen || e < c.g || e > c.tip {
 			continue
 		}
 		auth, err := loadEpoch(st, c, e)
@@ -95,7 +92,7 @@ func conflicts(claims []claim, pl *plan, i uint64) bool {
 }
 
 // sealRelation checks one complete seal against its epoch's authority. There is no certificate-age window: a seal of an admitted
-// epoch is valid while start_e <= r <= O and, for a closed epoch, r < end_e.
+// epoch is valid while start_e <= r and, for a closed epoch, r < end_e.
 func sealRelation(c *claim, cm *common, epochs map[uint64]*epochAuth) error {
 	seal := c.uc.UnicitySeal
 	if uint64(seal.NetworkID) != uint64(cm.network) {
@@ -104,7 +101,7 @@ func sealRelation(c *claim, cm *common, epochs map[uint64]*epochAuth) error {
 	if seal.Epoch < cm.g {
 		return ErrEpochBeforeGenesis
 	}
-	if seal.Epoch > cm.origin {
+	if seal.Epoch > cm.tip {
 		return ErrEpochNotUsable
 	}
 	auth := epochs[seal.Epoch]
@@ -115,36 +112,30 @@ func sealRelation(c *claim, cm *common, epochs map[uint64]*epochAuth) error {
 	if auth.entry.End != nil && r >= *auth.entry.End {
 		return ErrAfterEnd
 	}
-	if r > cm.o {
-		return ErrFuture
-	}
 	return verifySignatures(c, auth)
 }
 
-// verifySignatures checks every supplied signature over SHA256(Seal.SigBytes()) and then the weighted quorum. Any unknown signer
-// or bad signature fails the seal even when the rest reach quorum; the loop does not stop early.
+// verifySignatures sums the weight of the supplied signatures that are valid and checks the weighted quorum. A signature that does not count - an
+// unknown signer ID, a width or recovery ID that is not canonical, a scalar out of range, a high s, a recovery that fails or yields another key -
+// contributes zero and does not fail the seal: an extra cannot poison an honest quorum. Every supplied signature is still charged (gas is by
+// request), and the loop does not stop early.
 func verifySignatures(c *claim, auth *epochAuth) error {
 	sigBytes, err := c.uc.UnicitySeal.SigBytes()
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrFold, err)
 	}
 	work("quorum")
-	var first error
 	good := uint64(0)
 	for _, kv := range c.sigs.pairs() {
+		work("signature") // one evaluation per supplied signature, whatever its outcome (gas is by request)
 		m, ok := auth.members[string(kv[0])]
 		if !ok {
-			first = firstErr(first, ErrUnknownSigner)
 			continue
 		}
 		if err := checkSignature(&m, kv[1], sigBytes); err != nil {
-			first = firstErr(first, err)
 			continue
 		}
 		good += m.weight
-	}
-	if first != nil {
-		return first
 	}
 	if good < auth.threshold {
 		return ErrQuorum

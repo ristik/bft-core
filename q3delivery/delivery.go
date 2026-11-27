@@ -1,7 +1,9 @@
-// Package q3delivery serves and fetches the activation bundle of a V3 epoch between root nodes: the proof envelope that authenticates the
-// activation from the pinned genesis, the old epoch's committed checkpoint and the candidate preimage (q3active.Bundle). It is the V3
-// counterpart of handoffdelivery, with its own protocol identifier: a peer that does not speak it cannot fetch a V3 bundle, and a V2
-// peer is never asked for one.
+// Package q3delivery serves and fetches the activation bundle of a V3 epoch between root nodes: the proof envelope of the activating link,
+// the old epoch's committed checkpoint and the candidate preimage (q3active.Bundle). It is the V3 counterpart of handoffdelivery, with its
+// own protocol identifier: a peer that does not speak it cannot fetch a V3 bundle, and a V2 peer is never asked for one.
+//
+// A bundle is one epoch's: its size does not grow with the chain (#1035). A receiver verifies it against its own history, forward from its
+// pin, so it asks for the epochs it lacks in order, each by its own request.
 //
 // A bundle fetched here is untrusted bytes. The caller hands it to its own q3active.Runtime, which verifies it against the verified
 // history and installs it through the journal; nothing about the peer is trusted, and what a peer serves is only ever the evidence.
@@ -15,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	libp2pnetwork "github.com/libp2p/go-libp2p/core/network"
@@ -34,6 +37,15 @@ const (
 	maxResponseBytes = 24 << 20
 	requestDeadline  = 20 * time.Second
 	maxConcurrent    = 8
+	// maxPerPeer bounds one peer's concurrent requests, so that a single non-root reader cannot hold every slot.
+	maxPerPeer = 2
+	// headerDeadline bounds the wait for a request's frame: a peer that opens a stream and withholds its request frees the slot quickly.
+	headerDeadline = 2 * time.Second
+	// perPeerRate and perPeerBurst budget each peer's requests (a token bucket keyed by the authenticated peer ID).
+	perPeerRate  = 4.0 // requests per second
+	perPeerBurst = 8
+	// maxTrackedPeers bounds the rate state; the oldest idle entries are dropped first.
+	maxTrackedPeers = 4096
 )
 
 type request struct {
@@ -62,6 +74,15 @@ type Host interface {
 type Server struct {
 	provider Provider
 	slots    chan struct{}
+	mu       sync.Mutex
+	perPeer  map[peer.ID]int
+	buckets  map[peer.ID]*bucket
+	now      func() time.Time
+}
+
+type bucket struct {
+	tokens float64
+	at     time.Time
 }
 
 // NewServer serves bundles from provider.
@@ -69,14 +90,76 @@ func NewServer(provider Provider) (*Server, error) {
 	if provider == nil {
 		return nil, errors.New("q3delivery: missing provider")
 	}
-	return &Server{provider: provider, slots: make(chan struct{}, maxConcurrent)}, nil
+	return &Server{provider: provider, slots: make(chan struct{}, maxConcurrent), perPeer: map[peer.ID]int{}, buckets: map[peer.ID]*bucket{}, now: time.Now}, nil
 }
 
 // Register installs the stream handler on host.
 func (s *Server) Register(host Host) { host.RegisterProtocolHandler(Protocol, s.handle) }
 
+// reservePeer takes one of the peer's request slots and one token of its rate budget, or reports that it may not ask now.
+func (s *Server) reservePeer(id peer.ID) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.perPeer[id] >= maxPerPeer {
+		return false
+	}
+	now := s.now()
+	b := s.buckets[id]
+	if b == nil {
+		if len(s.buckets) >= maxTrackedPeers {
+			s.evictIdleLocked(now)
+		}
+		b = &bucket{tokens: perPeerBurst, at: now}
+		s.buckets[id] = b
+	}
+	b.tokens = min(perPeerBurst, b.tokens+now.Sub(b.at).Seconds()*perPeerRate)
+	b.at = now
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens--
+	s.perPeer[id]++
+	return true
+}
+
+// evictIdleLocked drops the rate state of peers with no request in flight whose bucket has refilled (they lose nothing by it), and
+// if that frees nothing, the oldest idle entry.
+func (s *Server) evictIdleLocked(now time.Time) {
+	var oldest peer.ID
+	var oldestAt time.Time
+	for id, b := range s.buckets {
+		if s.perPeer[id] > 0 {
+			continue
+		}
+		if b.tokens+now.Sub(b.at).Seconds()*perPeerRate >= perPeerBurst {
+			delete(s.buckets, id)
+			continue
+		}
+		if oldest == "" || b.at.Before(oldestAt) {
+			oldest, oldestAt = id, b.at
+		}
+	}
+	if len(s.buckets) >= maxTrackedPeers && oldest != "" {
+		delete(s.buckets, oldest)
+	}
+}
+
+func (s *Server) releasePeer(id peer.ID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.perPeer[id]--; s.perPeer[id] <= 0 {
+		delete(s.perPeer, id)
+	}
+}
+
 func (s *Server) handle(stream libp2pnetwork.Stream) {
 	defer stream.Close()
+	id := stream.Conn().RemotePeer()
+	if !s.reservePeer(id) {
+		_ = stream.Reset()
+		return
+	}
+	defer s.releasePeer(id)
 	select {
 	case s.slots <- struct{}{}:
 		defer func() { <-s.slots }()
@@ -84,7 +167,9 @@ func (s *Server) handle(stream libp2pnetwork.Stream) {
 		_ = stream.Reset()
 		return
 	}
-	_ = stream.SetDeadline(time.Now().Add(requestDeadline))
+	// the request frame must arrive within the short header deadline; the whole exchange within the request deadline
+	_ = stream.SetReadDeadline(time.Now().Add(headerDeadline))
+	_ = stream.SetWriteDeadline(time.Now().Add(requestDeadline))
 	ctx, cancel := context.WithTimeout(context.Background(), requestDeadline)
 	defer cancel()
 	if err := s.Serve(ctx, stream); err != nil {
@@ -130,6 +215,9 @@ func Request(ctx context.Context, host Host, root peer.ID, epoch uint64) (q3acti
 		return q3active.Bundle{}, fmt.Errorf("q3delivery: root stream: %w", err)
 	}
 	defer stream.Close()
+	// the stream deadline below bounds the exchange in time; a cancelled context (an install that gives up) resets the stream at once
+	stopReset := context.AfterFunc(ctx, func() { _ = stream.Reset() })
+	defer stopReset()
 	if deadline, ok := ctx.Deadline(); ok {
 		if err := stream.SetDeadline(deadline); err != nil {
 			return q3active.Bundle{}, err

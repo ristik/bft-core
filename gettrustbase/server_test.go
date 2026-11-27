@@ -15,10 +15,10 @@ import (
 )
 
 func req(from uint64) *Request {
-	return &Request{Version: 1, Network: testNetwork, FromEpoch: from, MaxEntries: 64, MaxBytes: DefaultMaxResponse}
+	return &Request{Version: 1, Network: testNetwork, FromEpoch: from, MaxEntries: 64, MaxBytes: types.DefaultTrustBaseMaxResponse}
 }
 
-func epochs(r *Response) []uint64 {
+func epochs(r *types.TrustBaseResponse) []uint64 {
 	var out []uint64
 	for _, e := range r.Entries {
 		d, _ := types.DecodeRootTrustBaseV2(e)
@@ -41,7 +41,7 @@ func TestRespondClampsAheadRangesAndPages(t *testing.T) {
 
 	// the whole history from the genesis, capped at the server's 4 entries, with a cursor
 	r := srv.Respond(req(1))
-	require.Equal(t, StatusOK, r.Status)
+	require.Equal(t, types.TrustBaseStatusOK, r.Status)
 	require.Equal(t, []uint64{1, 2, 3, 4}, epochs(r))
 	require.Equal(t, uint64(10), r.EffectiveEnd)
 	require.Equal(t, tip[:], r.EndEntryID)
@@ -58,7 +58,7 @@ func TestRespondClampsAheadRangesAndPages(t *testing.T) {
 	q = req(9)
 	q.ToEpoch = u64(500)
 	r = srv.Respond(q)
-	require.Equal(t, StatusOK, r.Status)
+	require.Equal(t, types.TrustBaseStatusOK, r.Status)
 	require.Equal(t, []uint64{9, 10}, epochs(r))
 	require.Equal(t, uint64(10), r.EffectiveEnd)
 	require.Nil(t, r.NextEpoch)
@@ -75,7 +75,7 @@ func TestRespondClampsAheadRangesAndPages(t *testing.T) {
 
 	// from ahead of the tip: nothing, no fabricated entries
 	r = srv.Respond(req(11))
-	require.Equal(t, StatusNotYetAvailable, r.Status)
+	require.Equal(t, types.TrustBaseStatusNotYetAvailable, r.Status)
 	require.Empty(t, r.Entries)
 	require.Equal(t, uint64(10), r.EffectiveEnd)
 }
@@ -98,25 +98,25 @@ func TestRespondRefusesInvalidRequestsAndBudgets(t *testing.T) {
 	for name, m := range cases {
 		q := req(1)
 		m(q)
-		require.Equal(t, StatusInvalidRequest, srv.Respond(q).Status, name)
+		require.Equal(t, types.TrustBaseStatusInvalidRequest, srv.Respond(q).Status, name)
 	}
 	q := req(1)
 	q.Network = 99
-	require.Equal(t, StatusWrongNetwork, srv.Respond(q).Status)
+	require.Equal(t, types.TrustBaseStatusWrongNetwork, srv.Respond(q).Status)
 
 	// a budget that cannot carry one entry is LimitTooSmall, never an empty page with a cursor
 	es1 := raw(t, es)
 	q = req(2)
-	q.MaxBytes = uint32(envelopeBound + len(es1[1]) - 1)
+	q.MaxBytes = uint32(types.TrustBaseResponseEnvelopeBound + len(es1[1]) - 1)
 	r := srv.Respond(q)
-	require.Equal(t, StatusLimitTooSmall, r.Status)
+	require.Equal(t, types.TrustBaseStatusLimitTooSmall, r.Status)
 	require.Nil(t, r.NextEpoch)
 	q.MaxBytes = 10 // below the envelope itself
-	require.Equal(t, StatusLimitTooSmall, srv.Respond(q).Status)
+	require.Equal(t, types.TrustBaseStatusLimitTooSmall, srv.Respond(q).Status)
 	// exactly enough for one entry: progress, one at a time
-	q.MaxBytes = uint32(envelopeBound + len(es1[1]))
+	q.MaxBytes = uint32(types.TrustBaseResponseEnvelopeBound + len(es1[1]))
 	r = srv.Respond(q)
-	require.Equal(t, StatusOK, r.Status)
+	require.Equal(t, types.TrustBaseStatusOK, r.Status)
 	require.Len(t, r.Entries, 1)
 	require.NotNil(t, r.NextEpoch)
 }
@@ -137,7 +137,7 @@ func TestSnapshotFreezesPaginationWhileTheTipMoves(t *testing.T) {
 	q := req(*first.NextEpoch)
 	q.SnapshotEnd, q.SnapshotEntryID = u64(6), snapID
 	second := srv.Respond(q)
-	require.Equal(t, StatusOK, second.Status)
+	require.Equal(t, types.TrustBaseStatusOK, second.Status)
 	require.Equal(t, []uint64{4, 5, 6}, epochs(second))
 	require.Equal(t, uint64(6), second.EffectiveEnd)
 	require.Nil(t, second.NextEpoch)
@@ -148,9 +148,9 @@ func TestSnapshotFreezesPaginationWhileTheTipMoves(t *testing.T) {
 	behind := newServer(t, store(t, es, 3), Config{})
 	q = req(5)
 	q.SnapshotEnd, q.SnapshotEntryID = u64(6), snapID
-	require.Equal(t, StatusNotYetAvailable, behind.Respond(q).Status)
+	require.Equal(t, types.TrustBaseStatusNotYetAvailable, behind.Respond(q).Status)
 	q.SnapshotEntryID = es1Wrong()
-	require.Equal(t, StatusHistoryMismatch, srv.Respond(q).Status)
+	require.Equal(t, types.TrustBaseStatusHistoryMismatch, srv.Respond(q).Status)
 }
 
 func es1Wrong() []byte { return append(make([]byte, 31), 1) }
@@ -172,16 +172,16 @@ func TestAMissingFinalizedEntryIsUnavailableNeverASkip(t *testing.T) {
 	es := chain(t, nodes(t, 4), 5)
 	srv := newServer(t, holey{store(t, es, 5), 3}, Config{})
 	r := srv.Respond(req(1))
-	require.Equal(t, StatusUnavailable, r.Status)
+	require.Equal(t, types.TrustBaseStatusUnavailable, r.Status)
 	require.Empty(t, r.Entries)
 	require.Nil(t, r.NextEpoch)
 }
 
 func TestServerConfigMustCarryOneMaximumEntry(t *testing.T) {
 	st := store(t, chain(t, nodes(t, 4), 1), 1)
-	_, err := NewServer(st, Config{MaxResponseBytes: MaxEntryBytes})
+	_, err := NewServer(st, Config{MaxResponseBytes: types.MaxTrustBaseEntryBytes})
 	require.ErrorIs(t, err, ErrConfig)
-	_, err = NewServer(st, Config{MaxResponseBytes: MaxEntryBytes + envelopeBound})
+	_, err = NewServer(st, Config{MaxResponseBytes: types.MaxTrustBaseEntryBytes + types.TrustBaseResponseEnvelopeBound})
 	require.NoError(t, err)
 }
 
@@ -241,7 +241,7 @@ type flaky struct {
 	seen      map[peer.ID]int
 }
 
-func (f *flaky) Page(ctx context.Context, id peer.ID, r *Request) (*Response, [][]byte, error) {
+func (f *flaky) Page(ctx context.Context, id peer.ID, r *Request) (*types.TrustBaseResponse, [][]byte, error) {
 	if f.seen == nil {
 		f.seen = map[peer.ID]int{}
 	}
@@ -267,13 +267,13 @@ func TestOverLibp2pLimitsBusyOversizeAndSlowClients(t *testing.T) {
 	require.NoError(t, err)
 	require.Eventually(t, func() bool { // the handler must have taken the slot
 		r, _, err := c.Page(context.Background(), a.p.ID(), req(1))
-		return err == nil && r.Status == StatusBusy
+		return err == nil && r.Status == types.TrustBaseStatusBusy
 	}, time.Second, 10*time.Millisecond)
 	_ = held.Reset()
 	// the slot is released at the deadline; then the request is served
 	require.Eventually(t, func() bool {
 		r, _, err := c.Page(context.Background(), a.p.ID(), req(1))
-		return err == nil && r.Status == StatusOK
+		return err == nil && r.Status == types.TrustBaseStatusOK
 	}, 3*time.Second, 50*time.Millisecond)
 
 	// an oversize frame is refused before allocation and never served
@@ -286,7 +286,7 @@ func TestOverLibp2pLimitsBusyOversizeAndSlowClients(t *testing.T) {
 	n, _ := s.Read(buf)
 	got, _, derr := decodeFrame(buf[:n])
 	require.NoError(t, derr)
-	require.Equal(t, StatusInvalidRequest, got.Status)
+	require.Equal(t, types.TrustBaseStatusInvalidRequest, got.Status)
 
 	// a garbage request body is InvalidRequest, not a hang
 	s2, err := b.p.CreateStream(context.Background(), a.p.ID(), ProtocolID)
@@ -296,7 +296,7 @@ func TestOverLibp2pLimitsBusyOversizeAndSlowClients(t *testing.T) {
 	n, _ = s2.Read(buf)
 	got, _, derr = decodeFrame(buf[:n])
 	require.NoError(t, derr)
-	require.Equal(t, StatusInvalidRequest, got.Status)
+	require.Equal(t, types.TrustBaseStatusInvalidRequest, got.Status)
 }
 
 func TestFrameLengthIsRefusedBeforeAllocation(t *testing.T) {
@@ -308,11 +308,11 @@ func TestFrameLengthIsRefusedBeforeAllocation(t *testing.T) {
 
 // scripted answers each request with the next canned page.
 type scripted struct {
-	pages []func(*Request) (*Response, [][]byte)
+	pages []func(*Request) (*types.TrustBaseResponse, [][]byte)
 	seen  []*Request
 }
 
-func (s *scripted) Page(_ context.Context, _ peer.ID, r *Request) (*Response, [][]byte, error) {
+func (s *scripted) Page(_ context.Context, _ peer.ID, r *Request) (*types.TrustBaseResponse, [][]byte, error) {
 	s.seen = append(s.seen, r)
 	if len(s.pages) == 0 {
 		return nil, nil, context.DeadlineExceeded
@@ -327,10 +327,10 @@ func TestSyncRefusesPagesThatDoNotContinueTheRequest(t *testing.T) {
 	es := chain(t, nodes(t, 4), 6)
 	rs := raw(t, es)
 	id := peer.ID("p")
-	page := func(from, end int, next *uint64, mutate func(*Response)) func(*Request) (*Response, [][]byte) {
-		return func(*Request) (*Response, [][]byte) {
+	page := func(from, end int, next *uint64, mutate func(*types.TrustBaseResponse)) func(*Request) (*types.TrustBaseResponse, [][]byte) {
+		return func(*Request) (*types.TrustBaseResponse, [][]byte) {
 			e := idOf(t, es[end-1])
-			r := &Response{Version: 1, Network: testNetwork, Status: StatusOK, FromEpoch: uint64(from), EffectiveEnd: uint64(end), EndEntryID: e[:], NextEpoch: next}
+			r := &types.TrustBaseResponse{Version: 1, Network: testNetwork, Status: types.TrustBaseStatusOK, FromEpoch: uint64(from), EffectiveEnd: uint64(end), EndEntryID: e[:], NextEpoch: next}
 			var ents [][]byte
 			for i := from; i <= end && i < from+2; i++ {
 				ents = append(ents, rs[i-1])
@@ -342,15 +342,15 @@ func TestSyncRefusesPagesThatDoNotContinueTheRequest(t *testing.T) {
 		}
 	}
 	opt := SyncOptions{Network: testNetwork, Rounds: 1}
-	for name, p := range map[string]func(*Request) (*Response, [][]byte){
-		"other network": page(2, 3, nil, func(r *Response) { r.Network = 9 }),
+	for name, p := range map[string]func(*Request) (*types.TrustBaseResponse, [][]byte){
+		"other network": page(2, 3, nil, func(r *types.TrustBaseResponse) { r.Network = 9 }),
 		"another start": page(3, 3, nil, nil),
-		"not even a page": func(*Request) (*Response, [][]byte) {
-			return &Response{Version: 1, Network: testNetwork, Status: StatusBusy}, nil
+		"not even a page": func(*Request) (*types.TrustBaseResponse, [][]byte) {
+			return &types.TrustBaseResponse{Version: 1, Network: testNetwork, Status: types.TrustBaseStatusBusy}, nil
 		},
 	} {
 		sink := store(t, es, 0)
-		n, err := Sync(context.Background(), &scripted{pages: []func(*Request) (*Response, [][]byte){p}}, sink, []peer.ID{id}, opt)
+		n, err := Sync(context.Background(), &scripted{pages: []func(*Request) (*types.TrustBaseResponse, [][]byte){p}}, sink, []peer.ID{id}, opt)
 		require.ErrorIs(t, err, ErrNoPeer, name)
 		require.Zero(t, n, name)
 		require.Equal(t, uint64(1), sink.Tip().Epoch, name)
@@ -358,7 +358,7 @@ func TestSyncRefusesPagesThatDoNotContinueTheRequest(t *testing.T) {
 	// a later page of another snapshot is refused, the authenticated first page is kept
 	sink := store(t, es, 0)
 	next := u64(4)
-	s := &scripted{pages: []func(*Request) (*Response, [][]byte){
+	s := &scripted{pages: []func(*Request) (*types.TrustBaseResponse, [][]byte){
 		page(2, 6, next, nil),
 		page(4, 5, nil, nil), // a different end than the frozen snapshot (6)
 	}}
@@ -374,12 +374,12 @@ func TestSyncRefusesPagesThatDoNotContinueTheRequest(t *testing.T) {
 // direct serves each peer ID from a Server in-process, through the real encode and decode.
 type direct map[peer.ID]*Server
 
-func (d direct) Page(_ context.Context, id peer.ID, r *Request) (*Response, [][]byte, error) {
+func (d direct) Page(_ context.Context, id peer.ID, r *Request) (*types.TrustBaseResponse, [][]byte, error) {
 	enc, err := d[id].Respond(r).Encode()
 	if err != nil {
 		return nil, nil, err
 	}
-	resp, _, err := DecodeResponse(enc, PageLimits)
+	resp, _, err := types.DecodeTrustBaseResponse(enc, types.TrustBasePageLimits)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -417,7 +417,7 @@ func TestSyncSkipsABehindPeerEvenOnTheFirstPage(t *testing.T) {
 // fetchers routes by peer ID.
 type fetchers map[peer.ID]Fetcher
 
-func (f fetchers) Page(ctx context.Context, id peer.ID, r *Request) (*Response, [][]byte, error) {
+func (f fetchers) Page(ctx context.Context, id peer.ID, r *Request) (*types.TrustBaseResponse, [][]byte, error) {
 	return f[id].Page(ctx, id, r)
 }
 
@@ -456,10 +456,10 @@ type forgedPeer struct {
 	t     *testing.T
 }
 
-func (f *forgedPeer) Page(_ context.Context, _ peer.ID, r *Request) (*Response, [][]byte, error) {
+func (f *forgedPeer) Page(_ context.Context, _ peer.ID, r *Request) (*types.TrustBaseResponse, [][]byte, error) {
 	f.calls++
 	// it also freezes a bogus snapshot far beyond the real history, which no honest peer can satisfy
-	resp := &Response{Version: 1, Network: testNetwork, Status: StatusOK, FromEpoch: r.FromEpoch, EffectiveEnd: 40, EndEntryID: bytes.Repeat([]byte{9}, 32)}
+	resp := &types.TrustBaseResponse{Version: 1, Network: testNetwork, Status: types.TrustBaseStatusOK, FromEpoch: r.FromEpoch, EffectiveEnd: 40, EndEntryID: bytes.Repeat([]byte{9}, 32)}
 	var ents [][]byte
 	for i := int(r.FromEpoch) - 1; i < int(r.FromEpoch)+2 && i < len(f.es); i++ { // three entries a page
 		b, _ := f.es[i].MarshalCBOR()

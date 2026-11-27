@@ -1,0 +1,346 @@
+package vrschema
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"errors"
+	"fmt"
+	"sort"
+
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
+	"github.com/unicitynetwork/bft-core/evmassign"
+	"github.com/unicitynetwork/bft-go-base/types"
+)
+
+// ShardKey names one installed shard: the partition and the shard id bytes (bft-go-base ShardID.Bytes()).
+type ShardKey struct {
+	Partition uint32
+	Shard     string
+}
+
+// FoldInput is everything the verdicts read (design section 3.5.4). It changes only at a committed handoff.
+type FoldInput struct {
+	Network            uint64 // root network id
+	SuccessorRootEpoch uint64
+	Installed          map[ShardKey]*types.PartitionDescriptionRecord
+	ReservedPartitions []uint32 // 0xFFFFFFFF, 0xFFFFFFFE, the EVM partition, the control partition
+	PartitionCeiling   uint32   // 64
+	Schedule           []Activation
+}
+
+// ErrFoldList refuses a RegistryChanges list VR could never have bound (the candidate is invalid; no verdict applies).
+var ErrFoldList = errors.New("vrschema: registry change list is not bindable")
+
+// ChangePoPMessage is the VR-context possession message one validator key signs at queue time: CBOR(["UNICITY_VR_CHANGE_POP", 1,
+// network, VR, changeId, partition, shard, keccak256(pdr), nodeId]) with network the root network id, VR the 20-byte address and
+// keccak256 over the exact canonical PDR bytes carried in the payload.
+func ChangePoPMessage(network uint64, registry [20]byte, changeID uint64, partition uint32, shard []byte, pdr []byte, nodeID string) ([]byte, error) {
+	h := ethcrypto.Keccak256(pdr)
+	if shard == nil {
+		shard = []byte{}
+	}
+	return types.Cbor.Marshal([]any{ChangePoPDomain, uint64(1), network, registry[:], changeID, uint64(partition), shard, h, nodeID})
+}
+
+func decodePDR(b []byte) (*types.PartitionDescriptionRecord, error) {
+	var p types.PartitionDescriptionRecord
+	if len(b) == 0 || types.Cbor.Unmarshal(b, &p) != nil {
+		return nil, ErrCanonical
+	}
+	again, err := types.Cbor.Marshal(&p)
+	if err != nil || !bytes.Equal(again, b) {
+		return nil, ErrCanonical
+	}
+	return &p, nil
+}
+
+// decodePoPs accepts exactly the canonical CBOR array of PoPs; null (0xf6) is not an array and re-encodes to 0x80, so it is refused.
+func decodePoPs(b []byte) ([]evmassign.PoP, error) {
+	var ps []evmassign.PoP
+	if len(b) == 0 || types.Cbor.Unmarshal(b, &ps) != nil {
+		return nil, ErrCanonical
+	}
+	if ps == nil {
+		ps = []evmassign.PoP{}
+	}
+	again, err := types.Cbor.Marshal(ps)
+	if err != nil || !bytes.Equal(again, b) {
+		return nil, ErrCanonical
+	}
+	return ps, nil
+}
+
+// verifyChangePoPs: exactly one proof per validator, in validator order, by the validator's own key, with a canonical recovery byte.
+func verifyChangePoPs(in FoldInput, changeID uint64, pdr *types.PartitionDescriptionRecord, pdrBytes []byte, pops []evmassign.PoP) error {
+	if len(pops) != len(pdr.Validators) {
+		return errors.New("pop count")
+	}
+	for i, v := range pdr.Validators {
+		p := pops[i]
+		if p.NodeID != v.NodeID || !bytes.Equal(p.Key, v.SigKey) || len(p.Signature) != 65 {
+			return fmt.Errorf("pop %d names another validator", i)
+		}
+		msg, err := ChangePoPMessage(in.Network, ValidatorRegistry, changeID, uint32(pdr.PartitionID), pdr.ShardID.Bytes(), pdrBytes, v.NodeID)
+		if err != nil {
+			return err
+		}
+		if err := Verify(v.SigKey, p.Signature, msg); err != nil {
+			return err
+		}
+		d := sha256.Sum256(msg)
+		pub, err := ethcrypto.SigToPub(d[:], p.Signature)
+		if err != nil || !bytes.Equal(ethcrypto.CompressPubkey(pub), v.SigKey) {
+			return errors.New("non-canonical recovery byte")
+		}
+	}
+	return nil
+}
+
+// executableSet is what an UpdatePartition's (unchanged) validator set must still be: nonempty with unique signing keys (IsValid already
+// requires valid members with unique node ids). An installed set that is not is not installed again.
+func executableSet(v []*types.NodeInfo) bool {
+	if len(v) == 0 {
+		return false
+	}
+	keys := make(map[string]bool, len(v))
+	for _, n := range v {
+		if n == nil || keys[string(n.SigKey)] {
+			return false
+		}
+		keys[string(n.SigKey)] = true
+	}
+	return true
+}
+
+func sameValidators(a, b []*types.NodeInfo) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].NodeID != b[i].NodeID || !bytes.Equal(a[i].SigKey, b[i].SigKey) || a[i].Stake != b[i].Stake {
+			return false
+		}
+	}
+	return true
+}
+
+// FoldVerdicts derives the verdicts of the bound changes, in ascending id over a tentative state. For each change, in this order:
+//  1. Duplicate: the same kind and payload hash as an earlier Accepted change;
+//  2. Malformed: the payload, an embedded PDR or PoP list is not canonical; judged before the scope, so it claims none and a later
+//     change of that scope is judged on its own;
+//  3. Conflict: the change's scope (ChangeScope: its shard for kinds 6 and 8, its partition for kind 7, its rule for kind 9) was
+//     already claimed by an earlier decoded change of this list, whatever that change's verdict; a well-formed list never has one,
+//     because binding selection defers a second change of a scope, so this rule is defensive;
+//  4. the kind's rules: Conflict (stale expected hash, a partition added earlier in the list), Invalid (design section 6, including
+//     the protocol proof-configuration predicate ProofConfigValid, a kind 6 or 8 change of a shard that is not installed, even one an
+//     earlier Accepted AddPartition of the list adds: FD-29, and an AddPartition whose ShardID is not the empty one: FD-30), Ceiling,
+//     BadPoP, PastCutoff, Earlier, Latched.
+//
+// Only an Accepted change updates the tentative state (installed PDRs, the partition count, the effective schedule) and enters the
+// Duplicate set. EVM-side and membership kinds are Accepted. The shard acknowledgement gate is not a fold input (AckGate). Local proof
+// verification support is never consulted (proofconfig.go).
+func FoldVerdicts(in FoldInput, rc []RegistryChange) ([]uint8, error) {
+	if err := CheckRegistryChangesShape(rc); err != nil {
+		return nil, err
+	}
+	tentative := map[ShardKey]*types.PartitionDescriptionRecord{}
+	for k, v := range in.Installed {
+		tentative[k] = v
+	}
+	claimed := map[string]bool{}
+	added := map[uint32]bool{}
+	effective := Effective(in.Schedule)
+	accepted := map[string]bool{}
+	reserved := map[uint32]bool{}
+	for _, p := range in.ReservedPartitions {
+		reserved[p] = true
+	}
+	partitions := func() int {
+		s := map[uint32]bool{}
+		for k := range tentative {
+			s[k.Partition] = true
+		}
+		return len(s)
+	}
+	out := make([]uint8, len(rc))
+	for i, c := range rc {
+		k := uint8(c.Kind)
+		dk := fmt.Sprintf("%d/%x", k, PayloadHash(c.Payload))
+		v, derr := DecodeChangePayload(k, c.Payload)
+		verdict := VerdictAccepted
+		switch {
+		case accepted[dk]:
+			verdict = VerdictDuplicate
+		case derr != nil:
+			if !RootSide(k) && k != KindScheduleActivation {
+				return nil, fmt.Errorf("%w: entry %d of kind %d does not decode", ErrFoldList, i, k)
+			}
+			verdict = VerdictMalformed
+		default:
+			scope, serr := ChangeScope(k, c.Payload)
+			switch {
+			case serr != nil || embeddedMalformed(k, v):
+				verdict = VerdictMalformed // claims no scope
+			case scope != "" && claimed[scope] && !Singleton(k):
+				verdict = VerdictConflict
+			default:
+				if scope != "" {
+					claimed[scope] = true
+				}
+				switch k {
+				case KindReplaceAggregator, KindUpdatePartition:
+					verdict = foldShard(in, c.ID, k, v, tentative)
+				case KindAddPartition:
+					verdict = foldAdd(in, c.ID, v, tentative, added, reserved, partitions())
+				case KindScheduleActivation:
+					s := Schedule{RuleID: v[0].(Word), ReleaseDigest: v[1].(Word), RootEpoch: v[2].(uint64), NotBeforeUcTime: v[3].(uint64)}
+					if verdict = ScheduleVerdict(s, in.SuccessorRootEpoch, effective); verdict == VerdictAccepted {
+						effective[s.RuleID] = Activation{RuleID: s.RuleID, RootEpoch: s.RootEpoch, NotBeforeUcTime: s.NotBeforeUcTime, State: ActActive, ChangeID: c.ID}
+					}
+				}
+			}
+		}
+		if verdict == VerdictAccepted {
+			accepted[dk] = true
+		}
+		out[i] = verdict
+	}
+	return out, nil
+}
+
+// embeddedMalformed reports a root-side payload whose embedded encodings are not canonical: the CBOR PDR (kinds 6, 7, 8) and the
+// CBOR PoP list (kinds 6, 7). It is judged before the scope, so a Malformed change never claims one.
+func embeddedMalformed(k uint8, v []any) bool {
+	switch k {
+	case KindReplaceAggregator:
+		_, e1 := decodePDR(v[3].([]byte))
+		_, e2 := decodePoPs(v[4].([]byte))
+		return e1 != nil || e2 != nil
+	case KindUpdatePartition:
+		_, e := decodePDR(v[3].([]byte))
+		return e != nil
+	case KindAddPartition:
+		_, e1 := decodePDR(v[0].([]byte))
+		_, e2 := decodePoPs(v[1].([]byte))
+		return e1 != nil || e2 != nil
+	}
+	return false
+}
+
+// CheckRegistryChangesShape is the stateless list shape the fold requires (CheckRegistryChanges without verdict values and without
+// the scoped-singleton rule, which the fold judges defensively as Conflict).
+func CheckRegistryChangesShape(rc []RegistryChange) error {
+	cp := make([]RegistryChange, len(rc))
+	for i, c := range rc {
+		cp[i] = c
+		cp[i].Verdict = 0
+	}
+	if err := checkRegistryBounds(cp); err != nil {
+		return errors.Join(ErrFoldList, err)
+	}
+	return nil
+}
+
+func foldShard(in FoldInput, id uint64, k uint8, v []any, tentative map[ShardKey]*types.PartitionDescriptionRecord) uint8 {
+	key := ShardKey{uint32(v[0].(uint64)), string(v[1].([]byte))}
+	expected, succBytes := v[2].(Word), v[3].([]byte)
+	succ, err := decodePDR(succBytes)
+	if err != nil {
+		return VerdictMalformed
+	}
+	var pops []evmassign.PoP
+	if k == KindReplaceAggregator {
+		if pops, err = decodePoPs(v[4].([]byte)); err != nil {
+			return VerdictMalformed
+		}
+	}
+	cur := tentative[key]
+	// the target is an installed shard: one that exists only through an earlier Accepted AddPartition of this list is Invalid (FD-29), so
+	// a kind 6 or 8 change never needs an acknowledgement fact that does not exist yet, and an addition is always an epoch-0 creation
+	if cur == nil || in.Installed[key] == nil || cur.PartitionTypeID == evmassign.EVMPartitionTypeID {
+		return VerdictInvalid
+	}
+	h, err := evmassign.PDRHash(cur)
+	if err != nil || h != expected {
+		return VerdictConflict
+	}
+	if succ.NetworkID != cur.NetworkID || uint64(succ.NetworkID) != in.Network || succ.PartitionID != cur.PartitionID ||
+		!bytes.Equal(succ.ShardID.Bytes(), []byte(key.Shard)) || uint32(succ.PartitionID) != key.Partition {
+		return VerdictInvalid
+	}
+	switch k {
+	case KindReplaceAggregator:
+		if evmassign.ValidateSuccessor(cur, succ) != nil || ProofConfigValid(succ.PartitionParams) != nil {
+			return VerdictInvalid
+		}
+		if verifyChangePoPs(in, id, succ, succBytes, pops) != nil {
+			return VerdictBadPoP
+		}
+	case KindUpdatePartition:
+		if succ.IsValid() != nil || ProofConfigValid(succ.PartitionParams) != nil || succ.PartitionTypeID != cur.PartitionTypeID || succ.TypeIDLen != cur.TypeIDLen || succ.UnitIDLen != cur.UnitIDLen ||
+			cur.Epoch == ^uint64(0) || succ.Epoch != cur.Epoch+1 || succ.EpochStart != 0 || !sameValidators(cur.Validators, succ.Validators) ||
+			!executableSet(succ.Validators) {
+			return VerdictInvalid
+		}
+	}
+	tentative[key] = succ
+	return VerdictAccepted
+}
+
+func foldAdd(in FoldInput, id uint64, v []any, tentative map[ShardKey]*types.PartitionDescriptionRecord, added map[uint32]bool, reserved map[uint32]bool, count int) uint8 {
+	pdrBytes := v[0].([]byte)
+	pdr, err := decodePDR(pdrBytes)
+	if err != nil {
+		return VerdictMalformed
+	}
+	pops, err := decodePoPs(v[1].([]byte))
+	if err != nil {
+		return VerdictMalformed
+	}
+	p := uint32(pdr.PartitionID)
+	if added[p] {
+		return VerdictConflict
+	}
+	for k := range tentative {
+		if k.Partition == p {
+			return VerdictInvalid
+		}
+	}
+	// a new partition is one unsplit shard: its ShardID has zero bits, the only one-shard scheme (FD-30)
+	if reserved[p] || pdr.PartitionTypeID == evmassign.EVMPartitionTypeID || uint64(pdr.NetworkID) != in.Network || pdr.Epoch != 0 ||
+		pdr.EpochStart != 0 || pdr.ShardID.Length() != 0 || evmassign.ValidateAssignment(pdr) != nil || ProofConfigValid(pdr.PartitionParams) != nil {
+		return VerdictInvalid
+	}
+	if uint32(count+1) > in.PartitionCeiling {
+		return VerdictCeiling
+	}
+	if verifyChangePoPs(in, id, pdr, pdrBytes, pops) != nil {
+		return VerdictBadPoP
+	}
+	tentative[ShardKey{p, string(pdr.ShardID.Bytes())}] = pdr
+	added[p] = true
+	return VerdictAccepted
+}
+
+// AckGate is the shard acknowledgement gate at the Freeze block: every Accepted kind 6 or 8 change targets a shard X with
+// si.TR.Epoch == si.IR.Epoch for X (acked[X] true), and so does the EVM shard. It returns the first unacknowledged change index.
+func AckGate(rc []RegistryChange, verdicts []uint8, acked map[ShardKey]bool, evmAcked bool) (int, bool) {
+	if !evmAcked {
+		return -1, false
+	}
+	idx := make([]int, 0)
+	for i, c := range rc {
+		if verdicts[i] != VerdictAccepted || (uint8(c.Kind) != KindReplaceAggregator && uint8(c.Kind) != KindUpdatePartition) {
+			continue
+		}
+		idx = append(idx, i)
+	}
+	sort.Ints(idx)
+	for _, i := range idx {
+		v, err := DecodeChangePayload(uint8(rc[i].Kind), rc[i].Payload)
+		if err != nil || !acked[ShardKey{uint32(v[0].(uint64)), string(v[1].([]byte))}] {
+			return i, false
+		}
+	}
+	return 0, true
+}

@@ -245,6 +245,19 @@ func (c *CertRequestBuffer) Clear(ctx context.Context, partition types.Partition
 	rs.reset()
 }
 
+// ClearKey is Clear for a shard named by its key.
+func (c *CertRequestBuffer) ClearKey(ctx context.Context, key types.PartitionShardID) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if rs, ok := c.store[partitionShard{partition: key.PartitionID, shard: key.ShardID}]; ok {
+		switch rs.qState {
+		case QuorumAchieved, QuorumNotPossible:
+			c.responseDur.Record(ctx, time.Since(rs.start).Seconds())
+		}
+		rs.reset()
+	}
+}
+
 // get returns an existing store for shard or registers and returns a new one if none existed
 func (c *CertRequestBuffer) get(partition types.PartitionID, shard types.ShardID) *requestBuffer {
 	key := partitionShard{partition: partition, shard: shard.Key()}

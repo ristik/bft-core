@@ -123,8 +123,8 @@ func TestProducerIsDeterministic(t *testing.T) {
 	}
 	p1, _ := New(Config{Partition: 0x0a0b0c0d, ShardBits: 1})
 	p2, _ := New(Config{Partition: 0x0a0b0c0d, ShardBits: 1})
-	t1, _ := p1.TrustBaseCBOR()
-	t2, _ := p2.TrustBaseCBOR()
+	t1, _ := p1.TrustBaseBundle()
+	t2, _ := p2.TrustBaseBundle()
 	require.Equal(t, t1, t2)
 }
 

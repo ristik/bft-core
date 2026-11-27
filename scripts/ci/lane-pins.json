@@ -4,7 +4,7 @@
   "components": {
     "ureth": {
       "repository": "https://github.com/ristik/ureth.git",
-      "commit": "d41d5310329fb56ae288134a0261b234c16effc1",
+      "commit": "c91535bf306738655d06db0389e44ab0df57014e",
       "package": "unicity-reth",
       "cargoArgs": [
         "build",
@@ -14,7 +14,13 @@
         "unicity-reth"
       ],
       "features": "default (jemalloc)",
-      "note": "ureth unicity/main at the merge of #88 (protocol 6: BRIDGE_COMPOSE_V2 registered at 0x0105, the lineage relation of #84 with #86's oracle parity), on B7 PR 3 (#83: the 2 MiB envelope, #82, #81) and #75's transaction gossip",
+      "note": "ureth unicity/main at the merge of ureth#113 (c91535bf, bft-core#1319; it includes #114 5727b53f, the spec activation): record kind 9 PoPMissed in records.rs, the SealRegistry runtime 0x93dae8b0 of contracts 85950b44 and its hook fixtures. Previous: ureth unicity/main at the merge of ureth#112 (dc6763ae, bft-core#1286; tree = caaf5df6): the contracts' #1286 hook fixtures (hook-ack/elect/recovery, vr-hook-pos) as testdata; the binary and crates/unicity/b1 are unchanged. Previous: ureth unicity/main at the merge of ureth#111 (00c059e8, bft-core#1297): the SealRegistry runtime 0x8b3105bf of contracts #99 (the post-term evidence views) and the hook fixtures of contracts 6f73846; 0x0100 unchanged. Previous: bft-core#1294 pairs the checkout with the imported-tip B1 verifier. Previous: ureth#107 (VT-06c) supplies parent-state VR fees and the genesis fee identity fields. Previous pin: ureth unicity/main at the merge of ureth#103 (b8a50547: VT-14 VR batch pins on #102, the VT-02 hook, and #101, VT-15: record kinds 6 to 8 and the SealRegistry pin 0xebbadc64, the runtime this bft-core genesis carries), which includes ureth#97: the protocol 6/7 bridge precompile 0x0105 removed, so engineapi/profile.go no longer requires it (bft-core#1139; a consensus change, a fresh network generation). Before: ureth vt15/lane-pin (7fdc5a32): the lane pin 10552af2 plus the VT-15 commit of ristik/ureth#101, kept off unicity/main while engineapi still required 0x0105. Before: ureth unicity/main at the merge of ureth#94 (10552af2: the snapshots of the resealed corpus) on ureth#93 (870c1d01, the native B1 precompile on the upstream seal rule, 7,200 gas per supplied seal signature, protocol 7, bft-core#920)",
+      "nativePrecompiles": {
+        "unicity-b1-cert-batch-v2-tip": "0x0000000000000000000000000000000000000100",
+        "unicity-b1-membership": "0x0000000000000000000000000000000000000102",
+        "unicity-b2-sdk3": "0x0000000000000000000000000000000000000104"
+      },
+      "nativePrecompilesNote": "the Unicity native precompiles this ureth registers beside the pinned Cancun set (name: address, as eth_config reports them). scripts/ci/lane-product.sh compat requires the product's engineapi/profile.go unicityNativePrecompiles to be exactly this set, for the checkout and the pinned product (each against its own ureth); build-ureth.sh checks each name is a precompile id of the source it builds. 0x0105 (unicity-bridge-compose-v2) is gone since ureth#97",
       "targetedPackages": [
         "reth-unicity-b1",
         "reth-unicity-execution",
@@ -23,27 +29,46 @@
       ],
       "targetedNote": "the plan's targeted selectors (briefs/ci-lane-migration-plan.md section 1): any-age/batch/layout/provider vectors, system-hook ordering and gas, certified RPC/recovery, persistence. Not cargo test --workspace and no generic Ethereum suites."
     },
+    "bft-core": {
+      "repository": "https://github.com/ristik/bft-core.git",
+      "commit": "3d4fa198639c1a47d12c09171a1d2ea53d660e45",
+      "branch": "integration/enshrined-evm",
+      "note": "the frozen PoS release product SHA (deploy/testnet/evidence/release-manifest.md, arch plan section 10): enforced only when a run asks for product=pinned (a campaign run: dispatch input, or run-inputs.json on a ci-lane-run/** branch). Pull request, scheduled and default runs build the checkout under test and do not read this pin. In a pinned run ubft and the Go tools are built from a separate checkout of exactly this commit; the harness (scripts, workflow) stays the checkout's own. Its dependency set is dependencies below, not the components'",
+      "dependencies": {
+        "note": "the frozen product's own dependency set (deploy/testnet/evidence/release-manifest.md section 3, 2026-11-10): a product=pinned run builds and checks these commits instead of the components' (scripts/ci/lane-product.sh manifest). The product requires the protocol 6/7 bridge precompile 0x0105 and carries the pre-VT-15 SealRegistry, so it cannot run with the components' ureth (b8a50547, no 0x0105, bft-core#1139); moving the product pin is a release-process step, not a pin batch. The aggregator is paired with the product's root: the checkout's aggregator-go follows live shard configuration changes through the root's shard-aware POST /api/v1/q3/shard-conf (bft-core#1203), which the frozen product's root does not have, so the frozen product keeps the aggregator it was frozen with (and has no kind 6 or 8 change to follow). Components not named here (state-transition-sdk-js, the toolchains) are shared with the checkout product",
+        "ureth": {
+          "commit": "10552af21b31b2118c51d6215cd23cfb80faf33c",
+          "nativePrecompiles": {
+            "unicity-b1-cert-batch-v2": "0x0000000000000000000000000000000000000100",
+            "unicity-b1-membership": "0x0000000000000000000000000000000000000102",
+            "unicity-b2-sdk3": "0x0000000000000000000000000000000000000104",
+            "unicity-bridge-compose-v2": "0x0000000000000000000000000000000000000105"
+          }
+        },
+        "contracts": {
+          "commit": "7b510f6b5a9cf3987ccc5d7dc77d39f33de12330"
+        },
+        "aggregator-go": {
+          "commit": "b3909de4c8c0dc4682fbb6c7ff9732e7c1771207"
+        }
+      }
+    },
     "aggregator-go": {
       "repository": "https://github.com/ristik/aggregator-go.git",
-      "commit": "edb2274deb29f2621ceb31836ac3585bc4806239",
+      "commit": "4c54c8f440e7e33bc53a795556d1391102dc75fb",
       "branch": "integration/enshrined-evm"
     },
     "contracts": {
       "repository": "https://github.com/ristik/unicity-pos-contracts.git",
-      "commit": "be6e86fb2cbba828b3331822850f8af34bd0d0fd",
-      "note": "main at the contracts#77 merge (the testnet package's pin): on the protocol 6 vault (#67, #68) and contracts#53 (GovernanceParams #50, RewardPool #51), the RewardPool tail cap (#72: the tail closes up to the open result's reservation progress), the RejectResult fixtures (#74) and the election's outsider skip (#76); X4 #856 needs #72 for the closed intervals of the accumulated chain",
+      "commit": "9b02951640877d6b4054df2ab6fce307629d6e61",
+      "note": "contracts main at the merge of contracts#105 (9b029516, bft-core#1319; its sources are 85950b44: record kind 9 PoPMissed in the SealRegistry, VR and custody; ElectionPolicy.parkMissed parks a certified incumbent)",
       "branch": "main"
-    },
-    "native-bridge-plugins": {
-      "repository": "https://github.com/ristik/native-bridge-plugins.git",
-      "commit": "97f74161fbe0eb4921148d7fa2e4ea05e646f727",
-      "branch": "main",
-      "note": "the squash merge of nbp#52 (split PR5, protocol 6: the V2 composition, per-part redemption, anyage.ts on the (nonce, partId) return), on nbp#40 (B7 PR 3: profile v6, the 2 MiB envelope, long-history)"
     },
     "state-transition-sdk-js": {
       "repository": "https://github.com/ristik/state-transition-sdk-js.git",
-      "commit": "5742df42ca29e519ddf64a9ca533d7edac711d4b",
-      "branch": "integration/enshrined-evm"
+      "commit": "c5840ef5f59201c52ea6cf7034ee02cb48d54007",
+      "branch": "integration/enshrined-evm",
+      "note": "sdk-js#28 merge c5840ef5 on the integration branch: the reconciled 4.0.0 UTB v2 API (before: 75c5be7f, sdk-js#18)"
     }
   },
   "toolchains": {
@@ -74,12 +99,10 @@
   },
   "lane": {
     "aggShards": 2,
-    "note": "the aggregator partition runs as two bft-shard aggregators (0x40, 0xc0); the any-age L1 token spans both and one more token is redeemed through the SDK's consolidation (#526 step 4)",
+    "note": "the aggregator partition runs as two bft-shard aggregators (0x40, 0xc0); the UTB steps verify the aggregator's certificates under every shard's configuration. The protocol 6/7 bridge steps (the any-age L1 token over both shards, the consolidated and the long-history redemptions) and the native-bridge-plugins pin were removed with that bridge (bft-core#1106)",
     "txGossip": true,
     "evmT2Ms": 15000,
-    "evmT2Note": "the EVM shard's T2 in the CI lane (milliseconds; the Mac default stays 5000). After the recovery only 3 of the 4 enrolled validators run, so a round needs all three signatures and its latency is the slowest of three: measured first-UC-to-third-signature up to 14.3 s on a standard runner (bft-core#728, run 39554461091), while T2 = 5 s turned every late round into a permanent livelock. 15 s passed the combined lane with all steps; the margin over the measured tail is small, see #728.",
-    "longHistory": true,
-    "longHistoryNote": "B7 PR 3 (briefs/dev4-b7-pr3-plan.md 4.2): anyage_step_long_history redeems a token transferred live past every former bridge bound, one gas short (reverts, vault unchanged) and then funded. Needs the 0x0105 stack (ureth with BRIDGE_COMPOSE_V2 since protocol 6, contracts with the 0x0105 TokenVerifier) and the nbp driver's long-history command."
+    "evmT2Note": "the EVM shard's T2 in the CI lane (milliseconds; the Mac default stays 5000). After the recovery only 3 of the 4 enrolled validators run, so a round needs all three signatures and its latency is the slowest of three: measured first-UC-to-third-signature up to 14.3 s on a standard runner (bft-core#728, run 39554461091), while T2 = 5 s turned every late round into a permanent livelock. 15 s passed the combined lane with all steps; the margin over the measured tail is small, see #728."
   },
   "t6": {
     "comment": "T6 pins its own inputs in scripts/t6-rehearsal.sh (its defaults); they differ from the lane's on purpose and are not unified silently. check-pins.sh t6 refuses a script whose defaults differ from this record.",

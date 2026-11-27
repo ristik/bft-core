@@ -334,6 +334,9 @@ func TestBootstrapConnect_BootnodeIgnoresConnectionFailure(t *testing.T) {
 
 func TestProvidesAndDiscoverNodes(t *testing.T) {
 	log := logger.New(t)
+	// No TCP port reuse (#933): with it every dial leaves from the host's listen port, so when two of these hosts dial each other at the same moment (the DHT's
+	// gossip dial and the explicit Connect below do) the two connects become ONE TCP connection by simultaneous open, both ends play the TLS client, both dials fail
+	// and the explicit Connect then fails with "dial backoff". See TestCrossingConnectsFailWithPortReuse.
 	// See TestBootstrapNodes: scoped so the DHT workers built from this context do not outlive
 	// the test (#100 item 2).
 	ctx, cancel := context.WithCancel(context.Background())
@@ -341,14 +344,14 @@ func TestProvidesAndDiscoverNodes(t *testing.T) {
 
 	bootStrapPeerConf, err := NewPeerConfiguration(randomTestAddressStr, nil, generateKeyPair(t), nil, nil)
 	require.NoError(t, err)
-	bootstrapNode, err := NewPeer(ctx, bootStrapPeerConf, log, nil)
+	bootstrapNode, err := newPeer(ctx, bootStrapPeerConf, log, nil, noTCPPortReuse)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = bootstrapNode.Close() }) // was leaked
 	bootstrapNodeAddrInfo := []peer.AddrInfo{{ID: bootstrapNode.ID(), Addrs: bootstrapNode.MultiAddresses()}}
 
 	peerConf1, err := NewPeerConfiguration(randomTestAddressStr, nil, generateKeyPair(t), bootstrapNodeAddrInfo, nil)
 	require.NoError(t, err)
-	peer1, err := NewPeer(ctx, peerConf1, log, nil)
+	peer1, err := newPeer(ctx, peerConf1, log, nil, noTCPPortReuse)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = peer1.Close() })
 
@@ -357,14 +360,14 @@ func TestProvidesAndDiscoverNodes(t *testing.T) {
 
 	peerConf2, err := NewPeerConfiguration(randomTestAddressStr, nil, generateKeyPair(t), bootstrapNodeAddrInfo, nil)
 	require.NoError(t, err)
-	peer2, err := NewPeer(ctx, peerConf2, log, nil)
+	peer2, err := newPeer(ctx, peerConf2, log, nil, noTCPPortReuse)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = peer2.Close() })
 	all["peer2"] = peer2
 
 	peerConf3, err := NewPeerConfiguration(randomTestAddressStr, nil, generateKeyPair(t), bootstrapNodeAddrInfo, nil)
 	require.NoError(t, err)
-	peer3, err := NewPeer(ctx, peerConf3, log, nil)
+	peer3, err := newPeer(ctx, peerConf3, log, nil, noTCPPortReuse)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = peer3.Close() })
 	all["peer3"] = peer3

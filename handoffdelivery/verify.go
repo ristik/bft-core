@@ -247,7 +247,7 @@ func AssignmentStepOf(b Bundle, v Verified) (handoff.AssignmentStep, error) {
 		step.OldActiveConfHash, step.NewActiveConfHash = installed, installed
 		return step, nil
 	}
-	c, err := evmassign.DecodeCandidate(b.Candidate)
+	c, err := evmassign.DecodeCommittedCandidate(b.Candidate)
 	if err != nil {
 		return step, errors.Join(ErrBundle, err)
 	}

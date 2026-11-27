@@ -3,11 +3,8 @@ package archivewiring
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"os"
-	"path/filepath"
 	"reflect"
 	"sync"
 	"testing"
@@ -422,11 +419,10 @@ func TestSelectedRepresentationMissingAfterReopenStaysUnavailable(t *testing.T) 
 	h.finalized = 2 // keep block 2 hot: the frontier stops at the finality bound and block 2 is not pruned yet
 	h.reopenSender(t, localDir)
 	// lose A's object (the base object B stays)
-	enc, err := archive.EncodeRequest(h.qBlock)
+	paths, err := archive.RecordPaths(localDir, h.qBlock, &h.digestA)
 	require.NoError(t, err)
-	sum := sha256.Sum256(enc)
-	for _, name := range []string{"v2-" + hex.EncodeToString(sum[:]) + "-" + hex.EncodeToString(h.digestA[:])} {
-		require.NoError(t, os.RemoveAll(filepath.Join(localDir, name)))
+	for _, p := range paths {
+		require.NoError(t, os.RemoveAll(p))
 	}
 	_, err = h.local.GetExact(h.qBlock, h.digestA)
 	require.Error(t, err)
@@ -694,10 +690,11 @@ func TestServerDefaultReadOfAMissingSelectedObjectIsUnavailable(t *testing.T) {
 	})
 	srv.Register(ctx, server)
 	localDir := reflect.ValueOf(h.local).Elem().FieldByName("dir").String()
-	enc, err := archive.EncodeRequest(h.qBlock)
+	paths, err := archive.RecordPaths(localDir, h.qBlock, &h.digestA)
 	require.NoError(t, err)
-	sum := sha256.Sum256(enc)
-	require.NoError(t, os.RemoveAll(filepath.Join(localDir, "v2-"+hex.EncodeToString(sum[:])+"-"+hex.EncodeToString(h.digestA[:]))))
+	for _, p := range paths {
+		require.NoError(t, os.RemoveAll(p))
+	}
 	_, err = Fetch(ctx, client, server.ID(), h.qBlock, DefaultLimits())
 	require.Error(t, err, "the default read does not answer B in A's place")
 	got, err := FetchExact(ctx, client, server.ID(), h.qBlock, h.digestB, DefaultLimits())

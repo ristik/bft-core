@@ -1,0 +1,132 @@
+package vradmit
+
+import (
+	"testing"
+
+	"github.com/unicitynetwork/bft-go-base/types"
+	"github.com/unicitynetwork/bft-go-base/types/hex"
+
+	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/vrschema"
+)
+
+func schedChange(t *testing.T, id uint64, rule string, release byte, epoch uint64) vrschema.RegistryChange {
+	p, err := vrschema.EncodeChange(vrschema.KindScheduleActivation, vrschema.RuleID(rule), vrschema.Word{release}, epoch, uint64(5000), "x")
+	require.NoError(t, err)
+	return vrschema.RegistryChange{ID: id, Kind: uint64(vrschema.KindScheduleActivation), Payload: p}
+}
+
+// The root-history transitions of the activation schedule (design section 7.1): staged at the Freeze, committed at H, a postponement
+// supersedes, the latch at the commit into E is permanent and survives the encoding, a recovery's second commit changes nothing, and the
+// state round-trips canonically.
+func TestRootScheduleStageCommitPostponeLatch(t *testing.T) {
+	a := vrschema.RuleID("a")
+	s := GenesisRootState(1, 4)
+	s, err := s.StageSchedule([]vrschema.RegistryChange{schedChange(t, 1, "a", 1, 9), schedChange(t, 2, "b", 1, 9)}, []uint8{vrschema.VerdictAccepted, vrschema.VerdictPastCutoff})
+	require.NoError(t, err)
+	require.Len(t, s.StagedSchedule, 1, "only the Accepted entry")
+	_, err = s.StageSchedule(nil, []uint8{1})
+	require.Error(t, err)
+	s.StagedBody, s.StagedResult = [32]byte{1}, vrschema.Word{1}
+	raw, err := s.Encode()
+	require.NoError(t, err)
+	back, err := DecodeRootState(raw)
+	require.NoError(t, err)
+	require.Equal(t, s.StagedSchedule, back.StagedSchedule)
+
+	s, err = s.CommitSchedule(2) // H into epoch 2
+	require.NoError(t, err)
+	require.Len(t, s.Schedule, 1)
+	require.Equal(t, vrschema.ActActive, s.Schedule[0].State)
+	again, err := s.CommitSchedule(2) // the recovery's second commit of the same result
+	require.NoError(t, err)
+	require.Equal(t, s.Schedule, again.Schedule, "idempotent by change id")
+
+	// a postponement supersedes the effective entry
+	s.StagedSchedule = nil
+	s, err = s.StageSchedule([]vrschema.RegistryChange{schedChange(t, 7, "a", 2, 12)}, []uint8{vrschema.VerdictAccepted})
+	require.NoError(t, err)
+	s, err = s.CommitSchedule(5)
+	require.NoError(t, err)
+	eff := vrschema.Effective(s.Schedule)
+	require.EqualValues(t, 12, eff[a].RootEpoch)
+	require.Equal(t, vrschema.ActSuperseded, s.Schedule[0].State)
+
+	// the commit into an epoch >= E latches, permanently; afterwards a postponement is refused by the fold
+	s.StagedSchedule = nil
+	s, err = s.CommitSchedule(12)
+	require.NoError(t, err)
+	require.Equal(t, vrschema.ActLatched, vrschema.Effective(s.Schedule)[a].State)
+	require.Equal(t, vrschema.VerdictLatched, vrschema.ScheduleVerdict(vrschema.Schedule{RuleID: a, RootEpoch: 30}, 13, vrschema.Effective(s.Schedule)))
+	raw, err = s.Encode()
+	require.NoError(t, err)
+	back, err = DecodeRootState(raw)
+	require.NoError(t, err)
+	require.Equal(t, s.Schedule, back.Schedule)
+
+	// a staged schedule without a staged body is not a state
+	bad := GenesisRootState(1, 4)
+	bad.StagedSchedule = []vrschema.Activation{{RuleID: a, RootEpoch: 9, State: vrschema.ActActive, ChangeID: 1}}
+	_, err = bad.Encode()
+	require.ErrorIs(t, err, ErrRootState)
+}
+
+// The table is bounded at 64: an entry past the bound (which VR's queue-time check makes unreachable) is ignored identically, never a halt.
+func TestRootScheduleBoundIsIgnoredNotFatal(t *testing.T) {
+	s := GenesisRootState(1, 4)
+	for i := 0; i < vrschema.MaxActivations; i++ {
+		s.Schedule = append(s.Schedule, vrschema.Activation{RuleID: vrschema.RuleID(string(rune('a' + i))), RootEpoch: 90, State: vrschema.ActActive, ChangeID: uint64(i + 1)})
+	}
+	s.StagedBody, s.StagedResult = [32]byte{1}, vrschema.Word{1}
+	s.StagedSchedule = []vrschema.Activation{{RuleID: vrschema.RuleID("over"), RootEpoch: 95, State: vrschema.ActActive, ChangeID: 99}}
+	next, err := s.CommitSchedule(2)
+	require.NoError(t, err)
+	require.Len(t, next.Schedule, vrschema.MaxActivations)
+	_, err = next.Encode()
+	require.NoError(t, err)
+}
+
+// A version 1 root state (a checkpoint of the release before the committed schedule) is refused with a clear message: it cannot be
+// continued, a new generation is required (astra 5). The bytes are a real v1 encoding of the previous release's wire.
+func TestRootStateV1CheckpointIsRefused(t *testing.T) {
+	type v1Wire struct {
+		_             struct{} `cbor:",toarray"`
+		Domain        string
+		Version       uint64
+		Backoff       hex.Bytes
+		OpenUCTime    uint64
+		Support       hex.Bytes
+		Acknowledged  hex.Bytes
+		PrepareUCTime uint64
+		StagedBody    hex.Bytes
+		StagedResult  hex.Bytes
+		StagedBitmap  uint64
+		StagedSupport hex.Bytes
+		AttemptOpen   uint64
+		AttemptOpenUC uint64
+	}
+	g := GenesisRootState(1, 4)
+	b, err := g.Backoff.Encode()
+	require.NoError(t, err)
+	tab, err := g.Support.Encode()
+	require.NoError(t, err)
+	raw, err := types.Cbor.Marshal(v1Wire{Domain: rootStateDomain, Version: 1, Backoff: b, Support: tab, Acknowledged: g.Acknowledged[:],
+		StagedBody: make([]byte, 32), StagedResult: make([]byte, 32), StagedSupport: tab})
+	require.NoError(t, err)
+	_, err = DecodeRootState(raw)
+	require.ErrorIs(t, err, ErrRootStateV1)
+	require.ErrorIs(t, err, ErrRootState)
+	require.Contains(t, err.Error(), "new generation is required")
+}
+
+// K's Freeze evidence (fresh commitments and K readiness by K's exact bindings) is extracted; a commitment of a binding outside K is not.
+func TestKEvidenceSupportKeepsOnlyKBindings(t *testing.T) {
+	w := newWorld(t)
+	rule := vrschema.RuleID("a")
+	in := SupportInput{Network: fxNetwork, K: w.k, J: w.j, Evidence: vrschema.RuleSupportEvidence{
+		Fresh: []vrschema.SupportCommitment{w.commitment(w.k[0], rule), w.commitment(w.j[3], rule)}}}
+	got, err := KEvidenceSupport(in)
+	require.NoError(t, err)
+	require.Len(t, got.Entries, 1)
+	require.Equal(t, w.k[0].StakingID, got.Entries[0].StakingID)
+}

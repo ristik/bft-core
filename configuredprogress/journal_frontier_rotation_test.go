@@ -230,7 +230,7 @@ func TestAcknowledgmentFromRetiredReplicaIsRefusedAfterTheChange(t *testing.T) {
 	}
 	forged := j.second.Anchor
 	forged.Acks[1].Replica = "second"
-	_, err = frontier.Encode(forged, *s.frontier)
+	_, err = frontier.Encode(forged, *s.frontierP())
 	require.ErrorIs(t, err, frontier.ErrContext, "the encoder never writes a retired replica's acknowledgment")
 }
 
@@ -269,7 +269,7 @@ func TestMalformedReplicaPairChangeIsRefusedAtStartup(t *testing.T) {
 	} {
 		s, err := j.reopen(t, tc.replicas, &namedAvailability{}, nil)
 		require.ErrorIs(t, err, tc.want, name)
-		require.Nil(t, s.frontier, name)
+		require.Nil(t, s.frontierP(), name)
 		_, err = s.LoadFrontier(ctx, j.c, j.limits)
 		require.ErrorIs(t, err, ErrSettings, name)
 		require.NoError(t, s.Close(), name)

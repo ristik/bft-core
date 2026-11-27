@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
+	"time"
 
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/q3active"
@@ -26,11 +28,33 @@ type rootQ3API struct {
 	Trust  func(epoch uint64) (*types.RootTrustBaseV1, error)
 	// ShardConfig is the shard configuration this root's derived index holds for a shard epoch of the (whole-partition) shard of a partition: the file an
 	// authority is advanced into (`signing-authority advance-epoch --shard-conf`). Nil: the endpoint refuses.
-	ShardConfig func(partition types.PartitionID, epoch uint64) (*types.PartitionDescriptionRecord, error)
+	ShardConfig func(partition types.PartitionID, shard types.ShardID, epoch uint64) (*types.PartitionDescriptionRecord, error)
 }
 
 func (a rootQ3API) register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/q3/status", q3Endpoint(func(context.Context, json.RawMessage) (any, error) { return a.statusResponse() }))
+	// Bound the long polls separately from ordinary operator requests. The hold
+	// fits under root-node's five-second write deadline.
+	activationWaiters := make(chan struct{}, 4)
+	mux.HandleFunc("POST /api/v1/q3/wait-activation", q3BodyEndpoint(func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var in q3EpochRequest
+		if err := json.Unmarshal(raw, &in); err != nil {
+			return nil, q3BadRequest{err}
+		}
+		select {
+		case activationWaiters <- struct{}{}:
+			defer func() { <-activationWaiters }()
+		default:
+			return nil, q3ServerError{errors.New("activation wait capacity exhausted")}
+		}
+		wait, cancel := context.WithTimeout(ctx, 4*time.Second)
+		defer cancel()
+		epoch, err := a.Rt.WaitActivation(wait, in.Epoch)
+		if errors.Is(err, context.DeadlineExceeded) {
+			err = nil
+		}
+		return q3EpochRequest{Epoch: epoch}, err
+	}))
 	mux.HandleFunc("POST /api/v1/q3/activation", q3Endpoint(func(_ context.Context, raw json.RawMessage) (any, error) {
 		var in q3EpochRequest
 		if err := json.Unmarshal(raw, &in); err != nil {
@@ -58,24 +82,45 @@ func (a rootQ3API) register(mux *http.ServeMux) {
 		return q3HistoryResponse{Entries: entries}, err
 	}))
 	mux.HandleFunc("POST /api/v1/q3/signers", q3Endpoint(func(context.Context, json.RawMessage) (any, error) { return a.signers() }))
-	mux.HandleFunc("POST /api/v1/q3/shard-conf", q3Endpoint(func(_ context.Context, raw json.RawMessage) (any, error) {
-		var in q3ShardConfRequest
-		if err := json.Unmarshal(raw, &in); err != nil {
-			return nil, err
+	mux.HandleFunc("POST /api/v1/q3/shard-conf", q3BodyEndpoint(func(_ context.Context, raw json.RawMessage) (any, error) {
+		var req struct {
+			Partition *uint32 `json:"partition"`
+			Shard     string  `json:"shard"`
+			Epoch     *uint64 `json:"epoch"`
 		}
+		if err := json.Unmarshal(raw, &req); err != nil || req.Partition == nil || req.Epoch == nil {
+			return nil, q3BadRequest{errors.New("the body must be a JSON object with partition and epoch (and optionally shard)")}
+		}
+		in := q3ShardConfRequest{Partition: *req.Partition, Shard: req.Shard, Epoch: *req.Epoch}
 		if a.ShardConfig == nil {
 			return nil, errors.New("this root serves no shard configurations")
 		}
-		pdr, err := a.ShardConfig(types.PartitionID(in.Partition), in.Epoch)
-		if err != nil || pdr == nil {
-			return nil, fmt.Errorf("no configuration for partition %d shard epoch %d: %v", in.Partition, in.Epoch, err)
+		var shard types.ShardID
+		if in.Shard != "" {
+			if len(in.Shard) > maxShardTextLen {
+				return nil, fmt.Errorf("shard: more than %d characters", maxShardTextLen)
+			}
+			if err := shard.UnmarshalText([]byte(in.Shard)); err != nil {
+				return nil, fmt.Errorf("shard: %w", err)
+			}
+		}
+		pdr, err := a.ShardConfig(types.PartitionID(in.Partition), shard, in.Epoch)
+		if err != nil {
+			return nil, q3ServerError{fmt.Errorf("reading the configuration of partition %d shard epoch %d: %w", in.Partition, in.Epoch, err)}
+		}
+		if pdr == nil { // a successful lookup that found nothing: the only 422 of this route besides invalid input
+			return nil, fmt.Errorf("no configuration for partition %d shard epoch %d", in.Partition, in.Epoch)
 		}
 		return pdr, nil
 	}))
 }
 
+// maxShardTextLen bounds the hex text of a ShardID a request carries (the longest id is far shorter; the bound is before any decoding).
+const maxShardTextLen = 128
+
 type q3ShardConfRequest struct {
 	Partition uint32 `json:"partition"`
+	Shard     string `json:"shard,omitempty"` // the ShardID in hex text form; empty: the unsplit shard
 	Epoch     uint64 `json:"epoch"`
 }
 
@@ -106,6 +151,43 @@ type q3StatusResponse struct {
 	Staged      *q3StagedResponse `json:"staged,omitempty"`
 	ActiveEpoch uint64            `json:"activeEpoch"`
 	Follower    bool              `json:"follower,omitempty"` // this root is not in the installed committee: it follows, stages and signs nothing
+	// Switch is the in-process epoch switch (#1086), present when this root switches in process: the drive waits for it instead of
+	// restarting the root
+	Switch *q3SwitchResponse `json:"switch,omitempty"`
+	// HandoffRefused are the handoff records this root's leader leaves out because its own executor refuses them, the way every root
+	// would (#1306): a refused Prepare or Freeze leaves the election result to expire through RejectResult
+	HandoffRefused []q3HandoffRefusedResponse `json:"handoffRefused,omitempty"`
+}
+
+// q3HandoffRefusedResponse is one refused handoff record: its kind, epoch, attempt and successor body, the VR intent and result when known,
+// the executor's reason, and the leader rounds that left it out.
+type q3HandoffRefusedResponse struct {
+	Kind       string `json:"kind"`
+	Epoch      uint64 `json:"epoch"`
+	Attempt    uint64 `json:"attempt"`
+	Body       string `json:"body"`
+	Intent     string `json:"intent,omitempty"`
+	Result     string `json:"result,omitempty"`
+	Reason     string `json:"reason"`
+	FirstRound uint64 `json:"firstRound"`
+	LastRound  uint64 `json:"lastRound"`
+	Count      uint64 `json:"count"`
+}
+
+// q3SwitchResponse is the in-process epoch switch's state: running, switching, following or faulted, the epoch of the published context
+// and the target of the last switch.
+type q3SwitchResponse struct {
+	Phase  string `json:"phase"`
+	Epoch  uint64 `json:"epoch"`
+	Target uint64 `json:"target,omitempty"`
+	TookMs int64  `json:"tookMs,omitempty"`
+	Error  string `json:"error,omitempty"`
+	// Declined is a committed activation this root does not switch into in process (it installs across a restart), and why
+	Declined       uint64 `json:"declined,omitempty"`
+	DeclinedReason string `json:"declinedReason,omitempty"`
+	// Acquires says a root that does not hold the commit itself (a joiner, a follower, a lagging member) also switches in process, from an
+	// activation a root peer serves (#1086, PR 2); without it such a root installs across a restart
+	Acquires bool `json:"acquires,omitempty"`
 }
 
 func (a rootQ3API) statusResponse() (q3StatusResponse, error) {
@@ -114,6 +196,19 @@ func (a rootQ3API) statusResponse() (q3StatusResponse, error) {
 		return q3StatusResponse{}, err
 	}
 	out := q3StatusResponse{Network: st.Network, Genesis: hex.EncodeToString(st.Genesis[:]), ActiveEpoch: st.ActiveEpoch, Follower: st.Follower}
+	if st.InProcessSwitch {
+		out.Switch = &q3SwitchResponse{Phase: st.Switch.Phase.String(), Epoch: st.Switch.Epoch, Target: st.Switch.Target,
+			TookMs: st.Switch.Took.Milliseconds(), Error: st.Switch.Err, Declined: st.Switch.Declined, DeclinedReason: st.Switch.DeclinedReason,
+			Acquires: st.AcquiresActivations}
+	}
+	for _, r := range st.HandoffRefused {
+		e := q3HandoffRefusedResponse{Kind: r.Kind, Epoch: r.Epoch, Attempt: r.Attempt, Body: hex.EncodeToString(r.Body[:]), Reason: r.Reason,
+			FirstRound: r.FirstRound, LastRound: r.LastRound, Count: r.Count}
+		if r.Intent != ([32]byte{}) {
+			e.Intent, e.Result = hex.EncodeToString(r.Intent[:]), hex.EncodeToString(r.Result[:])
+		}
+		out.HandoffRefused = append(out.HandoffRefused, e)
+	}
 	if st.Staged != nil {
 		out.Staged = &q3StagedResponse{CandidateDigest: hex.EncodeToString(st.Staged.CandidateDigest[:]),
 			BodyID: hex.EncodeToString(st.Staged.BodyID[:]), Attempt: &st.Staged.Attempt, Config: hex.EncodeToString(st.Staged.Config[:])}
@@ -161,19 +256,58 @@ func (a rootQ3API) signers() (q3SignersResponse, error) {
 	return out, nil
 }
 
-// q3Endpoint wraps a read function as a local-operator JSON endpoint.
+// q3ServerError marks a failure of the read itself (a store error), as opposed to invalid input or a clean miss (both 422).
+type q3ServerError struct{ error }
+
+func (e q3ServerError) Unwrap() error { return e.error }
+
+// q3BadRequest marks a request that is not well formed (a missing or invalid body): 400, not a lookup.
+type q3BadRequest struct{ error }
+
+func (e q3BadRequest) Unwrap() error { return e.error }
+
+// q3Endpoint wraps a read function as a local-operator JSON endpoint; a missing or invalid body is read as an empty object.
 func q3Endpoint(f func(ctx context.Context, body json.RawMessage) (any, error)) http.HandlerFunc {
+	return q3Handler(f, false)
+}
+
+// q3BodyEndpoint is q3Endpoint for a read that needs its body: a missing or invalid one is a 400.
+func q3BodyEndpoint(f func(ctx context.Context, body json.RawMessage) (any, error)) http.HandlerFunc {
+	return q3Handler(f, true)
+}
+
+func q3Handler(f func(ctx context.Context, body json.RawMessage) (any, error), bodyRequired bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !localOperatorRequest(w, r) {
 			return
 		}
 		var body json.RawMessage
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil {
+		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16))
+		err := dec.Decode(&body)
+		if err == nil && bodyRequired {
+			// exactly one JSON value: anything after it (but whitespace) makes the request malformed
+			var extra json.RawMessage
+			if again := dec.Decode(&extra); again != io.EOF {
+				err = errors.New("trailing data after the JSON body")
+			}
+		}
+		if err != nil {
+			if bodyRequired {
+				http.Error(w, "the request body is missing, is not JSON, or has data after the JSON value", http.StatusBadRequest)
+				return
+			}
 			body = json.RawMessage(`{}`)
 		}
 		out, err := f(r.Context(), body)
 		if err != nil {
-			http.Error(w, fmt.Sprint(err), http.StatusUnprocessableEntity)
+			status := http.StatusUnprocessableEntity
+			switch {
+			case errors.As(err, new(q3ServerError)):
+				status = http.StatusInternalServerError // the read itself failed: a reader retries, it does not conclude the answer is "none"
+			case errors.As(err, new(q3BadRequest)):
+				status = http.StatusBadRequest
+			}
+			http.Error(w, fmt.Sprint(err), status)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")

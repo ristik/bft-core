@@ -1,3 +1,7 @@
+# Operating a validator
+
+See the [operations index](docs/operations/README.md) for the validator and Foundation handbooks.
+
 # Build
 
 Run `make build` to build the application. Executable will be built to `build/ubft`.

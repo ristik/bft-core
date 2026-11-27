@@ -48,10 +48,10 @@ func Test_Followup_RecoveryRetainedParentMustMatchStaleQC(t *testing.T) {
 	}
 
 	// the safety module reads the parent timestamp of a block it signs from the manager's block store: the honest branch is in `bs`
-	own := cm.blockStore
-	cm.blockStore = bs
+	own := cm.blockStore()
+	cm.storeRef.Store(bs)
 	vote5, err := cm.safety.MakeVote(b5, root5, b5.Qc, mkTC(4, b5.Qc))
-	cm.blockStore = own
+	cm.storeRef.Store(own)
 	require.NoError(t, err)
 	qc5 := drctypes.NewQuorumCertificateFromVote(vote5.VoteInfo, vote5.LedgerCommitInfo, map[string]hex.Bytes{vote5.Author: vote5.Signature})
 	require.NoError(t, qc5.Verify(cm.trustBase.Load()))
@@ -59,7 +59,7 @@ func Test_Followup_RecoveryRetainedParentMustMatchStaleQC(t *testing.T) {
 	b7.Round, b7.Timestamp, b7.Qc = 7, b5.Timestamp+2, qc5
 	f.state.Pending = append(f.state.Pending, b5, b7)
 	require.NoError(t, f.state.Verify(cm.params.HashAlgorithm, cm.trustBase.Load(), cm.trustBaseStore.GenesisPin()))
-	require.NoError(t, storage.ValidateRecoveryState(cm.params.HashAlgorithm, f.state, 4, cm.orchestration, cm.blockStore.GetDB(), func(bs *storage.BlockStore) (storage.IRChangeReqVerifier, error) {
+	require.NoError(t, storage.ValidateRecoveryState(cm.params.HashAlgorithm, f.state, 4, cm.orchestration, cm.blockStore().GetDB(), func(bs *storage.BlockStore) (storage.IRChangeReqVerifier, error) {
 		return NewIRChangeReqVerifier(cm.params, bs)
 	}, cm.log))
 	// A signed round-8 proposal extends the honest QC4; recovery installs a higher QC5 from the other branch.
@@ -68,11 +68,11 @@ func Test_Followup_RecoveryRetainedParentMustMatchStaleQC(t *testing.T) {
 	prop := f.signed(b8, mkTC(7, f.qc4))
 	f.ingress(prop)
 	err = cm.onStateResponse(f.ctx, f.state)
-	require.EqualValues(t, 5, cm.blockStore.GetHighQc().GetRound())
-	parent, readErr := cm.blockStore.Block(4)
+	require.EqualValues(t, 5, cm.blockStore().GetHighQc().GetRound())
+	parent, readErr := cm.blockStore().Block(4)
 	require.NoError(t, readErr)
 	require.Error(t, storage.CheckQcOfBlock(f.qc4, parent), "recovered parent does not match the signed QC")
-	served, serveErr := cm.blockStore.GetState()
+	served, serveErr := cm.blockStore().GetState()
 	require.NoError(t, serveErr)
 	validationErr := storage.ValidateRecoveryState(cm.params.HashAlgorithm, served, 4, cm.orchestration, f.peerDB, func(bs *storage.BlockStore) (storage.IRChangeReqVerifier, error) {
 		return NewIRChangeReqVerifier(cm.params, bs)
@@ -82,6 +82,6 @@ func Test_Followup_RecoveryRetainedParentMustMatchStaleQC(t *testing.T) {
 	require.Error(t, err, "must refuse replay on a retained parent/QC mismatch even with a higher QC")
 	require.Empty(t, f.votes(), "must not vote on top of a mismatched recovered parent")
 	require.True(t, cm.recovery.InRecovery(), "recovery is restarted")
-	_, addErr := cm.blockStore.Block(8)
+	_, addErr := cm.blockStore().Block(8)
 	require.Error(t, addErr, "the proposal was not executed")
 }

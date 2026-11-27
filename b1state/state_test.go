@@ -29,7 +29,7 @@ func fixtureEntry(epoch, start uint64) Entry {
 // All pins here identify synthetic fixtures, not a PR3 runtime or production profile.
 // fixtureProfile's argument is B, the epochs one block may install.
 func fixtureProfile(b uint64) Profile {
-	p := Profile{Network: 3, RootGenesisID: [32]byte{1}, ExecutionChainID: 2, RuntimeHash: [32]byte{3}, CompilerHash: [32]byte{4}, MaxEpochsPerUpdate: b, DeltaEV: 1, DeltaHold: 2, RestGas: 100, CompanionBytes: 1000000, OtherCompanionBytes: 1024, OrdinaryCapacity: 7000000, GenesisUCTime: 1000}
+	p := Profile{ExecutionRevision: CurrentExecutionRevision, Network: 3, RootGenesisID: [32]byte{1}, ExecutionChainID: 2, RuntimeHash: [32]byte{3}, CompilerHash: [32]byte{4}, MaxEpochsPerUpdate: b, DeltaEV: 1, DeltaHold: 2, RestGas: 100, CompanionBytes: 1000000, OtherCompanionBytes: 1024, OrdinaryCapacity: 7000000, GenesisUCTime: 1000}
 	p.SystemGas, _ = p.RequiredSystemGas()
 	p.MaxGas = p.SystemGas + p.OrdinaryCapacity
 	return p
@@ -328,7 +328,7 @@ func TestTheElectionHookIsPartOfTheProfile(t *testing.T) {
 		t.Fatal("the election hook is in the hash", err)
 	}
 	// pinned: the enabled form is a new encoding (three more items), so its hash is a fixed vector
-	if got := fmt.Sprintf("%x", withHash); got != "a02cc2e1ca3446613cb8fef331d6cc75afcb3bb867f1aa4d22db1fd1b50ad743" {
+	if got := fmt.Sprintf("%x", withHash); got != "c0d40917adcd5cddadb2af6cd70be22d68d0f212d47640b94f5ddcafa7af9c09" {
 		t.Fatal("the profile with the election hook hashes as the pinned vector, got", got)
 	}
 	// each pin changes the hash alone

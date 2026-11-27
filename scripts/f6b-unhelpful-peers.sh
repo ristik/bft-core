@@ -33,6 +33,7 @@
 # Needs:  a pinned reth, curl, openssl, python3, go, and a built ./build/ubft. Run from the repo root.
 
 set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/lane-slot.sh" || exit 2   # LANE_SLOT: every port below is shifted into this lane's slot
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 selfTest=false
@@ -42,12 +43,12 @@ validators=${1:-3}
 bystanders=2
 partitionID=8
 chainID=31337
-rethEngineBase=18551
-rethEthBase=18545
-rethP2PBase=30401
-bystEthBase=18565
-bystP2PBase=30421
-rootBootPort=26662
+rethEngineBase=$((18551+LANE_PORT_OFFSET))
+rethEthBase=$((18545+LANE_PORT_OFFSET))
+rethP2PBase=$((30401+LANE_PORT_OFFSET))
+bystEthBase=$((18565+LANE_PORT_OFFSET))
+bystP2PBase=$((30421+LANE_PORT_OFFSET))
+rootBootPort=$((26662+LANE_PORT_OFFSET))
 
 failures=0
 reached="startup"
@@ -75,7 +76,7 @@ pinnedRethCommit=$URETH_PIN_COMMIT
 # devnet this run did not create. See refuseStaleListeners.
 refuseStaleListeners $(seq -s" " "$rethEngineBase" $((rethEngineBase + validators - 1))) $(seq -s" " "$rethEthBase" $((rethEthBase + validators - 1))) $(seq -s" " "$bystEthBase" $((bystEthBase + bystanders - 1))) || exit 1
 
-stale=$(pgrep -f 'ubft shard-node run' 2>/dev/null || true)
+stale=$(for p in $(pgrep -f 'ubft shard-node run' 2>/dev/null); do [ "$(readlink "/proc/$p/cwd" 2>/dev/null)" = "$(pwd -P)" ] && echo "$p"; done)   # this checkout's only (other lane slots run concurrently)
 if [ -n "$stale" ]; then
   echo "refusing to start: shard-node processes are already running (pids: $(echo $stale | tr '\n' ' '))" >&2
   echo "  stop them from the checkout that started them (./stop-evm.sh -a there); do not kill them by name" >&2
@@ -162,6 +163,7 @@ for i in $(seq 1 "$validators"); do
   extra=(--no-persist-peers)
   [ "$i" = "1" ] && extra+=(--log.stdout.filter debug)
   registry_layout_require || exit 1
+  lane_preflight_ports "reth$i" $((rethEngineBase + i - 1)) $((rethEthBase + i - 1)) "$((rethP2PBase + i - 1))@0.0.0.0" || exit 1
   "$URETH_BIN" node --chain "$chainSpec" --datadir "test-nodes/reth$i/dd" \
     --authrpc.jwtsecret "test-nodes/evm$i/jwt.hex" \
     --authrpc.addr 127.0.0.1 --authrpc.port $((rethEngineBase + i - 1)) \
@@ -181,9 +183,10 @@ for i in $(seq 1 "$bystanders"); do
   mkdir -p "test-nodes/byst$i"
   openssl rand -hex 32 >"test-nodes/byst$i/jwt.hex"
   registry_layout_require || exit 1
+  lane_preflight_ports "bystander reth$i" $(((18581+LANE_PORT_OFFSET) + i - 1)) $((bystEthBase + i - 1)) "$((bystP2PBase + i - 1))@0.0.0.0" || exit 1
   "$URETH_BIN" node --chain "$chainSpec" --datadir "test-nodes/byst$i/dd" \
     --authrpc.jwtsecret "test-nodes/byst$i/jwt.hex" \
-    --authrpc.addr 127.0.0.1 --authrpc.port $((18581 + i - 1)) \
+    --authrpc.addr 127.0.0.1 --authrpc.port $(((18581+LANE_PORT_OFFSET) + i - 1)) \
     --http --http.addr 127.0.0.1 --http.port $((bystEthBase + i - 1)) \
     --http.api eth,net,web3,admin \
     --port $((bystP2PBase + i - 1)) --disable-discovery --ipcdisable --no-persist-peers \
@@ -296,6 +299,7 @@ restartValidator1() {
   : >test-nodes/evm1/debug.log
   local bootnodes="$rootBoot"
   for j in $(seq 2 "$validators"); do bootnodes+=",$(evm_validator_addr "$j")"; done
+  lane_port_preflight "$evmValidatorPortStart" "validator 1 restart p2p" || return 1
   build/ubft shard-node run --home test-nodes/evm1 --executor engine-api --registry-layout "$(registry_layout)" \
     --address "/ip4/127.0.0.1/tcp/$evmValidatorPortStart" --bootnodes "$bootnodes" \
     --trust-base test-nodes/trust-base.json \
@@ -434,7 +438,7 @@ assertBystandersLack "at the start of the arm" "$certifiedHash" "$missedParentHa
 unhelpfulMark=$(markNow)
 unhelpfulAt=$(markNowUTC)
 startPeerMonitor "http://127.0.0.1:$rethEthBase" test-nodes/peermon-unhelpful.log 1
-restartValidator1 --evidence-recover
+restartValidator1 --evidence-recover || exit 1
 waitFor test-nodes/evm1/debug.log "accepted certificate" 6 180 || { fail "the restarted node received no certificates"; exit 1; }
 waitForLinesAfter test-nodes/evm1/debug.log "anchor recovery finished" "outcome=payload-unavailable" 3 240 >/dev/null \
   || info "fewer than 3 unavailability outcomes were logged within 240s; the counts below say what happened"

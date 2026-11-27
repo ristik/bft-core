@@ -12,17 +12,19 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/signingauthority"
+	"github.com/unicitynetwork/bft-core/vrschema"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
-// Endpoint says which side of the boundary a listener serves. There is no endpoint that serves
-// both, and no operation that both endpoints serve.
+// Endpoint says which side of the boundary a listener serves. The client and operator endpoints share no operation. The possession-proof
+// endpoint serves one operation, opSignHandoffPoP, which the operator endpoint serves too, under its own credential; it serves nothing else.
 type Endpoint int
 
 const (
@@ -30,21 +32,42 @@ const (
 	ClientEndpoint Endpoint = iota
 	// OperatorEndpoint serves the operator: session replacement, status, enrollment.
 	OperatorEndpoint
+	// PoPEndpoint serves the automated root member the one operation its handoff duty needs, the possession proof of the authority's own
+	// key (opSignHandoffPoP), under its own credential. It serves nothing else: not session replacement, not epoch administration, not
+	// registration signing, not a status or an enrollment.
+	PoPEndpoint
 )
 
 func (e Endpoint) String() string {
-	if e == OperatorEndpoint {
+	switch e {
+	case OperatorEndpoint:
 		return "operator"
+	case PoPEndpoint:
+		return "pop"
 	}
 	return "client"
 }
 
+// ManagedSession binds publication to one operator-configured file. The target is
+// relative to the operator socket so a caller can address it through a bind mount.
+type ManagedSession struct {
+	Target  string
+	Publish func([]byte) error
+	Matches func([]byte) (bool, error)
+}
+
 // Config is what an operator provides when starting an authority process.
 type Config struct {
+	ManagedSession ManagedSession
+
 	// OperatorCredential admits the operator endpoint. It is provisioned here, by whoever starts
 	// the process, and the server neither generates nor stores it anywhere else. At least
 	// CredentialBytes of entropy.
 	OperatorCredential []byte
+
+	// PoPCredential admits the possession-proof endpoint (PoPEndpoint), the automated member's narrow channel. Optional: empty serves
+	// nothing there. At least CredentialBytes of entropy and not the operator credential.
+	PoPCredential []byte
 
 	// MaxConnections bounds concurrent connections per endpoint. Bounding the queue is the
 	// transport's job, not the authority's, which serialises behind one mutex.
@@ -76,7 +99,7 @@ func DefaultConfig() Config {
 }
 
 /*
-Server answers for one authority, on two endpoints.
+Server answers for one authority, on its client and operator endpoints and, when a member credential is configured, a possession-proof endpoint.
 
 It holds the session. A client is admitted by a credential the server issued when the operator
 replaced the session, and the server maps that credential to the session it is holding; the client
@@ -89,10 +112,16 @@ type Server struct {
 	cfg       Config
 	log       *slog.Logger
 
-	mu         sync.Mutex
-	session    signingauthority.Session
-	hasSession bool
-	credential []byte
+	mu            sync.Mutex
+	session       signingauthority.Session
+	hasSession    bool
+	credential    []byte
+	sessionTarget string      // destination of the admitted generation
+	provisioned   atomic.Bool // a managed credential was explicitly provisioned in this authority lifetime
+
+	// advance is the authority's AdvanceWithProof; a test of the publication-versus-cleanup interleaving replaces it (it is never set
+	// outside this package's tests)
+	advance func(context.Context, []byte) (signingauthority.AdvanceResult, error)
 
 	closeOnce sync.Once
 	closed    chan struct{}
@@ -115,8 +144,19 @@ func NewServer(authority *signingauthority.Authority, cfg Config) (*Server, erro
 	if authority == nil {
 		return nil, errors.New("service: no authority")
 	}
+	if cfg.ManagedSession.Target != "" && (cfg.ManagedSession.Publish == nil || cfg.ManagedSession.Matches == nil) {
+		return nil, errors.New("service: managed session requires publication and credential comparison")
+	}
 	if len(cfg.OperatorCredential) < CredentialBytes {
 		return nil, fmt.Errorf("service: the operator credential must be at least %d bytes", CredentialBytes)
+	}
+	if len(cfg.PoPCredential) != 0 {
+		if len(cfg.PoPCredential) < CredentialBytes {
+			return nil, fmt.Errorf("service: the possession-proof credential must be at least %d bytes", CredentialBytes)
+		}
+		if subtle.ConstantTimeCompare(cfg.PoPCredential, cfg.OperatorCredential) == 1 {
+			return nil, errors.New("service: the possession-proof credential must not be the operator credential")
+		}
 	}
 	defaults := DefaultConfig()
 	if cfg.MaxConnections <= 0 {
@@ -136,6 +176,7 @@ func NewServer(authority *signingauthority.Authority, cfg Config) (*Server, erro
 		log = slog.New(slog.DiscardHandler)
 	}
 	cfg.OperatorCredential = append([]byte(nil), cfg.OperatorCredential...)
+	cfg.PoPCredential = append([]byte(nil), cfg.PoPCredential...)
 	lifetime, end := context.WithCancel(context.Background())
 	return &Server{
 		authority: authority, cfg: cfg, log: log, closed: make(chan struct{}),
@@ -309,6 +350,14 @@ func (s *Server) dispatch(ctx context.Context, endpoint Endpoint, req wireReques
 			return nil, errOperatorUnauthenticated
 		}
 		return s.operatorOp(ctx, operation, req.Payload)
+	case PoPEndpoint:
+		if !operation.servedToPoP() {
+			return nil, fmt.Errorf("%w: %s is not served on the possession-proof endpoint", errWrongEndpoint, operation)
+		}
+		if len(s.cfg.PoPCredential) == 0 || subtle.ConstantTimeCompare(req.Credential, s.cfg.PoPCredential) != 1 {
+			return nil, errOperatorUnauthenticated
+		}
+		return s.operatorOp(ctx, operation, req.Payload)
 	case ClientEndpoint:
 		if !operation.servedToClient() {
 			return nil, fmt.Errorf("%w: %s is not a client operation", errWrongEndpoint, operation)
@@ -382,11 +431,7 @@ func (s *Server) clientOp(ctx context.Context, session signingauthority.Session,
 		copy(digest[:], wire.Digest)
 		return s.authority.Release(session, wire.Round, digest)
 	case opRestoreStatus:
-		status := s.authority.Status()
-		return types.Cbor.Marshal(statusPayload{RootEpoch: status.RootEpoch, ShardEpoch: status.ShardEpoch,
-			Generation: status.Generation, ReservedRound: status.ReservedRound,
-			HasReservation: status.HasReservation, ResponseRetained: status.ResponseRetained,
-			Faulted: status.Faulted, KeyLost: status.KeyLost})
+		return types.Cbor.Marshal(statusPayloadOf(s.authority.Status()))
 	}
 	return nil, fmt.Errorf("%w: %s", errWrongEndpoint, operation)
 }
@@ -416,9 +461,35 @@ func (s *Server) operatorOp(ctx context.Context, operation op, payload []byte) (
 		enrolled := s.authority.Enrollment()
 		s.log.Info("epoch advanced", slog.Uint64("shardEpoch", enrolled.ShardEpoch), slog.Uint64("rootEpoch", uint64(derefEpoch(enrolled.RootEpoch))),
 			slog.String("shardConfHash", hex.EncodeToString(enrolled.ShardConfHash)))
-		s.hasSession = false
-		s.credential = nil
+		s.clearSessionLocked()
 		return nil, nil
+	case opAdvanceWithProof:
+		// The proof is the payload's bytes and nothing else: the authority verifies it against its own lineage (#1085). The server's lock
+		// is NOT held meanwhile: client credential lookups (every Reserve, Sign, Retain, Release) go on during a verification, and a second
+		// proof reaches the authority's own serialisation and is refused at once (ErrAdvanceBusy) instead of queueing here. The authority
+		// is the signing guard: its publication bumps the generation, which fences every session up to it whatever the server holds. The
+		// server then drops the credential it admits only if that session is one the publication fenced (a generation at or below the
+		// result's); a session a concurrent replacement issued after the publication is newer and is kept.
+		advance := s.authority.AdvanceWithProof
+		if s.advance != nil {
+			advance = s.advance
+		}
+		res, err := advance(ctx, payload)
+		if err != nil {
+			s.log.Warn("refusing an activation proof", slog.String("err", err.Error()))
+			return nil, err
+		}
+		if res.Advanced || res.Retired {
+			s.mu.Lock()
+			if s.hasSession && s.session.Generation() <= res.Generation {
+				s.clearSessionLocked()
+			}
+			s.mu.Unlock()
+		}
+		s.log.Info("activation proof accepted", slog.Uint64("epoch", res.Epoch), slog.Bool("replay", res.Replay), slog.Bool("advanced", res.Advanced),
+			slog.Bool("retired", res.Retired), slog.Uint64("rootEpoch", res.RootEpoch), slog.Uint64("shardEpoch", res.ShardEpoch), slog.Uint64("lineageEpoch", res.LineageEpoch))
+		return types.Cbor.Marshal(advanceResultPayload{Epoch: res.Epoch, Replay: res.Replay, Advanced: res.Advanced, Retired: res.Retired,
+			RootEpoch: res.RootEpoch, ShardEpoch: res.ShardEpoch, LineageEpoch: res.LineageEpoch})
 	case opSignHandoffPoP:
 		var wire handoffPoPPayload
 		if err := types.Cbor.Unmarshal(payload, &wire); err != nil {
@@ -497,6 +568,92 @@ func (s *Server) operatorOp(ctx context.Context, operation op, payload []byte) (
 		s.log.Info("signed a delegation possession", slog.Uint64("id", wire.Id), slog.Uint64("generation", wire.Generation),
 			slog.Uint64("delegationNonce", wire.DelegationNonce), slog.String("election", fmt.Sprintf("%x", wire.Election)))
 		return sig, nil
+	case opSignPosPoP:
+		var wire posPoPPayload
+		if err := types.Cbor.Unmarshal(payload, &wire); err != nil {
+			return nil, fmt.Errorf("%w: P85 possession request: %v", errMalformed, err)
+		}
+		if len(wire.ResultID) != 32 || len(wire.AssignmentID) != 32 || len(wire.Snapshot) != 32 {
+			return nil, fmt.Errorf("%w: the result, assignment and snapshot are 32-byte words", errMalformed)
+		}
+		request := signingauthority.PosPoPRequest{Attempt: wire.Attempt, ID: wire.ID, Generation: wire.Generation}
+		copy(request.ResultID[:], wire.ResultID)
+		copy(request.AssignmentID[:], wire.AssignmentID)
+		copy(request.Snapshot[:], wire.Snapshot)
+		pop, err := s.authority.SignPosPoP(request)
+		if err != nil {
+			s.log.Warn("refusing a P85 possession proof", slog.String("err", err.Error()))
+			return nil, err
+		}
+		s.log.Info("signed a P85 possession proof", slog.Uint64("id", wire.ID), slog.Uint64("generation", wire.Generation),
+			slog.Uint64("attempt", wire.Attempt), slog.String("result", fmt.Sprintf("%x", wire.ResultID)))
+		return types.Cbor.Marshal(pop)
+	case opSetPosPolicy:
+		var wire posPolicyPayload
+		if err := types.Cbor.Unmarshal(payload, &wire); err != nil {
+			return nil, fmt.Errorf("%w: P85 pin: %v", errMalformed, err)
+		}
+		if len(wire.Network) != 32 || len(wire.ChainID) != 32 || len(wire.Election) != 20 {
+			return nil, fmt.Errorf("%w: the pin names a 32-byte network word and chain id and a 20-byte election", errMalformed)
+		}
+		pin := signingauthority.PosPolicy{IDs: wire.IDs}
+		copy(pin.Network[:], wire.Network)
+		copy(pin.ChainID[:], wire.ChainID)
+		copy(pin.Election[:], wire.Election)
+		if err := s.authority.SetPosPolicy(pin); err != nil {
+			s.log.Warn("refusing a P85 pin", slog.String("err", err.Error()))
+			return nil, err
+		}
+		s.log.Info("P85 election pinned", slog.String("election", fmt.Sprintf("%x", wire.Election)), slog.Any("ids", wire.IDs))
+		return nil, nil
+	case opSignRegistration:
+		var wire registrationPayload
+		if err := types.Cbor.Unmarshal(payload, &wire); err != nil {
+			return nil, fmt.Errorf("%w: registration request: %v", errMalformed, err)
+		}
+		if len(wire.Owner) != 20 || len(wire.Payee) != 20 {
+			return nil, fmt.Errorf("%w: the owner and the payee are 20-byte addresses", errMalformed)
+		}
+		request := signingauthority.RegistrationRequest{Domain: wire.Domain, ID: wire.ID, Registration: vrschema.Registration{RootNodeID: wire.RootNodeID,
+			RootKey: wire.RootKey, EVMNodeID: wire.EVMNodeID, EVMKey: wire.EVMKey, Nonce: wire.Nonce}}
+		copy(request.Owner[:], wire.Owner)
+		copy(request.Registration.Payee[:], wire.Payee)
+		sig, err := s.authority.SignRegistration(request)
+		if err != nil {
+			s.log.Warn("refusing a registration signature", slog.String("err", err.Error()))
+			return nil, err
+		}
+		s.log.Info("signed a registration", slog.String("domain", wire.Domain), slog.Uint64("id", wire.ID), slog.Uint64("nonce", wire.Nonce),
+			slog.String("owner", fmt.Sprintf("%x", wire.Owner)), slog.String("rootNode", wire.RootNodeID))
+		return sig, nil
+	case opReloadRegistrationPolicy:
+		var wire registrationPolicyPayload
+		if err := types.Cbor.Unmarshal(payload, &wire); err != nil {
+			return nil, fmt.Errorf("%w: registration policy: %v", errMalformed, err)
+		}
+		if len(wire.Network) != 32 || len(wire.ChainID) != 32 || len(wire.Registry) != 20 {
+			return nil, fmt.Errorf("%w: the policy names its deployment: a 32-byte network word and chain id and a 20-byte registry", errMalformed)
+		}
+		var expect signingauthority.RegistrationDeployment
+		copy(expect.Network[:], wire.Network)
+		copy(expect.ChainID[:], wire.ChainID)
+		copy(expect.Registry[:], wire.Registry)
+		var list []signingauthority.RegistrationAuthorization
+		for _, x := range wire.Authorized {
+			if len(x.Owner) != 20 || len(x.Payee) != 20 {
+				return nil, fmt.Errorf("%w: the owner and the payee are 20-byte addresses", errMalformed)
+			}
+			a := signingauthority.RegistrationAuthorization{Domain: x.Domain, ID: x.ID, RootNodeID: x.RootNodeID, RootKey: x.RootKey}
+			copy(a.Owner[:], x.Owner)
+			copy(a.Payee[:], x.Payee)
+			list = append(list, a)
+		}
+		if err := s.authority.ReloadRegistrationAuthorizations(expect, list); err != nil {
+			s.log.Warn("refusing a registration policy reload", slog.String("err", err.Error()))
+			return nil, err
+		}
+		s.log.Info("registration policy reloaded", slog.Int("authorized", len(list)))
+		return nil, nil
 	case opCompleteEnrollment:
 		var conf types.PartitionDescriptionRecord
 		if err := types.Cbor.Unmarshal(payload, &conf); err != nil {
@@ -512,15 +669,30 @@ func (s *Server) operatorOp(ctx context.Context, operation op, payload []byte) (
 			slog.String("shardConfHash", fmt.Sprintf("%x", s.authority.Enrollment().ShardConfHash)))
 		return nil, nil
 	case opReplaceSession:
-		return s.replaceSession()
+		var target string
+		if managed := s.cfg.ManagedSession.Target; managed != "" {
+			if err := types.Cbor.Unmarshal(payload, &target); err != nil || target == "" || filepath.IsAbs(target) || filepath.Clean(target) == managed {
+				return nil, ErrManagedSession
+			}
+			target = filepath.Clean(target)
+		}
+		return s.replaceSession(target)
+	case opPublishSession:
+		var request publishSessionRequest
+		if err := types.Cbor.Unmarshal(payload, &request); err != nil {
+			return nil, fmt.Errorf("%w: publication request: %v", errMalformed, err)
+		}
+		var result publishSessionResult
+		if request.Target != "" && filepath.Clean(request.Target) == s.cfg.ManagedSession.Target {
+			publication, err := s.publishSession(request.Replace, false)
+			if err != nil {
+				return nil, err
+			}
+			result = publishSessionResult{Managed: publication.Managed, Issued: publication.Issued, ActiveAlternate: publication.ActiveAlternate}
+		}
+		return types.Cbor.Marshal(result)
 	case opStatus, opRestoreStatus:
-		status := s.authority.Status()
-		return types.Cbor.Marshal(statusPayload{
-			RootEpoch: status.RootEpoch, ShardEpoch: status.ShardEpoch,
-			Generation: status.Generation, ReservedRound: status.ReservedRound,
-			HasReservation: status.HasReservation, ResponseRetained: status.ResponseRetained,
-			Faulted: status.Faulted, KeyLost: status.KeyLost,
-		})
+		return types.Cbor.Marshal(statusPayloadOf(s.authority.Status()))
 	case opEnrollment:
 		enrollment, err := types.Cbor.Marshal(s.authority.Enrollment())
 		if err != nil {
@@ -542,10 +714,8 @@ replaceSession fences the current client and issues the credential for the new o
 
 The whole replacement is one critical section, and this is the reason: the authority decides the
 order of two concurrent replacements, and the server must store them in that same order. Advancing
-the generation outside the lock lets a replacement that won inside the authority lose the race to
-install its credential, which leaves the server admitting a credential the authority has already
-fenced. Both operators would then hold a credential that cannot be used, and an operator would read
-that as an authority that has broken rather than as one it has to ask again.
+the generation outside the lock lets an earlier issuance overwrite a later credential. Managed
+publication uses the same lock through the file write so its writers follow the issuance order.
 
 Within the section the authority advances its generation first. If that fails there is no new
 credential and the old one keeps working, because the old generation is still the current one inside
@@ -553,24 +723,92 @@ the authority: the two must not disagree about who is admitted. If it succeeds, 
 stops being accepted in the same step, and the new credential is returned exactly once. The server
 keeps only what it needs to compare against, and cannot produce it again for anyone who missed it.
 */
-func (s *Server) replaceSession() ([]byte, error) {
+func (s *Server) replaceSession(target string) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	return s.replaceSessionLocked(target, nil)
+}
+
+// SessionProvisioned reports whether the operator has installed the first managed
+// credential. Scope changes can fence that session without losing this fact.
+func (s *Server) SessionProvisioned() bool {
+	return s.provisioned.Load()
+}
+
+// FollowSession repairs an incumbent's session after a verified scope change.
+// An explicit replacement to another destination fences the managed credential
+// for the rest of that scope, so a live session takes precedence over the file.
+func (s *Server) FollowSession() error {
+	if !s.SessionProvisioned() {
+		return nil
+	}
+	_, err := s.publishSession(false, true)
+	return err
+}
+
+func (s *Server) publishSession(replace, follow bool) (SessionPublication, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	result := SessionPublication{Managed: true}
+	status := s.authority.Status()
+	if status.Retired && !replace {
+		return result, nil
+	}
+	if !replace && s.hasSession && s.session.Generation() == status.Generation {
+		if s.sessionTarget != s.cfg.ManagedSession.Target {
+			result.ActiveAlternate = s.sessionTarget
+			return result, nil
+		}
+		if follow {
+			return result, nil
+		}
+		matches, err := s.cfg.ManagedSession.Matches(s.credential)
+		if err != nil {
+			s.log.Error("checking the managed client credential", "error", err)
+			return result, ErrCredentialPublication
+		}
+		if matches && s.session.Generation() == s.authority.Status().Generation {
+			s.provisioned.Store(true)
+			return result, nil
+		}
+	}
+	_, err := s.replaceSessionLocked(s.cfg.ManagedSession.Target, s.cfg.ManagedSession.Publish)
+	result.Issued = err == nil
+	return result, err
+}
+
+func (s *Server) clearSessionLocked() {
+	s.hasSession = false
+	s.credential = nil
+	s.sessionTarget = ""
+}
+
+// replaceSessionLocked orders both issuance and managed publication with every
+// operator replacement. A failed publication leaves no admitted credential.
+func (s *Server) replaceSessionLocked(target string, publish func([]byte) error) ([]byte, error) {
+	credential, err := NewCredential()
+	if err != nil {
+		return nil, err
+	}
 	session, err := s.authority.ReplaceSession()
 	if err != nil {
 		return nil, err
 	}
-	credential, err := NewCredential()
-	if err != nil {
-		// The generation has already advanced, so the previous client is fenced whatever happens
-		// here. Leaving the server with no admitted credential is the safe side of that: nothing is
-		// admitted until the operator asks again and gets one.
-		s.hasSession = false
-		s.credential = nil
-		return nil, err
+	if publish != nil {
+		s.clearSessionLocked()
+		if err := publish(credential); err != nil {
+			s.log.Error("publishing the managed client credential", "error", err)
+			return nil, ErrCredentialPublication
+		}
+		s.provisioned.Store(true)
+		if session.Generation() != s.authority.Status().Generation {
+			return nil, signingauthority.ErrFenced
+		}
 	}
 	s.session = session
+	s.sessionTarget = target
 	s.hasSession = true
 	s.credential = append([]byte(nil), credential...)
 	return credential, nil

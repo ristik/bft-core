@@ -90,7 +90,7 @@ rpc() {
   case "$2" in
     eth_getTransactionCount) echo "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1\"}" ;;
     eth_getBlockByNumber)
-      if [ "$port" = "18547" ]; then echo "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"number\":\"0x9\",\"hash\":\"0xdead\"}}"
+      if [ "$port" = "$((rethEthBase + 2))" ]; then echo "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"number\":\"0x9\",\"hash\":\"0xdead\"}}"
       else echo "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"number\":\"0x4\",\"hash\":\"0xabc\"}}"; fi ;;
     *) echo "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"blockNumber\":\"0x4\",\"status\":\"0x1\"}}" ;;
   esac
@@ -197,7 +197,7 @@ gateOut=$(
     port=${1##*:}
     if [ "$2" = eth_getTransactionCount ]; then
       printf '%s' '{"jsonrpc":"2.0","id":1,"result":"0x1"}'
-    elif [ "$2" = eth_getBlockByNumber ] && [ "$port" = 18547 ]; then
+    elif [ "$2" = eth_getBlockByNumber ] && [ "$port" = "$((rethEthBase + 2))" ]; then
       printf '%s' '{"jsonrpc":"2.0","id":1,"result":{"number":"0x4","hash":"0xdef"}}'
     elif [ "$2" = eth_getBlockByNumber ]; then
       printf '%s' '{"jsonrpc":"2.0","id":1,"result":{"number":"0x4","hash":"0xabc"}}'
@@ -627,5 +627,32 @@ else
 fi
 
 echo
+# Use two inert processes with the same resolved executable. Only the one in this checkout can
+# be stopped, even if a stale PID file points at the one in the other tree.
+pinned_restart() (
+  local helper=$PWD/helper.sh pid other pat i
+  mkdir -p "$work/chaos-pid/test-nodes/reth1" "$work/other-pid" "$work/pin [fixture]" || return 1
+  URETH_BIN="$work/pin [fixture]/unicity-reth-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-linux-x86_64"
+  printf '#!/usr/bin/perl\nsleep 120;\n' >"$URETH_BIN"
+  chmod +x "$URETH_BIN" || return 1
+  source "$helper"
+  source "$harness"
+  cd "$work/chaos-pid" || return 1
+  "$URETH_BIN" node & pid=$!
+  ( cd "$work/other-pid" && exec "$URETH_BIN" node ) & other=$!
+  trap 'kill "$pid" "$other" 2>/dev/null; wait "$pid" "$other" 2>/dev/null' EXIT
+  pat=$(reth_node_pattern "$URETH_BIN")
+  for i in $(seq 1 20); do
+    owned_pid "$pid" "$pat" && (cd "$work/other-pid" && owned_pid "$other" "$pat") && break
+    sleep 0.1
+  done
+  owned_pid "$pid" "$pat" && (cd "$work/other-pid" && owned_pid "$other" "$pat") || return 1
+  echo "$other" >test-nodes/reth1/pid
+  stopReth 1 && kill -0 "$other" 2>/dev/null || return 1
+  echo "$pid" >test-nodes/reth1/pid
+  stopReth 1 && ! kill -0 "$pid" 2>/dev/null && [ ! -e test-nodes/reth1/pid ] && kill -0 "$other" 2>/dev/null
+)
+if pinned_restart; then ok "reth-only restart stops the pinned client and preserves the other checkout"; else bad "reth-only restart lost checkout or executable ownership"; fi
+
 echo "selftest: $selfPass ok, $selfFail bad"
 [ "$selfFail" -eq 0 ]

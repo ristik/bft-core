@@ -28,6 +28,8 @@ func signedVoteABI(name string) string {
 
 var evidenceABI = `[
  {"type":"function","name":"submitEvidence","stateMutability":"nonpayable","inputs":[` + voteHeaderABI + `,` + signedVoteABI("a") + `,` + signedVoteABI("b") + `,{"name":"exposureID","type":"bytes32"}],"outputs":[{"type":"bytes32"}]},
+ {"type":"function","name":"submitSeatEvidence","stateMutability":"nonpayable","inputs":[` + voteHeaderABI + `,` + signedVoteABI("a") + `,` + signedVoteABI("b") + `,{"name":"assignmentID","type":"bytes32"},{"name":"ordinal","type":"uint256"},{"name":"exposureID","type":"bytes32"}],"outputs":[{"type":"bytes32"}]},
+ {"type":"function","name":"caseLocation","stateMutability":"view","inputs":[{"type":"bytes32"}],"outputs":[{"type":"bytes32"},{"type":"uint256"}]},
  {"type":"function","name":"settleEvidence","stateMutability":"nonpayable","inputs":[{"name":"caseID","type":"bytes32"},{"name":"lotIDs","type":"uint256[]"}],"outputs":[{"type":"uint256"}]},
  {"type":"function","name":"offenceIDOf","stateMutability":"pure","inputs":[` + voteHeaderABI + `],"outputs":[{"type":"bytes32"}]},
  {"type":"function","name":"offenceSeen","stateMutability":"view","inputs":[{"type":"bytes32"}],"outputs":[{"type":"bool"}]},
@@ -52,6 +54,10 @@ var evidenceABI = `[
 ]`
 
 const custodyABI = `[
+ {"type":"function","name":"assignmentSeatCount","stateMutability":"view","inputs":[{"type":"bytes32"}],"outputs":[{"type":"uint256"}]},
+ {"type":"function","name":"assignmentSeat","stateMutability":"view","inputs":[{"type":"bytes32"},{"type":"uint256"}],"outputs":[{"type":"tuple","components":[
+   {"name":"binding","type":"tuple","components":[{"name":"id","type":"uint64"},{"name":"generation","type":"uint64"},{"name":"rootNode","type":"bytes32"},{"name":"rootKeyHash","type":"bytes32"},{"name":"evmNode","type":"bytes32"},{"name":"evmKeyHash","type":"bytes32"},{"name":"payee","type":"address"}]},
+   {"name":"weight","type":"uint64"},{"name":"rawWeight","type":"uint64"},{"name":"bindingHash","type":"bytes32"},{"name":"exposureID","type":"bytes32"},{"name":"memberDigest","type":"bytes32"},{"name":"lotID","type":"uint256"}]}]},
  {"type":"function","name":"assignmentExposures","stateMutability":"view","inputs":[{"type":"bytes32"}],"outputs":[{"type":"bytes32[]"}]},
  {"type":"function","name":"exposures","stateMutability":"view","inputs":[{"type":"bytes32"}],"outputs":[
    {"name":"assignmentID","type":"bytes32"},{"name":"id","type":"uint64"},{"name":"generation","type":"uint64"},{"name":"weight","type":"uint64"},
@@ -170,6 +176,10 @@ func (r *SlotRecord) checkPreimage(cfg votesig.Config, s *Statement) error {
 // SubmitCalldata is evidence.submitEvidence(header, a, b, exposureID) for a paired slot, with the original vote and seal signatures. The statements
 // are ordered by digest so the call is the same whichever journal supplied which half.
 func SubmitCalldata(network [32]byte, cfg votesig.Config, r *SlotRecord, exposureID [32]byte) ([]byte, error) {
+	return submitCalldata(network, cfg, r, exposureID, nil)
+}
+
+func submitCalldata(network [32]byte, cfg votesig.Config, r *SlotRecord, exposureID [32]byte, loc *seatLocator) ([]byte, error) {
 	if !r.Paired() {
 		return nil, fmt.Errorf("%w: the slot holds one statement", ErrBuild)
 	}
@@ -191,6 +201,9 @@ func SubmitCalldata(network [32]byte, cfg votesig.Config, r *SlotRecord, exposur
 		return nil, err
 	}
 	h := voteHeader{Network: network, Domain: DomainRoot, Key: r.Key, VotingEpoch: r.Epoch, VotingRound: r.Round}
+	if loc != nil {
+		return evidenceAbi.Pack("submitSeatEvidence", h, va, vb, loc.assignment, loc.ordinal, exposureID)
+	}
 	return evidenceAbi.Pack("submitEvidence", h, va, vb, exposureID)
 }
 

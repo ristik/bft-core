@@ -19,6 +19,7 @@ from pathlib import Path
 
 import handoff_ops
 import joiner as joiner_lib
+import root_keys
 
 BOND_UNIT = 100 * 10 ** 18
 
@@ -85,7 +86,8 @@ def pos_joiner(r):
     fd = os.open(identity, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, 'w') as out:
         json.dump(joiner_file(owner['private_key'], root_key, withdrawal, payee, info['root'], info['evm']), out)
-    r.faucet_send(owner['address'], BOND_UNIT + 10 ** 18)   # the one bond unit and the gas of three transactions
+    r.rescan()   # the identity file and the joiner's authority credentials are secrets the generation scan did not see at the start
+    r.funder_send(owner['address'], BOND_UNIT + 10 ** 18)   # the one bond unit and the gas of three transactions
     mounts = [f'{val / "auth"}:/auth']
     evm = ['--evm-authority-socket', '/auth/operator.sock', '--evm-authority-credential', '/auth/operator.cred']
     status, out = r.relayer(identity, 'join', 'register', *evm, joiner=True, mounts=mounts)
@@ -121,9 +123,9 @@ def pos_joiner(r):
     time.sleep(15)   # a start that is refused exits within seconds: look after that
     running = f'shard{index}' in compose(r, 'ps', '--status', 'running', '--services').split()
     logs = compose(r, 'logs', '--no-color', '--tail', '40', f'shard{index}', check=False)
-    (r.evidence / f'shard{index}-start.log').write_text(logs)
-    r.say(f'  shard{index} after 15 s: {"running" if running else "NOT running"}; last lines: ' + ' | '.join(logs.strip().splitlines()[-4:])[-600:])
-    r.expect(running, f'the joiner\'s shard node stays up as a staging-only node', logs.strip()[-600:])
+    r.keep_redacted(r.evidence / f'shard{index}-start.log', logs)
+    r.say(f'  shard{index} after 15 s: {"running" if running else "NOT running"}; last lines: ' + r.scrub(' | '.join(logs.strip().splitlines()[-4:])[-600:], True))
+    r.expect(running, f'the joiner\'s shard node stays up as a staging-only node', r.scrub(logs.strip()[-600:], True))
     r.n = index   # from here every stage of this run counts the joiner: its services are in compose_files, its pod in the transport
     r.joiners.add(index)   # but not as a member of the committee that certifies: it follows until the handoff that names it activates
 
@@ -168,7 +170,7 @@ def pos_join_heavy(r):
     committee of five is in place. The election's selection seeds the committee with the incumbents, then outsiders up to nTarget (6), and judges the whole against the
     incumbent committee: five unit weights to five unit weights and one of weight 2 is D = 2*2/7 = 0.571 > 1/2 (the testnet bound, owner decision 19), so the election records
     NoCandidate with the reason WeightChurn and the committee of five stays. No handoff is attempted and nothing is installed: this is a refusal, recorded with the contract's
-    own reason. Run after pos-join-signs/pos-restart of the same run. The second joiner needs no signing authority (no handoff names it): its EVM key is a local key."""
+    own reason. Run right after pos-advance, before pos-restore-repeat, pos-join-signs and pos-restart of the same run (#1006: restore-repeat outlasts several election cadences, an attempt that came due meanwhile left a result open that only the automatic RejectResult clears). The second joiner needs no signing authority (no handoff names it): its EVM key is a local key."""
     election, custody = (json.loads((r.gen / 'network' / 'pos-deployment.json').read_text())[k] for k in ('election', 'custody'))
     r.expect(r.n == 5 and not r.joiners, 'precondition: five members, no joiner pending (the join ran first)')
     transport = handoff_ops.DockerTransport(r.gen)
@@ -177,6 +179,8 @@ def pos_join_heavy(r):
     home.mkdir(mode=0o700, exist_ok=True)
     for kind, group in (('root', 'root-node'), ('evm', 'shard-node')):
         r.host_ubft(group, 'init', '--home', home / kind, '--generate')
+    root_keys.check_generation(r.gen, root_keys.node_info_key(home / 'root' / 'node-info.json'), 'the heavy joiner')   # #1297: never a retired root key
+    r.rescan()   # the new key files below are secrets from here on
     keys = {kind: json.loads((home / kind / 'keys.json').read_text())['sigKey']['privateKey'] for kind in ('root', 'evm')}
     node = {kind: r.host_ubft('node-id', '--home', home / kind).strip().splitlines()[-1] for kind in ('root', 'evm')}
     owner, withdrawal, payee = new_wallet(r), new_wallet(r)['address'], new_wallet(r)['address']
@@ -184,7 +188,8 @@ def pos_join_heavy(r):
     fd = os.open(identity, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, 'w') as out:
         json.dump(dict(joiner_file(owner['private_key'], keys['root'], withdrawal, payee, node['root'], node['evm']), evmKey=keys['evm']), out)
-    r.faucet_send(owner['address'], 2 * BOND_UNIT + 10 ** 18)
+    r.rescan()
+    r.funder_send(owner['address'], 2 * BOND_UNIT + 10 ** 18)
     status, out = r.relayer(identity, 'join', 'register', joiner=True)
     found = re.search(r'custody id (\d+)', out)
     r.expect(status == 0 and bool(found), 'join register: the heavy joiner has a custody identity', out.strip()[-300:])
@@ -194,7 +199,9 @@ def pos_join_heavy(r):
     status, out = r.relayer(identity, 'join', 'admit', '--id', str(ident), joiner=True)
     r.expect(status == 0, 'join admit: the delegation (a local EVM key, no handoff will name it)', out.strip()[-300:])
     r.wait('the live index holds six identities', lambda: r.view(election, 'liveCount()(uint32)')[0] == 6, 120)
-    cursor_before = r.view(election, 'attemptCursor()(uint64)')[0]   # an attempt from here on sees the heavy joiner eligible
+    open_result = r.view_text(election, 'openResult()(bytes32)').strip()
+    r.expect(int(open_result, 16) == 0, 'no result is open when the heavy joiner becomes eligible (an open result stops further attempts, and a reservation nobody publishes clears only by the automatic RejectResult after 16384 progress rounds: run this stage straight after pos-advance, before pos-restore-repeat, never after a stage that outlasts the election cadence, #1006)', open_result)
+    cursor_before = r.view(election, 'attemptCursor()(uint64)')[0]   # read with no result open: an attempt from here on sees the heavy joiner eligible
     # The election runs in the system hook, whose events are not in a receipt (run 40097992670: attemptCursor 6, openResult zero, no NoCandidate log): the outcome is read
     # from its state, the last attempt's stored result: state 2 NoCandidate, and the reason that follows it
     def outcome():

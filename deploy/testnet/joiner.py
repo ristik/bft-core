@@ -4,7 +4,7 @@
 The genesis committee is fixed at generation (the genesis names its identities, trust base and shard configuration). A joiner is an entity that is not in
 it: its keys, directories and Compose services exist beside the generation and are started only when the stage that joins it runs. This file makes them:
 
-  prepare   the entity's root and execution (shard node) keys, its signing authority's operator credential, its private directories (ureth, archive, jwt)
+  prepare   the entity's root and execution (shard node) keys, its signing authority's operator credential, its private directories (ureth, ureth-key, archive, jwt)
             and compose.joiner.json, an override with the entity's six services (pod, metrics relay, root, authority, ureth, shard node). The services are the
             LAST genesis entity's, renamed, with the joiner's own node ids and every genesis root and shard node as bootnodes; they are exactly what
             generate.topology would write for that entity in a generation of one more validator (the test compares them).
@@ -20,8 +20,12 @@ import json
 import os
 import re
 import secrets
+import shutil
 import subprocess
 from pathlib import Path
+
+import root_keys
+import ureth_key
 
 PARTS = ('pod', 'metrics', 'root', 'authority', 'ureth', 'shard')
 SERVICE = re.compile(r'(?<![\w-])(pod|metrics|root|authority|ureth|shard)(\d+)(?![\w])')
@@ -83,6 +87,10 @@ def joiner_services(compose, index, root_id, evm_id):
             # a shard node lists every root of its generation, its own entity's included, then the other shard nodes (generate.topology)
             entry[at] = ','.join([f'/dns4/root{j}/tcp/8000/p2p/{roots[j]}' for j in present] + [f'/dns4/root{index}/tcp/8000/p2p/{root_id}']
                                  + [f'/dns4/shard{j}/tcp/9000/p2p/{evms[j]}' for j in present])
+            # phase 1 follower: until the verified activation naming it, the joiner follows from the genesis shard nodes (their mirrors and
+            # archives) and keeps every root closed; it is provisioned once and never emptied or restored on the election path
+            if '--follow-source' not in entry:
+                entry += ['--follow-source', ','.join(f'/dns4/shard{j}/tcp/9000/p2p/{evms[j]}' for j in present)]
         if part == 'authority':
             at = entry.index('--node-id') + 1
             entry[at] = evm_id
@@ -108,11 +116,18 @@ def _prepare(generation, ubft, index):
     val.mkdir()
     for kind, group in (('root', 'root-node'), ('evm', 'shard-node')):
         subprocess.run([str(ubft), group, 'init', '--home', str(val / kind), '--generate'], check=True, capture_output=True)
+    # #1297: a root key belongs to one root history and one validator; refuse one the generation lists as retired (or a genesis validator's)
+    try:
+        root_keys.check_generation(generation, root_keys.node_info_key(val / 'root' / 'node-info.json'), f'joiner validator{index}')
+    except root_keys.RetiredKeyError:
+        shutil.rmtree(val)
+        raise
     (val / 'auth').mkdir()
     subprocess.run([str(ubft), 'signing-authority', 'credential', '--out', str(val / 'auth' / 'operator.cred')], check=True, capture_output=True)
     for kind in ('ureth', 'archive', 'jwt'):
         (val / kind).mkdir()
     (val / 'jwt' / 'jwt.hex').write_text(secrets.token_hex(32) + '\n')
+    ureth_key.create(val / ureth_key.DIR)   # the execution client's devp2p node key, made once (bft-core#1148)
     node = {kind: subprocess.run([str(ubft), 'node-id', '--home', str(val / kind)], check=True, capture_output=True, text=True).stdout.strip().splitlines()[-1]
             for kind in ('root', 'evm')}
     services = joiner_services(compose, index, node['root'], node['evm'])

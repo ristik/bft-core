@@ -199,7 +199,7 @@ func runFrontierRequesterIntegration(t *testing.T, scenario string) {
 				}
 				var cut *storage.FrontierCutSnapshot
 				for {
-					cut, decodeErr = manager.blockStore.ReadFrontierCutSnapshot(request.Context.PartitionID, shard)
+					cut, decodeErr = manager.blockStore().ReadFrontierCutSnapshot(request.Context.PartitionID, shard)
 					if decodeErr == nil && cut.RootRound >= request.Floor {
 						break
 					}
@@ -285,7 +285,7 @@ func runFrontierRequesterIntegration(t *testing.T, scenario string) {
 
 	si, err := cms[0].ShardInfo(partitionID, shardID)
 	require.NoError(t, err)
-	require.NoError(t, cms[0].RequestCertification(context.Background(), IRChangeRequest{Partition: partitionID, Shard: shardID, Reason: Quorum, Requests: buildBlockCertificationRequest(t, shardNodes, si.LastCR)}))
+	require.NoError(t, cms[0].RequestCertification(context.Background(), IRChangeRequest{RootEpoch: cms[0].InstalledRootEpoch(), Partition: partitionID, Shard: shardID, Reason: Quorum, Requests: buildBlockCertificationRequest(t, shardNodes, si.LastCR)}))
 	require.Eventually(t, func() bool {
 		response, sampleErr := cms[0].SampleSignedFrontier(context.Background(), SignedFrontierRequest{FrontierRequest: FrontierRequest{NetworkID: pdr.NetworkID, PartitionID: pdr.PartitionID, ShardID: pdr.ShardID, FullShardConfHash: conf}, RootEpoch: contextValue.RootEpoch, GenesisOriginIdentity: originIdentity, Nonce: bytes.Repeat([]byte{0xaa}, 32)})
 		if sampleErr != nil {

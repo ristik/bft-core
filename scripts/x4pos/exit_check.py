@@ -6,11 +6,19 @@ builds the Retirement control, so an exit is `requestRetirement` on chain, then 
     exit_check.py refusal  --rpc URL --cast CAST --custody ADDR --id N [--generation G] [--from ADDR]
     exit_check.py matured  --rpc URL --cast CAST --custody ADDR --id N --before STATE.json
     exit_check.py claimed  --rpc URL --cast CAST --custody ADDR --id N --recipient ADDR --recipient-before WEI --credit WEI
+    exit_check.py terms    --rpc URL --cast CAST --custody ADDR --id N [--generation G] [--sender ADDR]
 
 `state` prints one JSON object (position, retirement info, live exposures, every lot of the generation, the withdrawal credit). `refusal` asks `mature` whether it would
 succeed NOW (eth_call) and names the custody error it reverts with: a missing Retirement (`RetirementNotImported`) is NOT an evidence hold (`EvidenceHoldPending`) and
 not a time/round gate; the lane must be able to tell them apart. Exit status 0 = a refusal that is one of the lawful early reasons was observed; `--allow-success`
 makes a mature-now answer exit 0 as well. `matured` and `claimed` assert exact amounts. Every check is an explicit raise (python -O safe).
+
+`terms` (#1297/#1298) lists the closed terms that still wait for their report anchors: custody refuses `mature` with `TermAnchorPending` while any lot of
+the exit has a closed term whose anchors were not captured. Anchoring is permissionless (`custody.anchorTerm(assignmentID, hRecordID, terminalRoot)`, no
+keeper or relay): the exiting party's tooling sends it. The words come from the term's authenticated Closure record (`roots.recordAt`, kind 4), and each term
+is previewed with an eth_call: `ready` terms can be anchored now, the others name the refusal (`SuccessorNotInstalled`: the successor root epoch is not
+installed yet). It prints nothing to do when no lot of the exit waits (`lotUnanchoredTerms` is zero, or the contracts predate anchoring). Read-only;
+a term anchored meanwhile drops out of the list, so sending what it lists is idempotent.
 """
 import argparse
 import json
@@ -18,7 +26,10 @@ import re
 import subprocess
 import sys
 
-LAWFUL_EARLY = ("RoundGateNotMet", "TimeGateNotMet", "EvidenceGateNotMet", "EvidenceHoldPending")
+# TermAnchorPending is lawful too: a closed term of the exit waits for its permissionless anchorTerm (`terms` lists it), not a missing record
+LAWFUL_EARLY = ("RoundGateNotMet", "TimeGateNotMet", "EvidenceGateNotMet", "EvidenceHoldPending", "TermAnchorPending")
+TERM_ERRORS = ("TermNotPending", "SuccessorNotInstalled", "ClosureOpeningMismatch", "NotInitialized")
+CLOSURE_KIND = 4   # RecordKind.Closure; its data is abi.encode(assignmentID, hRound, hRecordID, terminalRoot, exposureDigest, keyHistoryDigest)
 ERRORS = LAWFUL_EARLY + ("RetirementNotImported", "LotStillReferenced", "RecordsPending", "LotAlreadyReleased", "LotUnknown", "BatchTooLarge", "EmptyBatch")
 
 
@@ -41,12 +52,19 @@ def cast(a, *args):
         raise ExitError(f"cast {args[0]} timed out after {CAST_TIMEOUT} s (the execution client does not answer)")
 
 
-def call(a, sig, *args, frm=None, block=None):
+def call(a, sig, *args, frm=None, block=None, to=None):
     opts = ["--rpc-url", a.rpc] + (["--from", frm] if frm else []) + (["--block", str(block)] if block is not None else [])
-    out = cast(a, "call", *opts, a.custody, sig, *map(str, args))
+    out = cast(a, "call", *opts, to or a.custody, sig, *map(str, args))
     if out.returncode:
         raise ExitError(f"cast call {sig} failed: {out.stderr.strip()}")
     return [l.split()[0] for l in out.stdout.strip().splitlines() if l.strip()]
+
+
+def revert_name(a, text, names):
+    """The custody error a revert names: by name in cast's text, else by its selector."""
+    by_selector = {selector(a, n): n for n in names}
+    m = re.search(r"0x[0-9a-fA-F]{8}", text)
+    return next((n for n in names if n in text), None) or (by_selector.get(m.group(0).lower()) if m else None)
 
 
 def selector(a, name):
@@ -84,11 +102,63 @@ def refusal(a):
     if out.returncode == 0:
         return {"outcome": "mature-now", "reason": None}
     text = out.stderr + out.stdout
-    by_selector = {selector(a, n): n for n in ERRORS}
-    m = re.search(r"0x[0-9a-fA-F]{8}", text)
-    name = next((n for n in ERRORS if n in text), None) or (by_selector.get(m.group(0).lower()) if m else None)
+    name = revert_name(a, text, ERRORS)
     need(name is not None, f"mature reverted with an error this check does not know: {text.strip()[:300]}")
     return {"outcome": "refused", "reason": name, "lawfulEarly": name in LAWFUL_EARLY}
+
+
+def closures(a, roots):
+    """{assignmentID: (hRecordID, terminalRoot)} from every authenticated Closure record (the first one of a term; a repeat is identical)."""
+    out = {}
+    for i in range(int(call(a, "recordCount()(uint64)", to=roots)[0])):
+        raw = cast(a, "call", "--rpc-url", a.rpc, roots, "recordAt(uint64)((uint64,bytes32,bytes32,uint8,uint64,uint64,bytes))", str(i))
+        need(raw.returncode == 0, f"recordAt({i}) failed: {raw.stderr.strip()}")
+        fields = [f.strip().split()[0] for f in raw.stdout.strip().strip("()").split(",")]
+        need(len(fields) == 7, f"recordAt({i}) is not a root record: {raw.stdout.strip()[:200]}")
+        if int(fields[3]) != CLOSURE_KIND:
+            continue
+        data = fields[6][2:]
+        need(len(data) == 6 * 64, f"record {i} is a Closure whose data is not six words")
+        words = ["0x" + data[k * 64:(k + 1) * 64] for k in range(6)]
+        out.setdefault(words[0].lower(), (words[2].lower(), words[3].lower()))
+    return out
+
+
+def pending_terms(a):
+    """The closed terms that still wait for their report anchors, each previewed: {"supported", "blockedLots", "terms": [...]}."""
+    st = read_state(a)
+    blocked = []
+    for lot in st["lots"]:
+        if lot["category"] == 4:
+            continue
+        raw = cast(a, "call", "--rpc-url", a.rpc, a.custody, "lotUnanchoredTerms(uint256)(uint32)", str(lot["id"]))
+        if raw.returncode:   # contracts that predate #1297 have no anchors: nothing to do
+            return {"supported": False, "blockedLots": [], "terms": []}
+        if int(raw.stdout.split()[0]):
+            blocked.append(lot["id"])
+    out = {"supported": True, "blockedLots": blocked, "terms": []}
+    if not blocked:
+        return out
+    roots = call(a, "roots()(address)")[0]
+    sender = a.sender or st["withdrawal"]
+    for aid, (h, t) in sorted(closures(a, roots).items()):
+        if call(a, "termAnchors(bytes32)(bytes32,bytes32,uint64,uint64,bool)", aid)[4] == "true":
+            continue
+        if call(a, "assignments(bytes32)(uint8,bytes32,uint64,uint64,uint64,uint64,bool,bool,uint64,bool,uint64,uint64,bytes32,bytes32,bytes32,uint32)", aid)[9] != "true":
+            continue   # a Closure custody has not applied yet (RecordsPending is another refusal)
+        pre = cast(a, "call", "--rpc-url", a.rpc, "--from", sender, a.custody, "anchorTerm(bytes32,bytes32,bytes32)", aid, h, t)
+        term = {"assignmentID": aid, "hRecordID": h, "terminalRoot": t, "ready": pre.returncode == 0, "reason": None}
+        if pre.returncode:
+            term["reason"] = revert_name(a, pre.stderr + pre.stdout, TERM_ERRORS)
+            need(term["reason"] is not None, f"anchorTerm({aid}) reverted with an error this check does not know: {(pre.stderr + pre.stdout).strip()[:300]}")
+            if term["reason"] == "TermNotPending":
+                continue   # anchored meanwhile
+        out["terms"].append(term)
+    return out
+
+
+def cmd_terms(a):
+    print(json.dumps(pending_terms(a), sort_keys=True))
 
 
 def cmd_state(a):
@@ -126,15 +196,16 @@ def cmd_claimed(a):
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
-    for name, fn in (("state", cmd_state), ("refusal", cmd_refusal), ("matured", cmd_matured), ("claimed", cmd_claimed)):
+    for name, fn in (("state", cmd_state), ("refusal", cmd_refusal), ("matured", cmd_matured), ("claimed", cmd_claimed), ("terms", cmd_terms)):
         s = sub.add_parser(name)
         s.set_defaults(fn=fn)
         for k in ("rpc", "cast", "custody"):
             s.add_argument("--" + k, required=True)
         s.add_argument("--id", type=int, required=True)
         s.add_argument("--generation", type=int)
-        if name == "refusal":
+        if name in ("refusal", "terms"):
             s.add_argument("--sender")
+        if name == "refusal":
             s.add_argument("--allow-success", action="store_true")
         if name == "matured":
             s.add_argument("--before", required=True)

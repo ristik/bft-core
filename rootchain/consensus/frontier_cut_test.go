@@ -60,7 +60,7 @@ func TestFrontierCommittedCutFromRealLoopVerifiesAgainstLiveCandidate(t *testing
 
 	var cut *storage.FrontierCutSnapshot
 	require.Eventually(t, func() bool {
-		cut, err = cms[0].blockStore.ReadFrontierCutSnapshot(partitionID, shardID)
+		cut, err = cms[0].blockStore().ReadFrontierCutSnapshot(partitionID, shardID)
 		return err == nil && cut.RootRound >= candidate.Floor()
 	}, 5*time.Second, 20*time.Millisecond)
 	require.Less(t, cut.LastCR.UC.UnicitySeal.RootChainRoundNumber, cut.RootRound)
@@ -231,7 +231,7 @@ func TestFrontierCommittedCutFromRealLoopVerifiesAgainstLiveCandidate(t *testing
 	// when its response author was already counted in the initial quorum.
 	si, err := cms[0].ShardInfo(partitionID, shardID)
 	require.NoError(t, err)
-	require.NoError(t, cms[0].RequestCertification(context.Background(), IRChangeRequest{Partition: partitionID, Shard: shardID, Reason: Quorum, Requests: buildBlockCertificationRequest(t, shardNodes, si.LastCR)}))
+	require.NoError(t, cms[0].RequestCertification(context.Background(), IRChangeRequest{RootEpoch: cms[0].InstalledRootEpoch(), Partition: partitionID, Shard: shardID, Reason: Quorum, Requests: buildBlockCertificationRequest(t, shardNodes, si.LastCR)}))
 	var ordinary *SignedFrontierResponse
 	require.Eventually(t, func() bool {
 		ordinary, err = cms[0].SampleSignedFrontier(context.Background(), request)

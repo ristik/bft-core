@@ -17,6 +17,7 @@ import (
 	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/vradmit"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
 )
@@ -60,6 +61,16 @@ type pendingHandoffAbort struct {
 // SubmitHandoffAbort is the operator-only local signing path. Network peers
 // can relay an approval but cannot cause this validator to create one.
 func (x *ConsensusManager) SubmitHandoffAbort(ctx context.Context, target abdrc.HandoffAbortTarget) (abdrc.HandoffAbortStatus, error) {
+	// an operator entry point runs in one published consensus context, never during an in-process epoch switch (#1086)
+	var out abdrc.HandoffAbortStatus
+	err := x.operator(func() (err error) {
+		out, err = x.opSubmitHandoffAbort(ctx, target)
+		return err
+	})
+	return out, err
+}
+
+func (x *ConsensusManager) opSubmitHandoffAbort(ctx context.Context, target abdrc.HandoffAbortTarget) (abdrc.HandoffAbortStatus, error) {
 	status, record, err := x.handoffAbortStatus(target)
 	if err != nil {
 		return abdrc.HandoffAbortStatus{}, err
@@ -107,11 +118,52 @@ func (x *ConsensusManager) HandoffAbortStatus(target abdrc.HandoffAbortTarget) (
 }
 
 func (x *ConsensusManager) handoffAbortStatus(target abdrc.HandoffAbortTarget) (abdrc.HandoffAbortStatus, evmroot.OrderedHandoffRecord, error) {
+	status, record, err := x.handoffAbortStatusAtHead(target)
+	if errors.Is(err, ErrHandoffAbortTarget) {
+		// the committed head is past the target's epoch (the root switched into the successor in process, #1095, or was restarted into it): the
+		// target's handoff is no longer the head's control state, but its committed activation is in the verified history
+		if s, r, ok := x.abortTooLateAfterActivation(target); ok {
+			return s, r, nil
+		}
+	}
+	return status, record, err
+}
+
+// abortTooLateAfterActivation reports an Abort target whose handoff this root has already activated: the verified history's entry of the
+// epoch after the target's is the activation of exactly the target's committed record (network, epoch, attempt, predecessor and successor
+// body). Such an Abort is too late, as it is at the commit itself; any other target is not answered here.
+func (x *ConsensusManager) abortTooLateAfterActivation(target abdrc.HandoffAbortTarget) (abdrc.HandoffAbortStatus, evmroot.OrderedHandoffRecord, bool) {
+	none := evmroot.OrderedHandoffRecord{}
+	if x.q3 == nil || target.OldEpoch == 0 || target.OldEpoch == ^uint64(0) || x.InstalledRootEpoch() <= target.OldEpoch {
+		return abdrc.HandoffAbortStatus{}, none, false
+	}
+	if _, err := handoffAbortKeyFor(target); err != nil {
+		return abdrc.HandoffAbortStatus{}, none, false
+	}
+	entry, ok := x.q3.Activated(target.OldEpoch + 1)
+	if !ok {
+		return abdrc.HandoffAbortStatus{}, none, false
+	}
+	v, _, ok := entry.Handoff()
+	if !ok || v.Epoch != target.OldEpoch || v.Record.Kind != "commit" || !recordMatchesAbortTarget(v.Record, target) {
+		return abdrc.HandoffAbortStatus{}, none, false
+	}
+	status := abdrc.HandoffAbortStatus{Target: target, State: "too_late", RecordID: fmt.Sprintf("0x%x", v.Record.ID()), OrderedRound: v.OrderRound}
+	if state, err := x.blockStore().GetState(); err == nil && state != nil && state.CommittedHead != nil && state.CommittedHead.Block != nil {
+		if blockID, err := state.CommittedHead.Block.Hash(crypto.SHA256); err == nil {
+			status.CommittedRootID = fmt.Sprintf("0x%x", blockID)
+			status.CommittedRootRound = state.CommittedHead.Block.GetRound()
+		}
+	}
+	return status, v.Record, true
+}
+
+func (x *ConsensusManager) handoffAbortStatusAtHead(target abdrc.HandoffAbortTarget) (abdrc.HandoffAbortStatus, evmroot.OrderedHandoffRecord, error) {
 	status := abdrc.HandoffAbortStatus{Target: target, State: "unknown"}
 	if _, err := handoffAbortKeyFor(target); err != nil {
 		return status, evmroot.OrderedHandoffRecord{}, err
 	}
-	state, err := x.blockStore.GetState()
+	state, err := x.blockStore().GetState()
 	if err != nil || state == nil || state.CommittedHead == nil || state.CommittedHead.Control == nil || state.CommittedHead.Block == nil {
 		return status, evmroot.OrderedHandoffRecord{}, ErrHandoffAbortTarget
 	}
@@ -268,7 +320,21 @@ func (x *ConsensusManager) handoffPredecessor() ([]byte, error) {
 
 // plannedAttempt is the attempt number the next handoff uses, given the control state at a block round: 0 on a fresh chain, the
 // next number after an abort or after a Prepare whose freeze lapsed. Any other phase has a handoff in progress.
+//
+// On a validator-registry chain (a control state that carries the VR root state) planning is aligned with the cooldown predicate
+// (design section 5.5.2): between a Prepare's lapse and the end of its cooldown no next attempt exists, exactly as the backoff identity,
+// the intent's attemptOpenRound and Prepare validation read it (vradmit.PlannedAttempt). The pre-VR planner keeps its lapse rule.
 func plannedAttempt(control *evmroot.ControlState, round uint64) (uint64, error) {
+	if control != nil && len(control.VR) != 0 {
+		k, ok, err := vradmit.PlannedAttempt(control, round)
+		switch {
+		case err != nil:
+			return 0, errors.Join(ErrHandoffApproval, err)
+		case !ok:
+			return 0, fmt.Errorf("%w: no plannable attempt in phase %s at round %d", ErrHandoffApproval, control.Phase, round)
+		}
+		return k, nil
+	}
 	switch {
 	case control == nil:
 		return 0, ErrHandoffApproval
@@ -295,7 +361,17 @@ func intentSummary(network uint64, predecessor []byte, attempt uint64) []byte {
 // the unsigned message the leader orders a Prepare for. It binds no EVM parent. Every old validator is given the same message
 // (AcceptHandoffIntent) and endorses it only after the Prepare is committed (EndorseHandoff).
 func (x *ConsensusManager) PlanHandoff(next *types.RootTrustBaseV1, proposal *evmassign.Proposal) (abdrc.HandoffApprovalMsg, error) {
-	state, err := x.blockStore.GetState()
+	// an operator entry point runs in one published consensus context, never during an in-process epoch switch (#1086)
+	var out abdrc.HandoffApprovalMsg
+	err := x.operator(func() (err error) {
+		out, err = x.opPlanHandoff(next, proposal)
+		return err
+	})
+	return out, err
+}
+
+func (x *ConsensusManager) opPlanHandoff(next *types.RootTrustBaseV1, proposal *evmassign.Proposal) (abdrc.HandoffApprovalMsg, error) {
+	state, err := x.blockStore().GetState()
 	if err != nil {
 		return abdrc.HandoffApprovalMsg{}, ErrHandoffApproval
 	}
@@ -310,7 +386,12 @@ func (x *ConsensusManager) PlanHandoff(next *types.RootTrustBaseV1, proposal *ev
 // AcceptHandoffIntent registers a plan another validator's operator endpoint built, after checking everything about it that needs
 // no signature and no EVM state: the body, the candidate, the attempt this chain expects next.
 func (x *ConsensusManager) AcceptHandoffIntent(plan abdrc.HandoffApprovalMsg) error {
-	state, err := x.blockStore.GetState()
+	// an operator entry point runs in one published consensus context, never during an in-process epoch switch (#1086)
+	return x.operator(func() error { return x.opAcceptHandoffIntent(plan) })
+}
+
+func (x *ConsensusManager) opAcceptHandoffIntent(plan abdrc.HandoffApprovalMsg) error {
+	state, err := x.blockStore().GetState()
 	if err != nil {
 		return fmt.Errorf("%w: no committed state", ErrHandoffApproval)
 	}
@@ -376,6 +457,7 @@ func (x *ConsensusManager) setHandoffIntent(plan abdrc.HandoffApprovalMsg) {
 	cloned.Receipts = bytes.Clone(plan.Receipts)
 	cloned.PrimaryPoPs = bytes.Clone(plan.PrimaryPoPs)
 	x.handoffIntent = &cloned
+	x.handoffIntentGen++
 	x.prefetchFactsForPlan(plan.CandidatePreimage)
 }
 
@@ -391,6 +473,17 @@ func (x *ConsensusManager) retireIntent(control *evmroot.ControlState) {
 	if x.handoffIntent != nil && x.handoffIntent.Attempt <= control.Attempt {
 		x.handoffIntent = nil
 	}
+}
+
+// pendingIntentGen is pendingIntent with the generation of the registration it read.
+func (x *ConsensusManager) pendingIntentGen(attempt uint64) (*abdrc.HandoffApprovalMsg, uint64) {
+	x.handoffMu.Lock()
+	defer x.handoffMu.Unlock()
+	if x.handoffIntent == nil || x.handoffIntent.Attempt != attempt {
+		return nil, 0
+	}
+	cloned := *x.handoffIntent
+	return &cloned, x.handoffIntentGen
 }
 
 // pendingIntent is the held intent for the given attempt, or nil. An intent for another attempt or another epoch is dead.
@@ -879,7 +972,12 @@ func (x *ConsensusManager) validateHandoffApproval(msg *abdrc.HandoffApprovalMsg
 // the Prepare, so it is refused until that Prepare is in this validator's
 // committed state, and the plan may name no other parent.
 func (x *ConsensusManager) EndorseHandoff(ctx context.Context, plan abdrc.HandoffApprovalMsg) error {
-	state, err := x.blockStore.GetState()
+	// an operator entry point runs in one published consensus context, never during an in-process epoch switch (#1086)
+	return x.operator(func() error { return x.opEndorseHandoff(ctx, plan) })
+}
+
+func (x *ConsensusManager) opEndorseHandoff(ctx context.Context, plan abdrc.HandoffApprovalMsg) error {
+	state, err := x.blockStore().GetState()
 	if err != nil {
 		return ErrHandoffApproval
 	}
@@ -1031,7 +1129,7 @@ func (x *ConsensusManager) verifyEndorsedAssignmentInstalled(plan abdrc.HandoffA
 // boundPrepare is the frozen parent and activation round of the Prepare of the given attempt in this validator's committed state,
 // when that Prepare is committed here.
 func (x *ConsensusManager) boundPrepare(attempt uint64) ([]byte, uint64, bool) {
-	state, err := x.blockStore.GetState()
+	state, err := x.blockStore().GetState()
 	if err != nil || state == nil || state.CommittedHead == nil || state.CommittedHead.Control == nil {
 		return nil, 0, false
 	}
@@ -1063,6 +1161,7 @@ func (x *ConsensusManager) onHandoffApprovalMsg(_ context.Context, msg *abdrc.Ha
 		return err
 	}
 	id := plan.body.id
+	x.pruneSpentPlans()
 	x.handoffMu.Lock()
 	defer x.handoffMu.Unlock()
 	if x.handoffPlans == nil {
@@ -1140,12 +1239,13 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 	if parentQC == nil {
 		return nil, nil
 	}
-	parent, err := x.blockStore.Block(parentQC.GetRound())
+	parent, err := x.blockStore().Block(parentQC.GetRound())
 	if err != nil || parent == nil || parent.ShardState.Control == nil {
 		return nil, nil
 	}
 	control := parent.ShardState.Control
 	x.retireIntent(control)
+	x.pruneHandoffRefusals(control)
 	if control.Phase == "committed" {
 		return nil, nil
 	}
@@ -1162,6 +1262,24 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 			if signatures, ready := x.readyHandoffAbort(target); ready {
 				return abortHandoffRecords(round, previous, signatures)
 			}
+		}
+	}
+	// a validator-registry chain orders its records for the complete verified view certificate this root holds (VT-05b)
+	// ... except an exact recovery of its committed, unacknowledged primary (#1221), which follows the handoff path below
+	if x.vr != nil && len(control.VR) != 0 {
+		if control.Phase == "endorsed" {
+			// the retained candidate of the committed Freeze tells a recovery from an ordinary primary; it is read once, and an error is the caller's
+			raw, err := x.committedRecoveryPreimage(control)
+			if err != nil {
+				return nil, fmt.Errorf("%w: the retained candidate of the committed Freeze: %w", ErrHandoffApproval, err)
+			}
+			if raw == nil {
+				return x.vrRecordsForRound(round, parent, parentQC)
+			}
+			return x.vrRecoveryCommit(round, parent, control, raw)
+		}
+		if !x.vrRecoveryRoute(parent, control, round) {
+			return x.vrRecordsForRound(round, parent, parentQC)
 		}
 	}
 	// A Prepare whose freeze lapsed is dead: no Freeze is ordered for it, and once the cooldown has passed the leader may start the
@@ -1192,8 +1310,15 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 		if intent == nil {
 			return nil, nil
 		}
+		if x.vr != nil && len(control.VR) != 0 && !x.vrRecoveryIntentOK(parent, *intent) {
+			return nil, nil // the intent changed since the route judged it: ordered next round, if eligible
+		}
 		// a due election result is rejected first (contracts#73): the Prepare waits for a later round, its intent kept
-		if x.preferRejection(context.Background(), parentQC.GetRound(), round, parentQC) {
+		reject := x.preferRejection
+		if x.vr != nil && x.vr.reject != nil {
+			reject = x.vr.reject
+		}
+		if reject(context.Background(), parentQC.GetRound(), round, parentQC) {
 			return nil, nil
 		}
 		return x.prepareRecordFor(*intent, control, round)
@@ -1267,7 +1392,7 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 			return nil, ErrHandoffApproval
 		}
 		record.ActivationRound = activation
-		key, err := x.blockStore.CertifiedEVMShardAt(parent.GetRound(), control.FrozenParent)
+		key, err := x.blockStore().CertifiedEVMShardAt(parent.GetRound(), control.FrozenParent)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %w", ErrHandoffApproval, err)
 		}
@@ -1320,7 +1445,7 @@ func (x *ConsensusManager) frozenParentLoss(parent *storage.ExecutedBlock, plann
 		return "the endorsed frozen parent differs from the plan"
 	case !parentHasFrozenShard(parent, frozen):
 		return "the shard's certified IR in the parent block is no longer the frozen parent (a newer EVM block was certified)"
-	case !x.blockStore.CommittedFrozenParent(frozen):
+	case !x.blockStore().CommittedFrozenParent(frozen):
 		return "the frozen parent is not in the committed state"
 	}
 	return ""
@@ -1427,7 +1552,7 @@ func acknowledgedShardConfig(orchestration Orchestration, shard abdrc.ShardInfo)
 // EVMAssignmentContext reports the possession-proof context for the next handoff. A successor key holder signs
 // evmassign.PoPMessage for exactly this network, predecessor and attempt; a stale or different context is refused later.
 func (x *ConsensusManager) EVMAssignmentContext() (EVMAssignmentContext, error) {
-	state, err := x.blockStore.GetState()
+	state, err := x.blockStore().GetState()
 	if err != nil || state == nil || state.CommittedHead == nil || state.CommittedHead.Block == nil || state.CommittedHead.Control == nil {
 		return EVMAssignmentContext{}, ErrHandoffApproval
 	}

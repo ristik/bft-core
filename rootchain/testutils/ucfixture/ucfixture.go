@@ -28,8 +28,8 @@ import (
 )
 
 const (
-	// NetworkID of the fixture network.
-	NetworkID = types.NetworkTestNet
+	// NetworkID of the fixture network: the local network.
+	NetworkID = types.NetworkLocal
 	// RootNodes is the number of root authority nodes; the quorum is 3 of 4.
 	RootNodes = 4
 	// OtherPartition is a second, single shard partition present in the root
@@ -188,8 +188,25 @@ func (p *Producer) Shards() []Shard { return slices.Clone(p.shards) }
 // TrustBase is the (unsigned) trust base of the fixture authority.
 func (p *Producer) TrustBase() *types.RootTrustBaseV1 { return p.tb }
 
-// TrustBaseCBOR is the native encoding of the trust base.
-func (p *Producer) TrustBaseCBOR() ([]byte, error) { return p.tb.MarshalCBOR() }
+// TrustBaseBundle is the authority of the fixture network as a Unicity Trust Base v2 bundle (tag 39015, the GET /api/v1/trustbases form): the
+// one genesis entry with the network, epoch, start round, members (the stake is the voting weight) and quorum of the producer's trust base. A
+// corpus carries its authority in this form; a verifier opens it as a history pinned to that genesis.
+func (p *Producer) TrustBaseBundle() ([]byte, error) {
+	e := types.NewRootTrustBaseV2()
+	e.NetworkID, e.Epoch, e.EpochStart = p.tb.NetworkID, p.tb.Epoch, p.tb.EpochStart
+	e.RootNodes = p.tb.RootNodes
+	e.QuorumThreshold = p.tb.QuorumThreshold
+	e.StateHash, e.ChangeRecordHash = p.tb.StateHash, p.tb.ChangeRecordHash
+	e.PreviousEntryID = make([]byte, types.TrustBaseV2IDLen)
+	if err := e.Validate(); err != nil {
+		return nil, fmt.Errorf("ucfixture: the authority is not a valid trust base v2 genesis entry: %w", err)
+	}
+	raw, err := e.MarshalCBOR()
+	if err != nil {
+		return nil, err
+	}
+	return types.EncodeTrustBaseBundle([][]byte{raw})
+}
 
 // Quorum is the number of root signatures a seal needs.
 func (p *Producer) Quorum() int {

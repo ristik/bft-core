@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 )
 
 // `handoff plan-request` writes exactly the request `propose` sends to the first root, so a wrapper that performs the plan, intent and endorse phases
@@ -65,4 +66,38 @@ func TestPlanRequestIsExactlyWhatProposeSends(t *testing.T) {
 		_, err := os.Stat(filepath.Join(dir, "x.json"))
 		require.True(t, os.IsNotExist(err))
 	})
+}
+
+type vrRecoveryStub struct {
+	handoffOperatorStub
+	planned int
+}
+
+func (s *vrRecoveryStub) PlanVRRecovery() (abdrc.HandoffApprovalMsg, error) {
+	s.planned++
+	return abdrc.HandoffApprovalMsg{Attempt: 3}, nil
+}
+
+// A VR exact recovery request names nothing: the plan endpoint hands it to the root's own derivation (#1221), and a root without one refuses it.
+func TestVRRecoveryPlanRequest(t *testing.T) {
+	request, epoch, err := planRequestFor(true, "", "", "", false)
+	require.NoError(t, err)
+	require.Zero(t, epoch)
+	require.JSONEq(t, `{"nextTrustBase":null,"vrRecovery":true}`, string(request))
+	_, _, err = planRequestFor(true, "next.json", "", "", false)
+	require.Error(t, err, "no trust base is read for a recovery")
+	_, _, err = planRequestFor(false, "", "", "", false)
+	require.Error(t, err)
+
+	stub := &vrRecoveryStub{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { rootHandoffPlanHandler(stub)(w, r) }))
+	defer server.Close()
+	var plan abdrc.HandoffApprovalMsg
+	require.NoError(t, handoffPost(t.Context(), server.Client(), server.URL+"/api/v1/handoff/plan", request, &plan))
+	require.EqualValues(t, 3, plan.Attempt)
+	require.Equal(t, 1, stub.planned)
+
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { rootHandoffPlanHandler(&handoffOperatorStub{})(w, r) }))
+	defer plain.Close()
+	require.Error(t, handoffPost(t.Context(), plain.Client(), plain.URL+"/api/v1/handoff/plan", request, &plan), "not a VR-mode root")
 }

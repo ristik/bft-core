@@ -10,6 +10,12 @@ Each validator entity is a **four-container pod**: root, paired ureth, shard,
 signing authority. Separate containers give each process bounded resources,
 observable logs and independent restarts without a custom process supervisor.
 Each pod has separate root/shard/authority keys, Engine JWT, journals and archive.
+The shard archive keeps one file per block under `archive/records/<hh>/` since #1049; a node migrates the directory-per-block
+layout of an earlier binary by itself, records readable throughout. **Do not roll a migrated archive back to a binary (or an
+`h4-restore-pin`) from before #1049**: it reads only the directory layout, so every packed record is missing to it.
+Handoff bundles live in the shard archive's `bundles/` directory since #1053. A shard node or an `h4-restore-pin` from before #1053
+looks for them only in the archive directory itself: rolled back to one, a node does not see (or republish) the bundles written since, and
+`h4-restore-pin` needs `H4_RESTORE_BODY_IDS` for their epochs.
 Only its shard and authority share the authority directory/Unix sockets. Operator
 credentials are privileged host material; these pods are not a hostile-container
 security boundary. Never mount one validator's private directory into another.
@@ -18,6 +24,18 @@ Authority keys exist only in process memory by protocol design. Authorities use
 changes its key and requires a separately authorized validator replacement. The
 generator enrolls keys inside the long-lived Docker authorities, never in a
 throwaway init process. Full host/daemon loss requires a fresh testnet reset.
+
+**ureth's node key (bft-core#1148).** The execution client signs nothing (block seals are verified, not made, by it; the EVM signing
+key is the signing authority's), but it has one key of its own: its devp2p node key, its RLPx peer id. The generator (and `joiner.py prepare`,
+`remote_joiner.py init`) makes it once as `validator<N>/ureth-key/p2p-secret` (directory 0700, file 0600, UID 10001), outside the data
+directory `validator<N>/ureth`, and mounts it read-only into `ureth<N>` only (`--p2p-secret-key /ureth-key/p2p-secret`). It is kept across
+restarts, `up --force-recreate`, image upgrades and a cold restore that empties `validator<N>/ureth`. A preflight in the service's entrypoint
+refuses to start when the file is missing, empty, unreadable or not a regular file (a symbolic link is refused) (exit 78, "refusing to start under a new identity"): ureth then restart-loops with that
+message instead of making a new key. Restore the file from the generation's backup (backup.py archives it); never create a new one in its
+place for a running generation. A repeated `remote_joiner.py init` likewise refuses a lost key once the entity was initialized with one (`urethKeyCreated` in its `state.json`, or a `compose.json` that mounts it). Generations made before #1148 keep reth's default: `validator<N>/ureth/discovery-secret`, made by reth on the
+first start (0644) and made again, silently, whenever the data directory is emptied. The Engine JWT (`validator<N>/jwt/jwt.hex`) is the one
+secret ureth shares, by design and only within its entity: the HMAC secret of its shard node's Engine API calls (the root reads it too, for
+q3-readiness).
 The one aggregator is aggregator-go (owner decision 40): partition 7, one full-range
 shard, a single instance without high availability, its state in a single-node
 MongoDB replica set (`mongo` service, pinned image, no authentication, on its own
@@ -32,15 +50,20 @@ engine protocol are supplied by the pinned BFT/ureth builds.
 
 The generated `compose.yaml` is JSON (valid YAML), default N=4, configurable N=3..16 (the registry's committee ceiling; a PoS generation is further limited to the election cap, 6).
 All services have CPU/memory/PID limits, explicit restart policies, read-only root filesystems
-and bounded Docker JSON logs (30 MiB/service). Each pod caps memory at about 2.7 GiB (2.625 GiB of its four services, plus a 16 MiB namespace holder and a 64 MiB metrics relay);
-shared services cap another 1.625 GiB, approximately **12.5 GiB for N=4** and
-**9.75 GiB for N=3**, plus Docker/OS/page cache/build overhead. Plan at least 24 GiB
+and bounded Docker JSON logs (30 MiB/service). Each pod caps memory at about 4.2 GiB (4.125 GiB of its four services, of which the shard node's 2 GiB also covers the kernel cache of its archive tree, #1018:
+a record is one file since #1049, measured at 1.05 inodes and about 3 KB of slab per archived block (13 inodes and about 20 KB in the
+directory layout before it), so at about 2800 blocks/h the archive slab reaches 1.4 GB after 7 days if the kernel never reclaims it; a node
+started on an archive an earlier binary wrote migrates it in the background, giving back about 17 KB per block;
+the observer's memory alert below is the early warning,
+plus a 16 MiB namespace holder and a 64 MiB metrics relay); shared services cap another 2.375 GiB, approximately **19.2 GiB for N=4** and
+**15.0 GiB for N=3**, plus Docker/OS/page cache/build overhead. Plan at least 24 GiB
 server RAM, 8 cores, 100 GiB initial SSD and off-host backup space; these are initial
-planning budgets, not measured capacity. On the shared 16 GiB development Mac use
+planning budgets, not measured capacity. Each root node gets `--root-cpus` CPUs (default 2: its per-round work grows with the epoch count, and
+at 0.5 the staging roots were throttled after 34 handoffs). On the shared 16 GiB development Mac use
 N=3 only when memory is available. Never build Rust while rehearsing the cluster.
 Monitor disks: retention bounds metrics/logs but does not bound chain databases.
 
-Only public RPC (8545), faucet (8088) and Prometheus (9090) bind **host loopback**.
+Only public RPC (8545), faucet (8088) and Prometheus (9090) bind **host loopback** (`generate.py --port-offset N` adds N to all three, so a second generation can share the host; lane slots use 1000 per slot, docs/lane-slots.md).
 No root admin, shard admin, authority or Engine endpoint has a published port.
 The validator network is internal (each ureth serves `eth,net,web3,debug` there: the shard node needs `debug_getRawHeader`; the public gateway allow-lists methods and has no `debug_*`). The faucet's isolated signer has Internet
 access for hCaptcha but cannot reach validators; only its relay bridges networks.
@@ -54,9 +77,40 @@ serves the aggregator's JSON-RPC on `POST /aggregator` (the SDK's methods only,
 bodies <=64 KiB) and its trust-base pages on `GET /api/v1/trustbases`, with their
 own limit of ten requests/IP/second and 50/second overall; no authentication. Expensive log scans,
 trace/debug and signing methods are excluded. `eth_call`/estimate run under these
-limits and upstream deadlines; transaction fanout reuses faucet/relay.py and checks
-every validator's chain ID/genesis before sending. A partial broadcast is ambiguous:
-inspect its hash on every node; do not automatically retry.
+limits and a shared nine-second upstream budget. The public gateway checks chain
+ID and genesis on each backend it uses. Bridge preflight calls start on the
+healthiest backend with the remaining budget, up to eight seconds for the
+method itself. Reads can use any healthy backend. The gateway
+checks block coverage for logs, receipts by number or hash, and seal companions.
+`/healthz` is ready when a pinned backend serves a valid head. The gateway
+broadcasts transactions to reachable, pinned validators within the budget. One
+acceptance returns the transaction hash immediately while bounded delivery to
+the remaining validators continues. The gateway allows four active broadcasts,
+at most two from large requests, including those finishing in the background.
+Resubmitting the same signed bytes also returns that hash when a backend can
+find that exact transaction in its pool or chain. If the gateway cannot confirm
+acceptance, it returns HTTP 503. Check the transaction hash before retrying the
+same signed bytes.
+
+## Incumbent public P2P
+
+For a new VR generation, pass `--public-p2p-ip <host-public-ipv4>` to
+`generate.py` before the authority ceremony. The address must be assigned
+to the Docker host. Each validator pod publishes its root TCP port
+(`26662 + validator index - 1 + port offset`) and shard TCP port
+(`28111 + validator index - 1 + port offset`) on that address. The root
+and shard announce the same endpoints, and the release exporter checks
+the running Docker bindings before putting them in the peer lists. The
+operator and execution APIs in each pod continue to bind loopback.
+
+Treat the pod that owns the namespace as part of the authority lifetime.
+Docker sets port bindings at container creation. Changing them on an
+existing generation requires replacing the namespace owner, and a
+running authority keeps using the namespace it started in. In particular,
+the authorities enrolled in `tn-public-20261122` require their original
+namespaces and loopback execution clients. Apply Docker-managed publishing
+from generation creation until a live migration has been rehearsed with
+authority continuity.
 
 ## Build artifacts on Linux
 
@@ -100,7 +154,7 @@ the lock releases on exit. Do not remove a live lock or run alongside its owner.
 ```sh
 umask 077
 sudo -E python3 deploy/testnet/generate.py --out /srv/testnet/tn-20261007 \
-  --validators 4 --chain-id 31337 \
+  --validators 4 --chain-id 31337 --first-generation \
   --ubft /srv/src/bft-pinned/build/ubft \
   --captcha-sitekey YOUR_SITE_KEY \
   --captcha-secret-file /srv/secrets/hcaptcha-secret
@@ -124,8 +178,13 @@ generation before retrying a new name.
 
 Generator initializes and signs the trust base using ubft, enrolls independent
 signing authorities using existing CLI commands, finalizes the B1 genesis (verified against an independent `b1genesis --verify` regeneration before anything starts) and
-funds **only a random dedicated faucet account** with 1000 disposable UCT. Its V3
-keystore and random password stay in private files. It creates no known Hardhat
+funds **only two random dedicated accounts**: the faucet account (`--faucet-balance`,
+paid out only by the faucet signer) and the funder account (`--funder-balance`, default
+5,000 UCT, `funder-secrets/`, `funder_address` in the manifest), which signs every transfer
+the package's tools make (rehearsals, owner top-ups, joins, the bridge deployment). Never
+send from the faucet key outside the signer: the signer counts its nonce locally, and a
+foreign transaction leaves it stale (bft-core#1287). Their V3
+keystores and random passwords stay in private files. It creates no known Hardhat
 allocation. Engine JWTs and reset entropy are fresh. The printed block-zero hash
 is derived by ubft from the finalized genesis, not its file SHA-256. It writes that
 identity directly into the faucet config and public manifest. Verify every node's
@@ -140,9 +199,13 @@ Configure host nginx with [nginx.conf.example](nginx.conf.example) and the
 [faucet nginx example](faucet/nginx.conf.example); provide real names and TLS
 certificates, `nginx -t`, then reload. Only open host TCP 443 (80 for certificate
 renewal if needed), with SSH restricted to operators. Do not publish 8545/8088/9090.
-Bridge subnets 172.30.88.0/24 and 172.30.89.0/24 must be unused. Verify Docker's
-actual proxy socket peer: faucet trusts only 172.30.88.1 and RPC only 172.30.89.1;
-nginx must overwrite X-Forwarded-For. Adjust the exact peer config deliberately if
+The bridged faucet and edge subnets (`--faucet-subnet`, `--edge-subnet`; default
+172.30.88.0/24 and 172.30.89.0/24) must be unused: generate.py refuses, before any key
+exists, a subnet that overlaps any Docker network on the host, including a stopped
+generation's. Give a second generation on the same host other subnets. Verify Docker's
+actual proxy socket peer: the faucet guard trusts only the faucet network's first address,
+the RPC gateway only the edge network's (the manifest's
+`networks`); nginx must overwrite X-Forwarded-For. Adjust the exact peer config deliberately if
 the host differs. Never disable hCaptcha publicly. Publish NOTICE.txt, the current
 chain/genesis manifest, wallet setup, status URL and the incident-owner role's reporting channel.
 [TESTER.md](../../docs/operations/testnet/TESTER.md) is the wallet and transaction page for external testers; it points them at `tester-check.py`, which checks an endpoint against the published chain ID and block-zero hash.
@@ -155,6 +218,183 @@ Reject old genesis wallet pins, signing/admin/Engine methods, batches, malformed
 JSON, >16 KiB bodies (other than raw transactions) and burst traffic. Capture 400/429 results and verify ordinary
 RPC still responds afterwards. A raw externally signed transaction must enter
 **all** paired mempools; the RPC relay handles that fanout.
+
+## One public host name (staging)
+
+The faucet's settings are generator options: `--faucet-payout` (UCT per claim, default
+200), `--faucet-balance` (the faucet account's genesis balance, default 50,000 UCT),
+`--faucet-daily-claims` (default 50) and `--faucet-per-ip-limit` (off by default; see
+[faucet/README.md](faucet/README.md)). The manifest records them under `faucet`.
+
+A public generation behind one name (e.g. pos.staging.unicity.network):
+
+```
+generate.py --out /srv/testnet/tn-NAME ... --pos --utb [--faucet-subnet A --edge-subnet B]
+rehearse.py --generation G --evidence E --stages up,identity,first-tx,pos-smoke
+bridge/nb2/deploy_nb2.py G --nb2-evidence BIN   # the NB2 v1.1 graph (bridge/README.md)
+docker compose -f G/compose.yaml --project-directory G up -d --no-deps signer
+public_routes.py G --hostname NAME [--web-root /var/www/pos-staging]
+```
+
+`public_routes.py` writes `G/public/nginx/{zones,routes}.conf` (/rpc, /aggregator,
+/api/v1/trustbases, /faucet/ with /api/network and /api/claim, /demo/, /release/); its docstring has
+the install steps. Publishing the native bridge v2 files (`G/bridge/nb2/public/`) is
+bft-core#1178; the protocol 6/7 bridge's /lockproof/ and /bridge/ routes were removed with
+it (#1139). Rehearse on loopback before installing the routes.
+
+### Public testnet regeneration
+
+Reserve slot 0 for the fixed host ports and a separate offset slot for the
+join rehearsal. Use the exact node and bridge source pins and record the image
+IDs, the execution genesis hash and the signed trust-base genesis EntryID. Run
+the fifth-validator rehearsal before handing over the public four-member
+generation. The public VR/P85 profile requires the verified VR deployment and
+genesis identities. Track the Compose integration and NB2 continuation deploy
+steps in [#1277](https://github.com/ristik/bft-core/issues/1277) and
+[#1278](https://github.com/ristik/bft-core/issues/1278).
+
+Use `public_routes.py --release-source RELEASE_DIR` to verify and stage the
+regular artifacts listed in the operator release's `SHA256SUMS`. Install the
+resulting `OUT/release/` under the web root. Include the files required by the
+[validator handbook](../../docs/operations/validator-handbook.md), the generation
+manifest, and the NB2 release and trust files. Check the digests before copying.
+Keep the faucet credential as a file mount readable by the container UID. Run
+the route tests on loopback before the owner opens ingress.
+
+#### Retired root keys (#1297)
+
+A root key signs one root history only. Post-term evidence charges a seal from
+its signed bytes, which bind the network N but not the root genesis, so a key
+reused in the next generation could be charged for seals of the old one
+([D5 §2.1](../../docs/design/d5-accountability-retirement-inbox.md#21-post-term-seal-offence-1297)).
+
+`generate.py` refuses to run without the prior generation's retired-key
+inventory. The only exception is `--first-generation` for a history with no
+predecessor. The inventory is cumulative:
+
+- **The signed history.** This is the key list of the prior generation's
+  verified UTB history. It covers every epoch's committee, including the keys
+  that joined or rotated after genesis.
+- **The inherited list.** This is the prior generation's own published
+  `retired-root-keys.json`, if it has one.
+
+The new generation publishes the union as `network/retired-root-keys.json`.
+The release ships it, and `joiner.py`, `pos_join.py`, `remote_joiner.py` and
+`ubft validator apply` and `rotate` refuse any key on it by default.
+
+The live prior generation is `tn-public-20261126` on the dev server under
+`~/public-testnet-20261126`. Read it only through its public gateway (127.0.0.1:9545
+behind the proxy) and its published release. No private key leaves the server,
+and nothing there is written:
+
+```sh
+PRIOR=~/public-testnet-20261126/release
+ubft trust-base utb-verify --url http://127.0.0.1:9545 --forwarded-for 203.0.113.10 \
+  --utb-genesis-id "$(cat $PRIOR/utb-genesis.id)" \
+  --save-bundle prior-utb.cbor --keys-out prior-utb-keys.json
+# prints: ok: epochs 1..N, tip 0x...
+sudo -E python3 deploy/testnet/generate.py --out /srv/testnet/tn-NEXT ... \
+  --prior-generation prior-utb-keys.json \
+  $( [ -f $PRIOR/retired-root-keys.json ] && echo --prior-generation $PRIOR/retired-root-keys.json )
+```
+
+`tn-public-20261126` predates the list, so its signed history is the whole
+inventory. Use the `ubft` built from the pinned source: the release's own
+`ubft` predates `--url` and `--keys-out`. Keep `prior-utb.cbor` and
+`prior-utb-keys.json` with the new generation's evidence.
+
+`utb-verify --url` verifies what the gateway serves. A gateway that lags serves
+a valid prefix, and that prefix verifies too. Export from the running
+generation right before the regeneration, after its last handoff. Check that
+the printed `epochs 1..N` reaches the epoch its roots certify now. `reset.py`
+enforces this before it deletes anything:
+
+- the history's `genesisId` must be the old generation's
+  `network/utb-genesis.id`;
+- its last epoch must reach the newest `network/handoff/trust-base-epoch<N>.json`
+  the generation holds;
+- the old generation's own `network/retired-root-keys.json` and its manifest's
+  genesis keys are kept beside it and passed on as further
+  `--prior-generation` inputs.
+
+Keep nginx stopped and disabled during regeneration. At handoff, the owner
+checks both HTTP/2 backports before opening the front. Use Ubuntu nginx
+`1.24.0-2ubuntu7.20` or later, or an upstream fixed release
+(`1.30.7` on the stable branch or `1.31.9` on the mainline branch). Verify the
+Ubuntu package changelog and confirm the expected loopback and public listeners.
+
+```sh
+dpkg-query -W nginx
+zcat /usr/share/doc/nginx/changelog.Debian.gz | grep -c CVE-2026-123007
+zcat /usr/share/doc/nginx/changelog.Debian.gz | grep -c CVE-2026-123633
+sudo nginx -t
+sudo ss -ltnp
+```
+
+### VR proof-of-stake package
+
+For the public profile pass `--vr-pos --validators 4 --utb`, a clean
+`--pos-contracts` checkout at `pins.json`'s `vr-contracts` commit, and
+`--vr-fresh-measurement` from the independent
+[sixteen-seat measurement](measurements/README.md). The profile fixes four
+genesis seats, a target of five and a ceiling of sixteen. Set
+`--block-interval-ms 10000 --pos-cadence-rounds 400 --pos-cadence-seconds 300`
+for the public stage and its private rehearsal. For a public generation pass
+the site's RPC URL as `--public-rpc-url`. The existing
+`--captcha-secret-file` must be a regular file with UID 10001 and mode 0400.
+This profile mounts it directly. Use a different path with a fixture secret for
+the private rehearsal.
+
+The authority starts pending while genesis is finalized. The ceremony checks
+the allocated VR and P85 graph against the two-pass assignment, installs the
+activation fence, and pins each incumbent's election and identity. These
+in-memory keys stay live across shard restarts. This ceremony uses the
+test-network late-policy option. The root sees only the authority's
+possession-proof credential. The archive-proof RPC and Engine API bind to
+validator-pod loopback. A private allow-listed wallet relay in each pod serves
+the package gateway and other internal clients.
+
+Run `validate-generation.py --generation G`, `validate-pos.py G`,
+`rehearse.py --generation G --stages up,identity,first-tx,pos-smoke`, and
+`validate-aggregator.py G` with the tools and loopback RPC address of the
+generation. Run `vr_release.py G --out RELEASE --ubft BIN --ureth BIN` after
+the first certified blocks. It exports the release manifests, binaries, peer
+addresses and independently checked `RELEASE/seed/`. Supply `--wallet-dir`
+with the deployment's public NB2 files for the final export. The peer
+addresses are for operators on the dev host's private validator network.
+Export the bootstrap seed while the archive checkpoint is in root epoch one.
+Keep the verified `RELEASE/seed/` and pass it as `--bootstrap-seed` on later
+releases for generations whose manifests pin both `ureth-flags.txt` and
+`fee-collector.txt`. A new successor-epoch seed needs the verified activation bundles
+described in [Sync from a seed](../../docs/operations/sync-seed.md).
+
+Keep the already-verified static release for `tn-public-20261122`. Its manifest
+predates the startup-file digests. Release re-export starts with the next
+generation, whose manifest must pin both files. Release the wallet with its
+UTB genesis pin and the published 15-minute freshness policy.
+
+For the on-host operator start `python3 deploy/testnet/validator_rpc.py` on
+loopback and use `http://127.0.0.1:18485` as the operator RPC. The wrapper
+resolves and pages registration log requests and uses the normal gateway for
+transaction fanout. Use `--gateway-port 9545` on the slot-1 rehearsal.
+
+For the join rehearsal use a separate operator home and the
+[validator handbook](../../docs/operations/validator-handbook.md). When the
+election reserves the joiner's result, the participants supply their proofs
+and the relayer publishes it. The VR roots drive the handoff. With a pinned
+BFT binary that supports `--follow-root-activations`, each packaged authority
+fetches missing committed activation bundles from the root in its own pod.
+It verifies each bundle under its own pinned lineage and publishes the new
+client credential after an advance. The incumbent shard reloads the credential
+in process. Use the matching binary for operator commands on a managed authority.
+With `--out` pointing to the managed file, operator rotation and automatic renewal
+use the same authority-side publication order. An explicit alternate `--out`
+fences the managed file for the current scope. The operator provisions the first
+managed session. From then on the authority can recover a session after a lost
+operator reply and continue verifying handoffs even during a publication error.
+Use the operator's `vr-pos-advance` rehearsal stage for packages built with older
+BFT binaries. Check the assignment, quorum and a subsequent UC before recording
+the join as complete.
 
 ## Monitoring, logs and incidents
 
@@ -226,7 +466,7 @@ procedure against the surviving authority, not a bare DB rollback or clone.
 
 Copy encrypted archives, digest, exact `docker save` images and checkout off host.
 Check decrypt/load before relying on them. Backups contain disposable root/shard
-keys, Engine JWTs, faucet key/password, operator/client credentials, the aggregator
+keys, ureth node keys (`validator<N>/ureth-key`), Engine JWTs, faucet key/password, the funder key/password (`funder-secrets/`), operator/client credentials, the aggregator
 key (`aggregator/keys.json`) and the aggregator's MongoDB data; restrict access. SHA-256 checks integrity, not authentication against a
 malicious supplier. Off-host archives support investigation and retained history;
 they are **not full-host same-network disaster recovery**. Coupled rotation,
@@ -236,7 +476,9 @@ constraints prevent recovery, use the explicitly asset-losing reset below.
 ## ASSET-LOSING arbitrary reset
 
 Stop public nginx routing/claims; export public evidence and a quiesced backup if
-wanted. The following **deletes the old generation, including all balances,
+wanted. Before the teardown, export the old generation's signed UTB history keys
+(`ubft trust-base utb-verify --url ... --keys-out`, see "Retired root keys"):
+`reset.py` refuses without them. The following **deletes the old generation, including all balances,
 history, keys, authority state and faucet budgets**. It records the old public
 manifest beside the old directory and builds a new network. A failed regeneration
 leaves the old network destroyed: retain a backup first when recovery is desired.
@@ -245,11 +487,20 @@ leaves the old network destroyed: retain a backup first when recovery is desired
 sudo -E python3 /path/to/repo/deploy/testnet/reset.py \
   --old /srv/testnet/tn-20261007 --lose-all-assets -- \
   --out /srv/testnet/tn-20261008 --validators 4 --chain-id 31337 \
+  --prior-generation /srv/evidence/tn-20261007-utb-keys.json \
   --ubft /srv/src/bft-pinned/build/ubft \
   --keygen /path/to/repo/build/tn-keygen \
   --captcha-sitekey YOUR_SITE_KEY --captcha-secret-file /srv/secrets/hcaptcha-secret
 sudo chown -R 10001:10001 /srv/testnet/tn-20261008
 ```
+
+A disposable `--no-utb` rehearsal generation has no signed history and no
+root-genesis pin, so nothing can bind an inventory to it: `reset.py --old ...
+--lose-all-assets --disposable -- ...` resets it with a fresh inventory
+(`--first-generation`). `--disposable` is refused for any generation with a UTB
+pin, so the public reset stays bound to its verified history. `rehearse.py`'s
+reset stage uses `--disposable` for a `--no-utb` generation and otherwise
+exports the generation's own served history with `--keys-out`.
 
 Start as above. Require changed block-zero hash, new keys/account, all validators
 matching the new manifest, old wallet claim 409, new-wallet faucet claim and a
@@ -267,6 +518,135 @@ the account that pays for the transaction):
 - `claim`: the payee, the sender being the payee (`--amount-wei`, `--to` the recipient). It pays out a credit the payee has earned.
 - `fund`: adds value to the pool (`--value-wei`). Only value sent through `fund` is allocated to rewards: a plain transfer to the pool address is not.
 
+## Driving a handoff (PoS profile)
+
+When the election reserves a result, the roots reject it unless its handoff is prepared within 16,384 registry progress rounds (about two hours). One host command
+drives it (owner decision 2026-11-12; no daemon yet, the command is its core):
+
+```bash
+sudo -E env "PATH=$PATH" python3 deploy/testnet/handoff_drive.py $G [<resultID>] --ubft $UBFT [--restore-pin $H4PIN] [--plan]
+```
+
+It runs OPERATOR.md 5b (the rehearsal's pos-proposal, pos-propose, pos-install and pos-advance) as the steps `preflight`, `trust-base`, `proposal`, `propose`,
+`install`, `advance`, `verify`, each printed with its timing and recorded in `$G/handoff/log.jsonl` (event `drive`). After a failure the same
+command continues after the last completed step or sub-step (a root already installed, an entity already advanced). The trust base's epoch start is set above the root's current round
+(at least the rehearsal's `200000*(N-1)` for epoch N); it is a numbering floor in the file, not a round the install waits for: the activation round comes from the
+committed handoff. An entity's advance is three sub-steps (`advance-epoch`, `replace-session`, `shard-start`); the authority's `status` is read first, so an advance
+it already holds is never sent again (the authority refuses a repeat), and `client.cred.pre-epoch-N` is kept once and never overwritten. It refuses, and changes nothing, when the
+reservation has fewer than `--min-window-rounds` (1800) rounds left before the Prepare, or when the election's members are not the committee, a prepared joiner
+(`--joiner STAKINGID=ENTITY` or `$G/handoff/joiners.json`) or a retirement (`--allow-unrehearsed-retirement`: never rehearsed). Only roots are recreated (with
+`compose.install-epoch-N.json`) and shard nodes stopped and started; signing authorities are never restarted. `verify` checks every root at the new epoch, the result Acknowledged (and the block that acknowledged it), the served
+`/api/v1/trustbases` history reaching the epoch (with `--utb`), new blocks and `recordCursor == recordCount`. `--plan` prints the result, the epochs, the change and
+the window. Unrelated no-change results that nobody drives keep being rejected in between; that is harmless.
+
+Unattended (Q35): `handoff_auto.py $G --members 1,2,3,4 --log DIR -- --ubft $UBFT [--funder DIR]` is one pass for a timer (its docstring has a
+`systemd-run --user --on-calendar` line). It runs the drive with `--only-if-members`: a result whose elected committee is anything else (a joiner, a retirement)
+is skipped before any step (exit 4) and stays an operator act. Every drive, manual or not, holds `$G/handoff/drive.lock`; one started meanwhile exits 5 and
+does nothing. The owner's gas top-up comes from the generation's funder account (`funder-secrets/`), or from an operator account given as `--funder` (a directory with
+`keystore.json` and `password`); never from the faucet account, whose nonces the public faucet's signer owns (bft-core#1287). Each pass appends a line to `DIR/auto.log` and keeps the output of a pass that drove,
+stopped or was refused in `DIR/drive-<time>.log`. A skip (exit 4, e.g. an operator's join drive that stopped half way) is an idle pass: one `auto.log` line per
+result per hour, no drive log, and the unit does not fail.
+
+**The timer and a laptop join.** The pass stands down, without starting a drive, while any `$G/handoff/remote-joiners/<entity>.json` is `registered`,
+`bonded`, `prepared` or `retiring` (from `remote_joiner.py init` until the join's drive makes it a `member`), logging that once an hour: the join drives its own
+results, and a timer drive of a no-change result under a prepared joiner would move the epoch past its authority's scope. A timer pass that started just before
+the marker appeared can still hold the lock: the join's drives wait for it (exit 5, retried every 10 s for at most `--busy-wait`, 600 s). A joiner that never
+completes keeps the timer down: finish the join, or move its file aside, before relying on unattended handoffs again. After a join the committee is
+[1..5]: a timer still on `--members 1,2,3,4` then skips every later result (one hourly line each), so restart it with the new `--members`.
+
+### A validator on another machine (a laptop behind NAT)
+
+`remote_joiner.py` (on the laptop) and `remote_entity.py` (on the host) add a fifth entity whose services run on a laptop's docker (colima on macOS was the
+target) and whose keys never leave it: root and shard node keys in docker volumes of the laptop's VM, the EVM key in its signing authority's memory, the owner,
+withdrawal and payee keys in a volume (`evm_keys.py`, standard library). Only public material crosses: node ids and node-info, trust bases and the joiner's
+signature, possession proofs, readiness receipts, shard configurations, the restore pin. The handoff drive runs each of that entity's per-entity steps (trust-base
+sign, evm-pop, sign-pop, q3-readiness, the root's install restart, complete-enrollment or advance-epoch and replace-session, the shard node's restore) through the
+laptop's agent instead of `docker compose exec`; `handoff_ops.py propose` reaches its root the same way once it is an incumbent.
+
+```bash
+python3 deploy/testnet/remote_joiner.py init --host $HOST --generation $GEN   # keys, volumes, compose.json; host: ~/rjoin/$GEN, relay container, registration
+python3 deploy/testnet/remote_joiner.py start                                 # peer stubs, pod, ureth, root (follower); agent + ssh tunnel under caffeinate
+python3 deploy/testnet/remote_joiner.py join [--stop-after bonded]            # host unit: fund, register, bond, [drive the open result], prepare, admit, drive
+```
+
+Network: one `ssh -N` from the laptop, with no TCP listener on the host and no sshd change (`GatewayPorts no` stays): the host container
+`<generation>-laptop-relay` (rpc image, `tunnel_relay.py`, uid of the ssh user, `--restart unless-stopped`) sits on the internal `validators` network with the
+aliases `root5`/`shard5` and joins TCP and Unix sockets in `~/rjoin/<generation>/sock/` (mode 0700):
+
+| laptop (127.0.0.1) | ssh | host socket | host target |
+|---|---|---|---|
+| 18001-18004 | -L | `root<i>.sock` | `root<i>:8000` |
+| 19001-19004 | -L | `shard<i>.sock` | `shard<i>:9000` |
+| 18541-18544 | -L | `ureth<i>.sock` | `ureth<i>:8545` (the join transactions, sent to every pool) |
+| 28000 (colima publishes `pod5:8000`) | -R | `root5.sock` | the relay's `root5:8000` |
+| 29000 (`pod5:9000`) | -R | `shard5.sock` | the relay's `shard5:9000` |
+| 28700 (the agent) | -R | `agent.sock` | the drive (root), bearer token |
+
+On the laptop, peer stubs `peer1..4` (aliases `root<i>`, `shard<i>`, `ureth<i>`) forward to the `-L` ports through `host.docker.internal`; the laptop's root and
+shard node announce `/dns4/root5/tcp/8000` and `/dns4/shard5/tcp/9000`. Operator RPCs (8002, 9101) never cross the tunnel.
+On a Linux docker host, pass the bridge gateway as `--mac-host` (an IP literal, e.g. `172.17.0.1`): the `-L` listeners then bind that address, because a
+container cannot reach the host's loopback. Every container on that bridge can then reach the forwarded root, shard and EL ports. The p2p ports authenticate
+their peers; the execution clients' 8545 does not.
+
+A second entity on the same Linux host is not separated from the generation by default: Docker routes between bridges, so after its activation it can
+dial the validators' private container addresses directly instead of going through the tunnel, which a real external machine could not.
+`remote_joiner.py start --isolate-bridge` (opt-in, bft-core#1075) adds three DOCKER-USER rules for this project's bridge only: its own containers
+talk to each other, and anything forwarded out of or into the bridge is dropped. The host's own addresses stay reachable (INPUT, not FORWARD): the
+`-L` listeners on the gateway and the published loopback ports, which is exactly what an external party reaches over its ssh connection.
+`--emulate-wan MS` (MS > 0) adds a netem delay of MS ms on the bridge; netem on a bridge delays only its egress (host to container), so the added round trip is MS. Both apply after the network and containers are created and before any of them starts, and a re-run replaces the project's rules in one pass (RETURN first).
+The rules carry the comment `unicity-joiner <project>`; `remote_joiner.py unisolate` removes them and the delay, and touches nothing else.
+
+The registry `$G/handoff/remote-joiners/<J>.json` is written only under `handoff/drive.lock`, over the file's current content, by an atomic, fsynced
+replacement. Its state only moves forward (`follower`, `registered`, `bonded`, `preparing`, `prepared`, `member`, `retiring`, `retired`); a writer holding a
+stale copy is refused. A drive reads it afresh for its guard and refuses when a record is unreadable. Nothing rolls a root store back: an install
+interrupted before its record prefix was fetched completes on the root's next start (bft-core#1028). The `root-pre-epoch-N` copy is forensic only.
+
+`join` funds the owner from the operator account given as `--funder DIR` (a directory on the host with `keystore.json` and `password`), or else from the
+generation's funder account (100 UCT and gas; the key stays on the host), and passes `--funder` on to its drives; it registers and bonds (the laptop signs), and then prepares only
+right after an acknowledgement, driving an open result that predates the joiner first: the trust base of E+1 over the committee and the joiner, the joiner's
+authority started at that scope, `admitDelegation`. While `$G/handoff/remote-joiners/5.json` says `prepared`, `handoff_drive.py` refuses a result that leaves the
+joiner out (it would move the epoch past the authority's scope) unless `--allow-excluding-joiner`; `--require-member ENTITY` makes the same refusal explicit.
+
+Prerequisites and what they expose:
+
+- The ssh user needs **passwordless sudo on the host**. `init` (relay container, registration), `join` (the drive) and the archive seeding run
+  `sudo` over a BatchMode ssh session, and the generation directory is uid 10001, mode 0700.
+- The host runs **the laptop's copy of `deploy/testnet/*.py` as root**. `init` refuses a dirty or uncommitted checkout and records the commit, the
+  dirty flag and a digest of the copy in `~/rjoin/<gen>/testnet/SOURCE.json`. `join` logs that record in its run log. Both refuse a copy whose digest is not the
+  recorded one, or not the laptop checkout's. `--allow-dirty` overrides these checks.
+- The laptop gets **the host validators' execution-client RPC on its loopback** (`127.0.0.1:18541-18544` -> `ureth1..4:8545`). That is the full HTTP API
+  the package enables, `eth,net,web3,debug`, unauthenticated, and it is not the gateway's allow-listed subset. The join transactions need it. Anyone with a shell on
+  the laptop can use it while the tunnel is up. The root and shard peer ports (18001-18004, 19001-19004) are libp2p, authenticated by peer id. The operator
+  RPCs (8002, 9101) are never forwarded.
+
+Trust model: the laptop's keys never leave it, but **the laptop adds no independence against a compromised host**. Its agent signs what the host's drive
+asks: trust bases, possession proofs, readiness receipts and the session orders. It checks only that a trust base names its own root, and that the operation
+is one of its fixed list. A host that runs the drive can therefore make the laptop sign a successor of its choosing, as it can with its own four entities.
+The separation protects the laptop's keys from being copied, not the laptop's vote from being steered. An independent fifth validator needs its own operator
+deciding what it signs (for example, checking the trust base and the assignment against the election's published result before signing). That is not built.
+
+With five unit weights the quorum is four: while the laptop is away the network has no fault tolerance left. Do not sleep the laptop, restart colima or its VM,
+or `docker compose down` its project: a restarted signing authority is a new EVM key that the delegation does not name, and nothing replaces it yet.
+`remote_entity.py retire-plan` prints the retirement sequence. `remote_joiner.py retire` runs it:
+1. It records `retiring`, then sends the owner's requestRetirement (signed on the laptop) unless custody already shows one. A rerun never sends it twice.
+2. It drives the result that excludes the entity (`--allow-unrehearsed-retirement`).
+3. It leaves the retired validator running as a follower, unless the operator passes `--evidence-retained NOTE`. NOTE is a statement, recorded in the
+   registry, that the surviving providers hold the UTB/Q3 lineage, the record cuts and logs and the other recovery evidence through this handoff.
+4. With that statement, it waits until every host writer's `archivePolicy` passes the gate, records the statement, and only then stops the validator
+   services. Volumes and keys are kept.
+
+A writer passes the gate when:
+- its `checkedShardEpoch` is at least the shard epoch the excluding handoff activated. A node without that field (before bft-core#1047) fails closed,
+  and `shardEpoch` is not used;
+- its `replicas` are exactly the ones archivepolicy derives for it from that epoch's installed shard configuration;
+- the retiree is in neither `replicas` nor `retained`;
+- `migrationComplete` is true.
+
+An unreadable report fails closed.
+
+`remote_joiner.py claim` matures and claims the bond once its holds pass. A join reuses an on-chain registration of the laptop's root key instead of
+registering again. One join, retire, claim or catch-up command per entity runs at a time; another is refused.
+
 ## Observation/fault campaign and evidence limits
 
 Second operator records checkout, pins, image IDs/hashes, host specs, exact commands
@@ -279,11 +659,11 @@ single-host run proves independent failure domains. Test malformed/limited reque
 during observation and confirm recovery of normal requests. Preserve receipts,
 certification logs and before/after manifest IDs. Record failures as failures.
 
-The sampler is `observe.py` (read-only: no key, credential or signing method): `python3 deploy/testnet/observe.py $G --out /secure/path/observe` takes one sample a minute for 24 hours (`--interval`, `--duration`, `--samples`): every root's certified epoch and round, the gateway's `/healthz` and block number, the faucet guard's `/healthz` (its body, with the budget and balance, is kept for the OPERATOR to compare with the reserve: not judged by the tool; the aggregator's `/health` and the `mongo` healthcheck are likewise manual), every service's state, health and restart count, memory of this project's containers and disk use. It prints an `ALERT` and exits 1 for the notification rules above: certified heads stopped for `--stall` seconds (120; no root's round moved, or the execution chain's block at the gateway did not: the roots keep certifying while a stuck shard does not), a service not running or unhealthy, a restart count that went up, disk above `--disk-limit` percent (80), the gateway or faucet not answering 200. The rehearsal runs it as a four-sample smoke (stage `observe`, `--no-faucet`: the faucet guard's health needs the signer, which a rehearsal does not start); that proves the collection and the alert rules on a runner, not a day on the host.
+The sampler is `observe.py` (read-only: no key, credential or signing method): `python3 deploy/testnet/observe.py $G --out /secure/path/observe` takes one sample a minute for 24 hours (`--interval`, `--duration`, `--samples`): every root's certified epoch and round, the gateway's `/healthz` and block number, the faucet guard's `/healthz` (its body, with the budget and balance, is kept for the OPERATOR to compare with the reserve: not judged by the tool; the aggregator's `/health` and the `mongo` healthcheck are likewise manual), every service's state, health and restart count, memory of this project's containers and disk use. It prints an `ALERT` and exits 1 for the notification rules above: certified heads stopped for `--stall` seconds (120; no root's round moved, or the execution chain's block at the gateway did not: the roots keep certifying while a stuck shard does not), a service not running or unhealthy, a restart count that went up, disk above `--disk-limit` percent (80), the gateway or faucet not answering 200, a container's memory above `--mem-limit` percent (90) of its limit for `--mem-samples` (5) samples in a row while its tasks stall on memory (cgroup memory pressure, PSI full avg60, at least `--mem-pressure` percent, 1.0; docker's figure counts page cache, which can sit at a limit for a whole run without stalling anyone; without pressure figures the samples in a row alone), an OOM kill in a container, and the execution chain's block rate over the last `--rate-window` seconds (3600) below `--rate-drop` (0.5) of the median of such rates, counted after the first `--rate-warmup` seconds (one window) so that a catch-up when sampling starts, or a later burst, is not the usual rate. These catch a starving shard hours before it stalls (#1018: the rate fell from 2800/h to 350/h over four hours, and the memory sat at its limit throughout, at 4 to 11 % memory pressure). The rehearsal runs it as a four-sample smoke (stage `observe`, `--no-faucet`: the faucet guard's health needs the signer, which a rehearsal does not start); that proves the collection and the alert rules on a runner, not a day on the host.
 
 For a generation made with `--pos`, `pos_sample.py` (same options, same read-only rule, reuses `observe.collect` and `observe.Watch`) adds the contracts' clock and books to every sample, read through the gateway: the registry's `progress()`, `ucTime()`, `recordCount()`, the custody's `recordCursor()`, the election's `thresholds()`, `openResult()`, `liveCount()`, and the reward pool's balance, `available()`, `totalCredits()`, `accounted()`, `nextStart()`. Extra alerts: registry progress stopped (`--stall`), the custody behind the registry's record count for more than `--lag` s, an election result open for more than `--open-limit` s (while one is open the pool closes the tail only up to the reservation progress, contracts#72), the pool holding less than it has accounted for, no funded balance left, an unreadable view. On a rehearsal runner use `--no-faucet`; the gateway needs the forwarded address, which the sampler sets. The rehearsal stage `pos-observe` runs it for two samples against the running package. It samples the package where it runs; it says nothing about a host unless it runs on that host.
 
-The hosted-runner rehearsal (`.github/workflows/testnet-rehearsal.yml`) runs THREE generations in turn, each a fresh `generate.py` output on the same host ports (the previous one is stopped
+The hosted-runner rehearsal (`.github/workflows/testnet-rehearsal.yml`; over an hour, so opt-in: it runs on any PR labelled `rehearse`, or by workflow_dispatch) runs THREE generations in turn, each a fresh `generate.py` output on the same host ports (the previous one is stopped
 first): the PoA package (up, identity, first transaction, gateway limits, faucet guard, load, observation smoke, pod restart, backup/restore, reset); a PoS package (the 5a smoke, the
 reward pool, the election, the first handoff, Abort before and after H, restarts, stale credentials, the second handoff, recreate without the install flag, the resource smoke and the
 owner-key operations); and a PoS **join** package (a fifth entity registers, bonds and is delegated, the election has five members, the handoff takes it in, its signature is needed for
@@ -306,7 +686,11 @@ signer's generated invocation against the tracked script permissions (the image
 copies a readable script and invokes it through `/bin/sh`), the aggregator-go and
 MongoDB service settings, and rejection of an otherwise valid allowed JSON-RPC request larger
 than 16 KiB before any relay call (`eth_sendRawTransaction`, `eth_call` and `eth_estimateGas` up to 4.5 MiB pass, within two
-large-request slots), and the aggregator route's allow-list, bound and separate rate limit.
+large-request slots), the native bridge v2 wallet evidence reads (`eth_getBlockByHash`, `eth_getBlockReceipts`, `eth_getLogs`,
+`unicity_getSealCompanionV1`, `unicity_sealCompanionHorizonV1`) with their exact parameters, the `eth_getLogs` bound (one address,
+a `blockHash` or a numeric window of at most 10,000 blocks, at most 4 topic positions of hashes), the separate rate limit of
+`eth_getLogs` and `eth_getBlockReceipts`, the 8 MiB cap on a relayed answer (413), and the aggregator route's allow-list, bound and
+separate rate limit.
 
 CI also builds aggregator-go from `pins.json`'s revision and runs
 `validate-generation.py --aggregator <pinned-binary>`: a native three-root probe
@@ -318,3 +702,7 @@ partition-7 certified round and state root to advance. HTTP admission or empty
 rounds alone cannot pass. No EVM validator or faucet is started by this probe;
 it does not supply the owner-server deployment, recovery or campaign evidence
 required above. Local validation is deferred to PR CI for this revision.
+
+### Signed trust-base history (UTB) profile
+
+`generate.py --utb` (ON by default since the VR/UTB work; `--no-utb` generates the package without the profile, as the hosted rehearsals still do) gives every root, shard node and the aggregator the signed-history profile with one pin (the genesis EntryID in `network/utb-genesis.id`, passed as its own argument). `--utb-aggregator integration` (default) is the integration aggregator (genesis entry file, own append-only store); `--utb-aggregator upstream` is the upstream-facing aggregator (a one-entry tagged bundle `network/utb-bundle.cbor`, `UTB_EXPECTED_NETWORK`, its history in its MongoDB). The images must be built with the matching `build-images.py --aggregator-variant` (pins `aggregator-go` / `aggregator-go-upstream`); `generate.py` refuses a mismatch. After the handoff stages, the rehearsal stage `utb-live` checks that the aggregator's history holds exactly the roots' epochs, each entry admitted once, nothing refused and no version 1 trust base consulted.

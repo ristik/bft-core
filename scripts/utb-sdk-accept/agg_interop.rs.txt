@@ -1,0 +1,193 @@
+//! Scratch interop test (not committed): the clean Rust stack's `update` (rs#24) against running aggregator trust-base servers with grown histories.
+//! AGG_MANIFEST points at the JSON the Go harness writes: {name: {url, bundle, pin, epochs, bundleEpochs, network}}.
+#![cfg(feature = "http")]
+
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+
+use unicity_token::api::bft::trust_base_history::TrustBaseHistory;
+use unicity_token::api::bft::trust_base_range::TrustBaseStatus;
+use unicity_token::api::bft::trust_base_update::{
+    update, SourceError, TrustBaseRequest, TrustBaseSource, UpdateCause, UpdateFailure, UpdateOptions,
+};
+use unicity_token::client::HttpAggregatorClient;
+
+#[derive(Clone)]
+struct Server {
+    url: String,
+    bundle: String,
+    pin: String,
+    epochs: u64,
+    bundle_epochs: u64,
+}
+
+fn manifest() -> HashMap<String, Server> {
+    let path = std::env::var("AGG_MANIFEST").expect("AGG_MANIFEST");
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    v.as_object()
+        .unwrap()
+        .iter()
+        .map(|(k, e)| {
+            (
+                k.clone(),
+                Server {
+                    url: e["url"].as_str().unwrap().to_string(),
+                    bundle: e["bundle"].as_str().unwrap().to_string(),
+                    pin: e["pin"].as_str().unwrap().to_string(),
+                    epochs: e["epochs"].as_u64().unwrap(),
+                    bundle_epochs: e["bundleEpochs"].as_u64().unwrap(),
+                },
+            )
+        })
+        .collect()
+}
+
+fn pin(s: &Server) -> [u8; 32] {
+    hex::decode(s.pin.trim_start_matches("0x")).unwrap().try_into().unwrap()
+}
+
+/// A history holding the genesis only: the bundle file of every server here has one entry, the rest of its history was appended at runtime.
+fn genesis_only(s: &Server) -> TrustBaseHistory {
+    assert_eq!(s.bundle_epochs, 1, "these servers ship a genesis-only bundle");
+    TrustBaseHistory::from_bundle(&std::fs::read(&s.bundle).unwrap(), Some(pin(s))).unwrap()
+}
+
+fn client(s: &Server) -> HttpAggregatorClient {
+    HttpAggregatorClient::new_insecure_http(&s.url)
+}
+
+/// Records every request and can cut the source off after some calls.
+struct Spy<'a> {
+    inner: &'a HttpAggregatorClient,
+    requests: RefCell<Vec<TrustBaseRequest>>,
+    fail_after: usize,
+    calls: Cell<usize>,
+}
+impl<'a> Spy<'a> {
+    fn new(inner: &'a HttpAggregatorClient, fail_after: usize) -> Self {
+        Spy { inner, requests: RefCell::new(vec![]), fail_after, calls: Cell::new(0) }
+    }
+}
+impl TrustBaseSource for Spy<'_> {
+    fn get_trust_base_page(&self, r: &TrustBaseRequest) -> Result<Vec<u8>, SourceError> {
+        self.requests.borrow_mut().push(r.clone());
+        let n = self.calls.get();
+        self.calls.set(n + 1);
+        if n >= self.fail_after {
+            return Err(SourceError("source went away".into()));
+        }
+        self.inner.get_trust_base_page(r)
+    }
+}
+
+fn opts(max_entries: usize) -> UpdateOptions<'static> {
+    let mut o = UpdateOptions::default();
+    o.limits.max_entries = max_entries;
+    o.rounds = 1;
+    o
+}
+
+#[test]
+fn a_genesis_only_bundle_grown_at_runtime_pages_to_the_tip_following_the_snapshot() {
+    let m = manifest();
+    let a = &m["a"];
+    let mut h = genesis_only(a);
+    let c = client(a);
+    let spy = Spy::new(&c, usize::MAX);
+    let added = update(&mut h, &[&spy], &opts(4)).unwrap();
+    assert_eq!(added as u64, a.epochs - 1);
+    assert_eq!(h.latest().epoch, a.epochs);
+    let reqs = spy.requests.borrow();
+    assert_eq!(reqs.iter().map(|r| r.from_epoch).collect::<Vec<_>>(), vec![2, 6, 10]);
+    assert!(reqs[0].snapshot.is_none());
+    for r in &reqs[1..] {
+        assert_eq!(r.snapshot.as_ref().unwrap().end, a.epochs, "the frozen end is echoed");
+    }
+    // up to date: nothing newer is a result
+    assert_eq!(update(&mut h, &[&c], &opts(4)).unwrap(), 0);
+}
+
+#[test]
+fn a_page_ends_at_the_byte_budget_with_a_large_committee() {
+    let m = manifest();
+    let big = &m["big"];
+    let mut h = genesis_only(big);
+    let c = client(big);
+    let spy = Spy::new(&c, usize::MAX);
+    let added = update(&mut h, &[&spy], &opts(64)).unwrap();
+    assert_eq!(added as u64, big.epochs - 1);
+    assert!(spy.requests.borrow().len() > 1, "52 large entries do not fit one 1 MiB page");
+}
+
+#[test]
+fn an_older_replica_after_a_frozen_first_page_is_skipped_and_the_prefix_is_kept() {
+    let m = manifest();
+    let (a, older) = (&m["a"], &m["older"]);
+    let (ca, co) = (client(a), client(older));
+    let mut h = genesis_only(a);
+    let first = Spy::new(&ca, 1); // one page of 3, then it goes away
+    let lagging = Spy::new(&co, usize::MAX);
+    let err = update(&mut h, &[&first, &lagging], &opts(3)).unwrap_err();
+    assert_eq!(err.failure, UpdateFailure::NoneServed);
+    assert_eq!(h.latest().epoch, 4, "the authenticated prefix stays");
+    assert_eq!(lagging.requests.borrow()[0].snapshot.as_ref().unwrap().end, a.epochs);
+    // a later call finishes from the held tip
+    update(&mut h, &[&ca], &opts(64)).unwrap();
+    assert_eq!(h.latest().epoch, a.epochs);
+}
+
+#[test]
+fn a_mismatched_snapshot_is_dropped_once_and_the_other_history_is_refused() {
+    let m = manifest();
+    let (a, f) = (&m["a"], &m["fork"]);
+    let (ca, cf) = (client(a), client(f));
+    let mut h = genesis_only(a);
+    let first = Spy::new(&ca, 1);
+    let other = Spy::new(&cf, usize::MAX);
+    let err = update(&mut h, &[&first, &other], &opts(3)).unwrap_err();
+    assert_eq!(h.latest().epoch, 4);
+    // (rs#24 drops the snapshot silently on the first mismatch, so the cause list holds only the final refusal)
+    assert!(err.causes.iter().any(|c| matches!(c, UpdateCause::Refused { .. })), "a verified conflicting entry is refused: {:?}", err.causes);
+    let reqs = other.requests.borrow();
+    assert!(reqs[0].snapshot.is_some());
+    assert!(reqs[1].snapshot.is_none(), "the mismatch dropped the snapshot and asked again from the tip");
+}
+
+#[test]
+fn another_network_is_refused() {
+    let m = manifest();
+    let (a, n) = (&m["a"], &m["othernet"]);
+    let mut h = genesis_only(a);
+    let err = update(&mut h, &[&client(n)], &opts(64)).unwrap_err();
+    assert_eq!(err.failure, UpdateFailure::NoneServed);
+    assert_eq!(h.latest().epoch, 1);
+}
+
+#[test]
+fn a_server_behind_its_active_epoch_serves_the_verified_prefix() {
+    let m = manifest();
+    let b = &m["behind"];
+    let mut h = genesis_only(b);
+    assert_eq!(update(&mut h, &[&client(b)], &opts(64)).unwrap() as u64, b.epochs - 1);
+    assert_eq!(h.latest().epoch, b.epochs);
+}
+
+#[test]
+fn a_server_in_conflict_with_its_own_authority_answers_unavailable_a_failure_not_a_result() {
+    let m = manifest();
+    let c = &m["conflict"];
+    let mut h = genesis_only(c);
+    let err = update(&mut h, &[&client(c)], &opts(64)).unwrap_err();
+    assert!(err.causes.iter().any(|x| matches!(x, UpdateCause::Status { status: TrustBaseStatus::Unavailable, .. })), "{:?}", err.causes);
+    assert_eq!(h.latest().epoch, 1);
+}
+
+#[test]
+fn a_bundle_larger_than_the_genesis_is_not_needed_a3_also_pages() {
+    let m = manifest();
+    let a3 = &m["a3"];
+    // the 3-entry bundle is loaded whole, then grown to the tip
+    let mut h = TrustBaseHistory::from_bundle(&std::fs::read(&a3.bundle).unwrap(), Some(pin(a3))).unwrap();
+    assert_eq!(h.latest().epoch, 3);
+    assert_eq!(update(&mut h, &[&client(a3)], &opts(5)).unwrap() as u64, a3.epochs - 3);
+}

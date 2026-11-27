@@ -14,7 +14,21 @@ func (g *gen) anyAge(seed string) {
 	run := func(id, desc string, s Seal, pre PreState, want string) {
 		g.ok(id, fam, desc, one(s), pre, want, nil, nil)
 	}
-	pre, closed := h.Pre(), h.Closed()
+	pre := h.Pre()
+	genesis := h.At(0, 0)
+	genesis.OriginReady = false
+	run("time.genesis.before-observation", "phase 2 genesis authority before D1 observes any origin", hseal(0, 500, "a"), genesis, "")
+	genesis.Phase = 1
+	run("time.genesis.phase-1", "the same valid genesis seal while phase 1 refuses certificate checks", hseal(0, 500, "a"), genesis, "ErrPhase")
+
+	// One acknowledgement jumps from 6 to 8, installing both entries and both exclusive ends.
+	before, after := h.At(6, 6500), h.At(8, 8000)
+	run("time.span-two.intermediate.before", "epoch 7 cannot be used before the span-two import", hseal(7, 7000, "a"), before, "ErrEpochNotUsable")
+	run("time.span-two.tip.before", "epoch 8 cannot be used before the span-two import", hseal(8, 8001, "a"), before, "ErrEpochNotUsable")
+	run("time.span-two.intermediate.after", "epoch 7 is installed and closed by the span-two import", hseal(7, 7000, "a"), after, "")
+	run("time.span-two.intermediate.at-end", "epoch 7 is closed at the start of epoch 8", hseal(7, 8000, "a"), after, "ErrAfterEnd")
+	run("time.span-two.tip.after", "epoch 8 is now the open tip, including a seal ahead of the observed round", hseal(8, 8001, "a"), after, "")
+	run("time.span-two.retired.at-end", "epoch 6 is closed at the start of epoch 7", hseal(6, 7000, "a"), after, "ErrAfterEnd")
 
 	run("time.genesis-epoch.ok", "genesis epoch 0, about 10^6 rounds old", hseal(0, 500, "a"), pre, "")
 	run("time.closed.start.ok", "closed epoch, r = start", hseal(1, 1000, "a"), pre, "")
@@ -23,19 +37,15 @@ func (g *gen) anyAge(seed string) {
 	run("time.closed.at-end", "r = end of a closed epoch", hseal(2, 3000, "a"), pre, "ErrAfterEnd")
 	run("time.same-members.predecessor-round", "same members as the predecessor, r in the predecessor's interval", hseal(5, 4500, "a"), pre, "ErrBeforeStart")
 	run("time.origin.at-O.ok", "usable epoch, r = O", hseal(8, O, "a"), pre, "")
-	run("time.origin.future", "usable epoch, r = O+1", hseal(8, O+1, "a"), pre, "ErrFuture")
-	g.registry("time.import-tip-above-origin", fam, "an imported epoch above the usable origin while ready (I != U): impossible without preload",
-		one(hseal(9, O+600, "a")), closed, "ErrRegistryCommon")
-	closedTip := closed
-	closedTip.ImportedTip, closedTip.Epochs = 8, closed.Epochs[:len(closed.Epochs)-1]
-	g.registry("time.usable-tip-closed", fam, "the usable tip closed above O (I = U): impossible without preload",
-		one(hseal(8, O, "a")), closedTip, "ErrRegistryInvalidEpoch")
+	run("time.tip.ahead-of-observation", "open tip, r = O+1", hseal(8, O+1, "a"), pre, "")
 	run("time.past-tip", "epoch above the imported tip: false, no entry read", hseal(1<<40, O, "a"), pre, "ErrEpochNotUsable")
 	run("time.scheme-1.ok", "an old scheme 1 epoch", hseal(2, 2500, "a"), pre, "")
 	run("time.scheme-2.ok", "a scheme 2 epoch", hseal(6, 6500, "a"), pre, "")
 	g.ok("time.schemes.mixed.ok", fam, "scheme 1 and scheme 2 epochs in one batch", req(claimOf(h.uc(hseal(2, 2500, "a"), 1, "")), claimOf(h.uc(hseal(6, 6500, "a"), 1, ""))), pre, "", nil, nil)
-	run("time.wrong-set", "seal of epoch 3 signed by the next set (node04 is not a member of epoch 3)",
-		Seal{Epoch: 3, Round: 3500, Variant: "a", Signers: []int{1, 2, 4}}, pre, "ErrUnknownSigner")
+	run("time.wrong-set", "seal of epoch 3 signed by the next set (node04 is not a member of epoch 3): the unknown signer counts zero, one signer short",
+		Seal{Epoch: 3, Round: 3500, Variant: "a", Signers: []int{1, 2, 4}}, pre, "ErrQuorum")
+	run("time.wrong-set.extra", "seal of epoch 3 signed by its own quorum and by a member of the next set: the unknown extra counts zero, the seal is valid",
+		Seal{Epoch: 3, Round: 3500, Variant: "a", Signers: []int{1, 2, 3, 4}}, pre, "")
 	run("time.quorum-short", "two of four signatures", Seal{Epoch: 6, Round: 6500, Variant: "a", Signers: []int{1, 2}}, pre, "ErrQuorum")
 
 	g3 := NewHistory(seed, 3)
@@ -67,7 +77,6 @@ func (g *gen) registryFamily(seed string) {
 	e3 := func(p *PreState) *EpochWords { return &p.Epochs[3] }
 
 	verdict("reg.phase-1", "phase 1: false before any epoch read", func(p *PreState) { p.Phase = 1 }, "ErrPhase")
-	verdict("reg.origin-not-ready", "initialized, no usable origin yet (U = O = 0): false", func(p *PreState) { p.OriginReady, p.Origin, p.ClockRound = false, 0, 0 }, "ErrOriginNotReady")
 	verdict("reg.unrequested-corruption.ok", "an unrequested epoch is corrupt: no whole-history scan, the batch is valid",
 		func(p *PreState) { p.override(entrySlot(5, 0), w64(2)) }, "")
 
@@ -79,18 +88,16 @@ func (g *gen) registryFamily(seed string) {
 	common("reg.common.network-wide", "network word above u16", func(p *PreState) { set(p, "b1.network", w64(0x10003)) })
 	common("reg.common.profile-pin", "profile hash differs from the verifier's pin", func(p *PreState) { p.ProfileHash = hex32(flip32(h32(p.ProfileHash))) })
 	common("reg.common.format-1", "b1.format 1", func(p *PreState) { set(p, "b1.format", w64(1)) })
-	common("reg.common.ready-2", "b1.originReady 2", func(p *PreState) { set(p, "b1.originReady", w64(2)) })
 	common("reg.common.genesis-above-tip", "g > I", func(p *PreState) { p.GenesisEpoch = 9 })
-	common("reg.common.origin-above-tip", "U > I", func(p *PreState) { p.Origin, p.ImportedTip = 9, 8 })
-	common("reg.common.tip-above-origin", "I > U while ready (no preload)", func(p *PreState) { p.ImportedTip = 9 })
-	common("reg.common.not-ready-origin", "not ready but U != 0", func(p *PreState) { p.OriginReady, p.ClockRound = false, 0 })
-	common("reg.common.clock-high-bytes", "clock.rootRound with a nonzero high byte", func(p *PreState) {
-		w := w64(HistoryClock)
-		w[0] = 1
-		set(p, "clock.rootRound", w)
-	})
+	verdict("reg.observation.ignored", "reader does not interpret the three observation words", func(p *PreState) {
+		var wide [32]byte
+		wide[0] = 1
+		set(p, "b1.originReady", w64(2))
+		set(p, "origin.rootEpoch", w64(2))
+		set(p, "clock.rootRound", wide)
+	}, "")
 
-	infra("reg.epoch.missing", "no installed entry for epoch 3 in [g, U]", r3, func(p *PreState) { p.Epochs = append(p.Epochs[:3], p.Epochs[4:]...) }, "ErrRegistryMissingEpoch")
+	infra("reg.epoch.missing", "no installed entry for epoch 3 in [g, I]", r3, func(p *PreState) { p.Epochs = append(p.Epochs[:3], p.Epochs[4:]...) }, "ErrRegistryMissingEpoch")
 	infra("reg.epoch.missing-mixed", "a false claim (epoch above the tip) and a claim of a missing epoch: the registry failure wins",
 		req(claimOf(h.uc(hseal(1<<40, 900, "a"), 1, "")), c3), func(p *PreState) { p.Epochs = append(p.Epochs[:3], p.Epochs[4:]...) }, "ErrRegistryMissingEpoch")
 	// a corrupt requested entry and a failing claim: Registry before any semantic false, in both occurrence orders
@@ -125,11 +132,10 @@ func (g *gen) registryFamily(seed string) {
 	entry("reg.member.duplicate-key", "two members with one key", func(p *PreState) { e3(p).Members[1].Key = e3(p).Members[0].Key })
 	entry("reg.member.unsorted", "member IDs out of order", func(p *PreState) { m := e3(p).Members; m[0], m[1] = m[1], m[0] })
 	entry("reg.member.weight-0", "member weight 0", func(p *PreState) { e3(p).Members[0].Weight = 0 })
-	entry("reg.interval.past-open", "an epoch below U left open", func(p *PreState) { e3(p).HasEnd, e3(p).End = false, 0 })
-	infra("reg.interval.start-above-O", "the usable epoch starting above O (without the check its seal would be a false ErrBeforeStart)",
-		req(claimOf(h.uc(hseal(8, 9000, "a"), 1, ""))), func(p *PreState) { p.Epochs[8].Start = HistoryClock + 1 }, "ErrRegistryInvalidEpoch")
-	entry("reg.interval.past-end-above-O", "a closed epoch below U ending above O", func(p *PreState) { e3(p).End = HistoryClock + 1 })
-	infra("reg.interval.usable-ended", "the usable epoch closed at or below O", req(claimOf(h.uc(hseal(8, 9000, "a"), 1, ""))),
+	entry("reg.interval.past-open", "an epoch below I left open", func(p *PreState) { e3(p).HasEnd, e3(p).End = false, 0 })
+	entry("reg.interval.empty", "a closed epoch ends at its own start", func(p *PreState) { e3(p).End = e3(p).Start })
+	entry("reg.entry.absent-with-metadata", "entry has a cleared presence word but nonzero metadata", func(p *PreState) { p.override(entrySlot(3, 0), w64(0)) })
+	infra("reg.interval.tip-ended", "the imported tip is marked closed", req(claimOf(h.uc(hseal(8, 9000, "a"), 1, ""))),
 		func(p *PreState) { p.Epochs[8].HasEnd, p.Epochs[8].End = true, HistoryClock }, "ErrRegistryInvalidEpoch")
 }
 
@@ -157,10 +163,13 @@ func (g *gen) reuse(seed string) {
 	bad.BadLast = true
 	extra := a
 	extra.Signers = []int{1, 2, 3, 4}
-	g.ok("reuse.witness.verified-first", fam, "a verified seal, then the same unsigned seal with one bad signature: a separate group, false",
-		req(c(a, 1, ""), c(bad, 3, "")), pre, "ErrSigInvalid", nil, nil)
+	g.ok("reuse.witness.verified-first", fam, "a verified seal, then the same unsigned seal with one bad signature: a separate group, its quorum short, false",
+		req(c(a, 1, ""), c(bad, 3, "")), pre, "ErrQuorum", nil, nil)
 	g.ok("reuse.witness.altered-first", fam, "the altered seal first, then the verified one: same verdict and gas",
-		req(c(bad, 3, ""), c(a, 1, "")), pre, "ErrSigInvalid", nil, nil)
+		req(c(bad, 3, ""), c(a, 1, "")), pre, "ErrQuorum", nil, nil)
+	badExtra := extra
+	badExtra.BadLast = true
+	ok("reuse.witness.bad-extra", "a seal of four valid signatures, then the same unsigned seal whose last signature is bad: two groups, both valid (the bad one is a zero-weight extra), no cached verdict shared", c(extra, 1, ""), c(badExtra, 3, ""))
 	ok("reuse.witness.extra-signature", "the same unsigned seal with an extra valid signature: two groups, both valid", c(a, 1, ""), c(extra, 3, ""))
 
 	good := c(a, 1, "")
@@ -183,7 +192,7 @@ func (g *gen) reuse(seed string) {
 	// maximal seal (sixteen signatures from a sixteen-member epoch) repeated in every occurrence.
 	big := newFixture(seed+"/16", 16)
 	bp := big.pre()
-	cs := big.build("a", big.round, big.vals, false)
+	cs := big.build("a", big.round, big.vals, true)
 	var all []claimSpec
 	for _, k := range [][2]interface{}{{uint32(1), ""}, {uint32(2), "0"}, {uint32(2), "1"}, {uint32(3), ""}, {uint32(4), ""}, {uint32(5), ""}, {uint32(6), ""}, {uint32(7), ""}} {
 		all = append(all, claimOf(cs.get(k[0].(uint32), k[1].(string))))

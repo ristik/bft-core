@@ -8,7 +8,7 @@
 #   scripts/utb-lane.sh --selftest     chain-free tests of the lane's own logic (genesis/manifest generation, flags, the evidence-pack checker)
 #   scripts/utb-lane.sh --build-aggregator   AGG_COMMIT=<40 hex>: clone, build and record the aggregator (builds/aggregator-<sha8>/); pushes nothing
 #   scripts/utb-lane.sh --prep         dry run of the genesis side (ANYAGE_PREP_ONLY with UTB_LANE=1): P85 genesis, the UTB genesis entry, pin and manifest,
-#                                      aggregator shard configurations and the bridge deployment; starts no reth, root, validator or aggregator
+#                                      and the aggregator shard configurations; requires the verifier and starts no reth, root, validator or aggregator
 #   scripts/utb-lane.sh --check-evidence DIR   checks an evidence directory against the required list (design §11.4)
 #   scripts/utb-lane.sh                the run: refuses unless the preflight is entirely ok
 #
@@ -31,33 +31,39 @@ plan() {
 UTB lane steps (one fresh genesis, the any-age/P85 machinery + UTB_LANE=1; evidence under briefs/devnet-runs/utb-<utc>/p85/utb, required list: --check-evidence).
 Entries: epoch 2 is the K->J handoff (activated; the P85 J is never acknowledged), epoch 3 the derived recovery to K (the acknowledgement block installs both, span 2).
   0  preflight (this script), the devnet lock, the manifest: pins, builds, the aggregator commit, the genesis entry and its pin
-  1  genesis: PoS genesis + bridge + aggregator shard + the UTB genesis entry (canonical V2, null signatures), generated once from the epoch-1 trust base
-  2  U1  after the baseline and L1a: the aggregator serves the genesis only; the original token (its exact bytes and digest) is saved and verifies under the genesis committee;
+  1  genesis: PoS genesis + aggregator shard + the UTB genesis entry (canonical V2, null signatures), generated once from the epoch-1 trust base
+  2  U1  after the baseline: the aggregator serves the genesis only; the original token (a certificate of the genesis epoch, the aggregator's latest block's: its exact
+         bytes and digest) is saved and verifies under the genesis committee;
          the reference client (its own durable store) starts from the genesis
   2b S1/S2 (bft-core#671, live proof for #648) before the V3 handoff one root (UTB_IMPORT_ROOT, default 4) is stopped, left 12 rounds behind (UTB_IMPORT_GAP) and restarted in the genesis
          epoch with its store: it recovers by state import (log: completed recovery); after the handoff committed its log shows no 'V3 freeze rules are not enabled', no 'successor
          trust-base entry cannot be derived', a signed vote at exactly the record's round and the committed outcome of the record (state-import/root<N>.txt)
-  2c C   (DNB_AGG_SHARDS=2) right after L1b: a second token over both aggregator shards is consolidated by the SDK (K = m anchors under one seal) and redeemed once (#526 step 4);
-         the per-SID envelope of the same token is built and priced as the control (anyage_step_consolidated)
-  2d LH  (B7_LONG_HISTORY=1) a token transferred live past every former bridge bound (more than 65 leaves, above 64 KiB and 7M gas) is redeemed one gas short (it reverts,
-         the vault unchanged) and then with the estimate (credited, claimed) (anyage_step_long_history, B7 PR 3)
   3  U2  after the K->J activation: the aggregator receives the epoch-2 entry attached to a version 3 certification response (log: received + appended, no catch-up), the root's
          message is captured and decodes to exactly that entry; the aggregator serves epoch 2
   4  U3a the aggregator restarts from its retained store (unchanged records); then it is stopped and its history store removed (the controlled fault)
   5  P85 stalled J and the derived recovery to K (epoch 3), liability closures
-  6  U3b the aggregator restarts holding the genesis only, root HTTP unavailable to it: it repairs epochs 2..3 from a genesis-committee root over GetTrustBase (log: catch-up
+  6  U3b the aggregator restarts holding the genesis only (in UTB mode it has no REST trust-base client, so only GetTrustBase can serve it): it repairs epochs 2..3 from a genesis-committee root over GetTrustBase (log: catch-up
          started / OK page from a root / finished); it serves epoch 3
   7  L2  the acknowledgement block installs both entries; U4 a token certified after the recovery; the stale client meets the unknown epoch 3, fetches [2 3] in one request
          and verifies; the aggregator restarts again, unchanged bytes, healthy;  U4b the JS SDK (the fork, UTB_SDK_JS) holds the genesis only, meets epoch 3 on the same
          certificate, fetches epochs 2..3 from the aggregator's GetTrustBase endpoint with its fetch-and-retry loop and verifies; its entries equal the history's bytes
-  8  L1c the same saved bytes verify against the historical epoch; the one vault release;  U5 the original token verifies unchanged under its historical committee (utb-evidence),
-         the bridge receipt, the complete history exported and reloaded by a fresh client store: identical records and tip
+  8  U5 the original token verifies unchanged under its historical committee (utb-evidence), the complete history exported and reloaded by a fresh client store:
+         identical records and tip (the protocol 6/7 bridge checkpoints L1a/L1b/L1c, C and LH were removed with that bridge, bft-core#1106)
   9  restarts (P85); the root logs counted (V3 freeze rules are not enabled = 0, successor trust-base entry cannot be derived = 0, recoveries completed reported); the evidence pack assembled and checked by the tools (self-contained), teardown through scripts/p85-stop.sh only
 PLAN
 }
 
+build_verifier() {
+  go build -o "$UTB_VERIFIER" ./scripts/utb-evidence && utb_resolve_verifier
+}
+
 preflight() {
   echo "== UTB lane preflight (no devnet is started) =="
+  if [ "${LANE_PINNED:-0}" = 1 ]; then
+    utb_resolve_verifier "$utb_verifier_default" || return 1
+  else
+    utb_resolve_verifier "$utb_verifier_default" allow-missing || return 1
+  fi
   echo "-- tools"
   export PATH="$HOME/.foundry/bin:$PATH"
   # LANE_PINNED=1 (the CI run job, scripts/ci/run-lane.sh): no Go toolchain and no live gh queries; the components are the manifest's pins (scripts/ci/lane-pins.json)
@@ -69,7 +75,7 @@ preflight() {
   while read -r line; do case "$line" in ok*) yes "${line#ok }";; *) no "${line#FAIL }";; esac; done < <("$SCRIPT_DIR/ci/check-pins.sh" env 2>&1)
   else
   echo "-- merged prerequisites (read-only gh queries on ristik/*)"
-  for pr in "ristik/bft-core 632" "ristik/bft-core 633" "ristik/bft-core 634" "ristik/bft-core 635" "ristik/bft-core 650" "ristik/aggregator-go 2" "ristik/bft-go-base 1" "ristik/ureth 70" "ristik/unicity-pos-contracts 39" "ristik/native-bridge-plugins 19"; do
+  for pr in "ristik/bft-core 632" "ristik/bft-core 633" "ristik/bft-core 634" "ristik/bft-core 635" "ristik/bft-core 650" "ristik/aggregator-go 2" "ristik/bft-go-base 1" "ristik/ureth 70" "ristik/unicity-pos-contracts 39"; do
     set -- $pr; st=$(gh pr view "$2" -R "$1" --json state --jq .state 2>/dev/null || echo unknown)
     if [ "$st" = MERGED ]; then yes "$1#$2 merged"; else no "$1#$2 is $st (must be MERGED before the run)"; fi
   done
@@ -82,7 +88,8 @@ preflight() {
   else
     check "HEAD contains origin/integration/enshrined-evm" git -C "$REPO_ROOT" merge-base --is-ancestor origin/integration/enshrined-evm HEAD
   fi
-  if [ -x "$UBFT" ] && lane_buildinfo "$UBFT" 2>/dev/null | grep -q "vcs.revision=$head" && ! lane_buildinfo "$UBFT" | grep -q 'vcs.modified=true'; then yes "$UBFT is built from HEAD ${head:0:10}"; else no "$UBFT is missing or not built from HEAD ${head:0:10} (make build)"; fi
+  bdesc="HEAD ${head:0:10}"; [ -z "${LANE_PRODUCT_COMMIT:-}" ] || bdesc="the pinned product ${LANE_PRODUCT_COMMIT:0:10} (harness HEAD ${head:0:10})"
+  if [ -x "$UBFT" ] && lane_buildinfo "$UBFT" 2>/dev/null | grep -q "vcs.revision=${LANE_PRODUCT_COMMIT:-$head}" && ! lane_buildinfo "$UBFT" | grep -q 'vcs.modified=true'; then yes "$UBFT is built from $bdesc"; else no "$UBFT is missing or not built from $bdesc (make build)"; fi
   # the participant binaries must know the profile: a binary that predates it would start a node that silently runs the plain protocol
   for sub in "root-node run" "shard-node run"; do
     check "$sub accepts --utb-genesis/--utb-genesis-id" bash -c "$UBFT $sub --help 2>&1 | grep -q -- '--utb-genesis-id'"
@@ -92,9 +99,12 @@ preflight() {
   note "deploy/testnet/pins.json pins bft $(python3 -c "import json;print(json.load(open('$REPO_ROOT/deploy/testnet/pins.json'))['bft'][:10])" 2>/dev/null): the testnet package is NOT what this lane runs (devnet scripts + build/ubft)"
   echo "-- the independent verifier"
   if [ "${LANE_PINNED:-0}" = 1 ]; then
-    check "utb-evidence ($UTB_EVIDENCE) is built from HEAD ${head:0:10} (a prebuilt binary, verified by its embedded build information)" bash -c "source '$SCRIPT_DIR/lib/portable.sh'; [ -x '$UTB_EVIDENCE' ] && lane_buildinfo '$UTB_EVIDENCE' | grep -q 'vcs.revision=$head' && ! lane_buildinfo '$UTB_EVIDENCE' | grep -q 'vcs.modified=true'"
+    check "utb-evidence ($UTB_VERIFIER) is built from $bdesc (a prebuilt binary, verified by its embedded build information)" bash -c '
+      source "$1/lib/portable.sh"
+      lane_buildinfo "$2" | grep -q "vcs.revision=$3" && ! lane_buildinfo "$2" | grep -q "vcs.modified=true"
+    ' bash "$SCRIPT_DIR" "$UTB_VERIFIER" "${LANE_PRODUCT_COMMIT:-$head}"
   else
-    check "utb-evidence builds (scripts/utb-evidence) into $UTB_EVIDENCE" bash -c "cd '$REPO_ROOT' && go build -o '$UTB_EVIDENCE' ./scripts/utb-evidence"
+    check "utb-evidence builds (scripts/utb-evidence) into $UTB_VERIFIER" build_verifier
   fi
   echo "-- machine"
   free=$(df -k "$AGRE_ROOT" | awk 'NR==2{print int($4/1048576)}')
@@ -109,17 +119,10 @@ preflight() {
   if [ -n "${P85_CONTRACTS:-}" ] && [ -d "$P85_CONTRACTS" ]; then yes "P85_CONTRACTS $P85_CONTRACTS"; else no "set P85_CONTRACTS to the contracts checkout"; fi
   check "the contracts genesis takes the root network and genesis identity (contracts#46: P85_ROOT_NETWORK, P85_ROOT_GENESIS; the lane sets both from the trust base)" bash -c "grep -q P85_ROOT_GENESIS '${P85_CONTRACTS:-/nonexistent}/script/P85Genesis.s.sol' && grep -q P85_ROOT_NETWORK '${P85_CONTRACTS:-/nonexistent}/script/P85Genesis.s.sol'"
   note "contracts#46 changes the manifest hash and the publication fixture: the copies under evmassign/testdata and rootchain/evmstate/testdata and the xrepo/fixtures.json pin are re-copied at the #46 merge commit (checked: the new fixture passes evmassign, evmstate, xrepo, posrelayer, signingauthority)"
-  if [ -n "${NBP_DIR:-}" ] && [ -d "$NBP_DIR/tests/live" ]; then yes "NBP_DIR $NBP_DIR"; else no "set NBP_DIR to the native-bridge-plugins checkout"; fi
-  check "NBP_DIR's live driver reads the trust-base release bundle (native-bridge-plugins#27, a lane prerequisite: the lane writes trust-base.bundle.cbor since bft-core#658 and no sdk-trust-base.json)" bash -c "grep -q 'trust-base.bundle.cbor' '${NBP_DIR:-/nonexistent}/tests/live/anyage.ts'"
-  if [ "${B7_LONG_HISTORY:-0}" = 1 ]; then
-    check "B7_LONG_HISTORY=1: NBP_DIR's live driver has the long-history command (B7 PR 3)" bash -c "grep -q \"'long-history'\" '${NBP_DIR:-/nonexistent}/tests/live/anyage.ts'"
-  fi
   if [ "${DNB_AGG_SHARDS:-1}" != 1 ]; then
-    check "DNB_AGG_SHARDS=${DNB_AGG_SHARDS}: NBP_DIR's live driver steers the saved history across the aggregator shards (native-bridge-plugins anyage driver: 'no lock gave a mint and a burn on different aggregator shards')" bash -c "grep -q 'on different aggregator shards' '${NBP_DIR:-/nonexistent}/tests/live/anyage.ts'"
     check "the aggregator shard count is 2 (the depth-1 topology 0x40, 0xc0)" test "${DNB_AGG_SHARDS}" = 2
   fi
-  [ -n "${DNB_TOOL:-}" ] && [ -x "$DNB_TOOL" ] && yes "DNB_TOOL $DNB_TOOL" || no "set DNB_TOOL to a dnb-tool built from this checkout"
-  if (exec 3<>/dev/tcp/127.0.0.1/27117) 2>/dev/null; then yes "MongoDB replica set port 27117 answers"; else no "no MongoDB on 127.0.0.1:27117"; fi
+  if (exec 3<>/dev/tcp/127.0.0.1/$((27117+LANE_PORT_OFFSET))) 2>/dev/null; then yes "MongoDB replica set port $((27117+LANE_PORT_OFFSET)) answers"; else no "no MongoDB on 127.0.0.1:$((27117+LANE_PORT_OFFSET))"; fi
   echo "-- the aggregator (ristik/aggregator-go integration/enshrined-evm at AGG_COMMIT, built by --build-aggregator; provenance builds/aggregator-<sha8>/)"
   if [ -n "${AGG_BIN:-}" ] && [ -x "$AGG_BIN" ]; then
     yes "AGG_BIN $AGG_BIN"
@@ -128,7 +131,8 @@ preflight() {
       [ "$(tr -d '[:space:]' <"$prov/commit.txt")" = "$AGG_COMMIT" ] && yes "the binary is the pinned AGG_COMMIT ${AGG_COMMIT:0:10}" || no "the binary's commit is not AGG_COMMIT ${AGG_COMMIT:0:10}"
     else no "set AGG_COMMIT to the pinned aggregator-go commit (40 hex)"; fi
     if [ -n "${prov:-}" ]; then
-      if pinned=$(utb_agg_pins_ok "$prov" "$REPO_ROOT" 2>&1); then yes "the aggregator's bft-core ($pinned) is in this checkout's history"; else no "$pinned"; fi
+      if [ -n "${LANE_PRODUCT_COMMIT:-}" ]; then yes "pinned product run: the aggregator's bft-core is checked against the product ${LANE_PRODUCT_COMMIT:0:10} in the build job (scripts/ci/build-tools.sh, PRODUCT_DIR), not against the harness checkout"
+      elif pinned=$(utb_agg_pins_ok "$prov" "$REPO_ROOT" 2>&1); then yes "the aggregator's bft-core ($pinned) is in this checkout's history"; else no "$pinned"; fi
     fi
     check "the binary is a UTB build (its UTB variables are in the binary)" bash -c "strings '$AGG_BIN' | grep -q UTB_GENESIS_ID"
     check "the binary logs an attachment which adds nothing (aggregator-go#4: 'trust-base update already held'; U2 needs it when the catch-up wins)" bash -c "strings '$AGG_BIN' | grep -q 'trust-base update already held'"
@@ -137,7 +141,7 @@ preflight() {
     no "set AGG_BIN to the aggregator built by: AGG_COMMIT=<40 hex> $0 --build-aggregator"
   fi
   echo "-- the JS SDK client (ristik/state-transition-sdk-js integration/enshrined-evm, built)"
-  if [ -n "${UTB_SDK_JS:-}" ] && [ -f "$UTB_SDK_JS/lib/util/TrustBaseUtils.js" ]; then
+  if [ -n "${UTB_SDK_JS:-}" ] && [ -f "$UTB_SDK_JS/lib/api/bft/verification/verifyWithUpdate.js" ]; then
     yes "UTB_SDK_JS $UTB_SDK_JS"
     check "UTB_SDK_JS is a clean git checkout" bash -c "[ -z \"\$(git -C '$UTB_SDK_JS' status --porcelain --untracked-files=no)\" ]"
     if [ "${LANE_PINNED:-0}" = 1 ]; then note "UTB_SDK_JS is the manifest's pin (checked above), not a branch-tip ancestry query"; else
@@ -149,12 +153,14 @@ preflight() {
   note "the aggregator history range is served at $(utb_agg_history_url 1) (GET /api/v1/trustbases)"
   echo "-- substrate and the generated genesis"
   check "reth-paired-devnet.sh supports UTB_LANE" grep -q 'UTB_LANE' "$REPO_ROOT/scripts/reth-paired-devnet.sh"
-  check "helper.sh hands the profile to roots and validators" bash -c "grep -c 'UTB_LANE' '$REPO_ROOT/helper.sh' | grep -qx 2"
+  check "helper.sh hands the profile to roots and validators" bash -c '
+    grep -Fq "\$(utb_root_flags " "$1" && grep -Fq "\$(utb_shard_flags " "$1"
+  ' _ "$REPO_ROOT/helper.sh"
   check "m2_start_root keeps the profile on a restarted root" grep -q 'UTB_ROOT_FLAGS_FN' "$REPO_ROOT/scripts/lib/m2-handoff-lib.sh"
   if [ -s test-nodes/utb/utb-manifest.json ]; then
     check "the generated manifest checks out against its trust base" "$UBFT" trust-base utb-manifest --check test-nodes/utb/utb-manifest.json
     rev=$(python3 -c "import json;print(json.load(open('test-nodes/utb/utb-manifest.json'))['build']['bftCoreRevision'])" 2>/dev/null)
-    [ "$rev" = "$head" ] && yes "the manifest was generated by a ubft built from HEAD" || no "the manifest's bft-core revision '${rev:0:10}' is not HEAD ${head:0:10} (regenerate: --prep)"
+    [ "$rev" = "${LANE_PRODUCT_COMMIT:-$head}" ] && yes "the manifest was generated by a ubft built from the product commit (HEAD unless a pinned product run)" || no "the manifest's bft-core revision '${rev:0:10}' is not HEAD ${head:0:10} (regenerate: --prep)"
   else
     note "no generated manifest yet (test-nodes/utb/utb-manifest.json): --prep creates it"
   fi
@@ -171,8 +177,8 @@ preflight() {
 }
 
 # outside build/ (make build clears it) and absolute (the lane steps run in other directories)
-UTB_EVIDENCE=${UTB_EVIDENCE:-$(cd "$REPO_ROOT/.." && pwd)/builds/utb-evidence-pr7}
-lane_env() { export UTB_EVIDENCE ANYAGE_LANE=1 UTB_LANE=1 P85_LOCK_OWNER=utb P85_EVIDENCE_PREFIX=utb CONTRACTS=${P85_CONTRACTS:-} UTB_COMPONENTS="$(utb_lane_components)"; }
+utb_verifier_default=$(cd "$REPO_ROOT/.." && pwd)/builds/utb-evidence-pr7
+lane_env() { export UTB_VERIFIER ANYAGE_LANE=1 UTB_LANE=1 P85_LOCK_OWNER=utb P85_EVIDENCE_PREFIX=utb CONTRACTS=${P85_CONTRACTS:-} UTB_COMPONENTS="$(utb_lane_components)"; }
 
 case "${1:-}" in
   --plan) plan ;;
@@ -183,12 +189,13 @@ case "${1:-}" in
     : "${AGG_COMMIT:?set AGG_COMMIT to the 40-hex aggregator-go commit on integration/enshrined-evm}"
     bin=$(utb_agg_build "$AGG_COMMIT" "$AGRE_ROOT/builds") || exit 1
     prov=$(utb_agg_provenance "$bin" "$AGRE_ROOT/builds") || exit 1
-    echo "built $bin"; echo "provenance $prov"; utb_agg_pins_ok "$prov" "$REPO_ROOT" || echo "WARNING: re-pin the aggregator to a bft-core in this checkout's history before the real run" >&2 ;;
-  --check-evidence) utb_check_evidence "${2:?usage: $0 --check-evidence DIR}" && echo "evidence complete" ;;
+    echo "built $bin"; echo "provenance $prov"; utb_agg_pins_ok "$prov" "${PRODUCT_DIR:-$REPO_ROOT}" || { [ -z "${PRODUCT_DIR:-}" ] || { echo "a pinned product run needs the aggregator built on a bft-core in the product history" >&2; exit 1; }; echo "WARNING: re-pin the aggregator to a bft-core in this checkout's history before the real run" >&2; } ;;
+  --check-evidence) utb_check_evidence "${2:?usage: $0 --check-evidence DIR}" "$utb_verifier_default" && echo "evidence complete" ;;
   --preflight) plan; echo; preflight ;;
   --prep)
+    utb_resolve_verifier "$utb_verifier_default" || exit 2
     lane_env
-    [ -n "${P85_CONTRACTS:-}" ] && [ -n "${DNB_TOOL:-}" ] || { echo "--prep needs P85_CONTRACTS, M2_URETH_BIN, M2_URETH_COMMIT, DNB_TOOL (and P85_DEV_RUN=1 unless the provenance is attested)" >&2; exit 2; }
+    [ -n "${P85_CONTRACTS:-}" ] || { echo "--prep needs P85_CONTRACTS, M2_URETH_BIN, M2_URETH_COMMIT (and P85_DEV_RUN=1 unless the provenance is attested)" >&2; exit 2; }
     export ANYAGE_PREP_ONLY=1
     "$(lane_lock_script)" utb-prep env P85_LANE_LOCKED=1 "$SCRIPT_DIR/p85-lane.sh"; rc=$?
     if [ "$rc" -eq 0 ]; then

@@ -6,12 +6,14 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/archive"
 	"github.com/unicitynetwork/bft-core/configuredprogress"
+	"github.com/unicitynetwork/bft-core/engineapi"
 	"github.com/unicitynetwork/bft-core/frontier"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/shardnode"
@@ -103,14 +105,15 @@ type replayExecutor struct {
 		ref    shardnode.BlockRef
 		parent shardnode.Hash
 	}
-	known      map[string]bool
-	verify     []uint64
-	forkchoice []uint64
-	invalid    uint64
-	lostReply  uint64
-	witnessErr error
-	bindingErr error
-	headErr    error
+	known            map[string]bool
+	verify           []uint64
+	forkchoice       []uint64
+	invalid          uint64
+	lostReply        uint64
+	witnessErr       error
+	bindingErr       error
+	headErr          error
+	beforeForkchoice func(shardnode.Hash)
 }
 
 func (e *replayExecutor) Head(context.Context) (shardnode.BlockRef, error) {
@@ -140,6 +143,9 @@ func (e *replayExecutor) Header(_ context.Context, h shardnode.Hash) (shardnode.
 	return shardnode.BlockRef{}, nil, fmt.Errorf("missing header %x", h)
 }
 func (e *replayExecutor) Commit(_ context.Context, h shardnode.Hash) (shardnode.Status, error) {
+	if e.beforeForkchoice != nil {
+		e.beforeForkchoice(h)
+	}
 	if !e.known[string(h)] {
 		return shardnode.StatusSyncing, nil
 	}
@@ -153,6 +159,9 @@ func (e *replayExecutor) Commit(_ context.Context, h shardnode.Hash) (shardnode.
 	return shardnode.StatusInvalid, nil
 }
 func (e *replayExecutor) RecoveryForkchoice(_ context.Context, h, finalized shardnode.Hash) (shardnode.Status, error) {
+	if e.beforeForkchoice != nil {
+		e.beforeForkchoice(h)
+	}
 	if !bytes.Equal(finalized, e.finalized.Hash) {
 		return shardnode.StatusInvalid, nil
 	}
@@ -240,6 +249,56 @@ func TestExecutionRecoveryHeadsAndIdempotence(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestExecutionRecoveryReimportsLocallyBuiltCompanionBeforeCommit(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		localBlock int
+	}{
+		{"target", 5},
+		{"ancestor", 4},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, e, image := replayFixture()
+			e.head, e.finalized = e.refs[tc.localBlock-1], e.refs[tc.localBlock-1]
+			for i := 1; i <= 5; i++ {
+				// The executor can make these payloads canonical by forkchoice alone.
+				e.known[string(e.refs[i].Hash)] = true
+			}
+			image.Candidates[tc.localBlock-1].Candidate.LocallyBuilt = true
+			e.beforeForkchoice = func(h shardnode.Hash) {
+				require.True(t, bytes.Equal(e.refs[tc.localBlock].Hash, h) || bytes.Equal(e.refs[5].Hash, h))
+				require.Contains(t, e.verify, uint64(tc.localBlock),
+					"forkchoice would commit a locally built block before importing its witnessed companion")
+			}
+
+			head, err := r.Recover(context.Background(), image.Observations[0].UC)
+			require.NoError(t, err)
+			require.Equal(t, e.refs[5], head)
+			require.Equal(t, head, e.finalized)
+			verified := len(e.verify)
+			_, err = r.Recover(context.Background(), image.Observations[0].UC)
+			require.NoError(t, err)
+			require.Len(t, e.verify, verified, "already finalized recovery is idempotent")
+		})
+	}
+}
+
+func TestExecutionRecoveryRefusesLocallyBuiltCompanionWhenImportFails(t *testing.T) {
+	r, e, image := replayFixture()
+	e.head, e.finalized = e.refs[4], e.refs[4]
+	e.known[string(e.refs[5].Hash)] = true
+	e.invalid = 5
+	image.Candidates[4].Candidate.LocallyBuilt = true
+	e.beforeForkchoice = func(shardnode.Hash) {
+		t.Fatal("forkchoice followed a rejected companion import")
+	}
+
+	_, err := r.Recover(context.Background(), image.Observations[0].UC)
+	require.ErrorIs(t, err, ErrRecoveryConflict)
+	require.Equal(t, e.refs[4], e.head)
+	require.Equal(t, e.refs[4], e.finalized)
 }
 
 func TestExecutionRecoveryMissingCorruptAndFinality(t *testing.T) {
@@ -339,4 +398,44 @@ func TestExecutionRecoveryCancellationAndNewTarget(t *testing.T) {
 	_, err = r.Recover(context.Background(), nil)
 	require.NoError(t, err)
 	require.Equal(t, e.refs[6], e.head)
+}
+
+type feeProofFaultDuringReplay struct {
+	*replayExecutor
+	faults   []error
+	attempts int
+}
+
+func (e *feeProofFaultDuringReplay) Verify(ctx context.Context, b shardnode.Block, p shardnode.RoundParams) (shardnode.Status, error) {
+	e.attempts++
+	if len(e.faults) != 0 {
+		err := e.faults[0]
+		e.faults = e.faults[1:]
+		return shardnode.StatusSyncing, errors.Join(engineapi.ErrFeeProofUnavailable, err)
+	}
+	return e.replayExecutor.Verify(ctx, b, p)
+}
+
+func TestCertifiedRecoveryRetriesAndSurvivesLocalFeeProofFaults(t *testing.T) {
+	r, underlying, _ := replayFixture()
+	r.Limits.Retries = 1
+	var alert bytes.Buffer
+	r.Log = slog.New(slog.NewTextHandler(&alert, nil))
+	exec := &feeProofFaultDuringReplay{replayExecutor: underlying, faults: []error{
+		errors.New("malformed local proof"), engineapi.ErrFeeProofOversized,
+	}}
+	r.Executor = exec
+	_, err := r.Recover(t.Context(), nil)
+	require.ErrorIs(t, err, ErrRecoveryUnavailable)
+	require.False(t, r.Terminal(err))
+	require.Contains(t, err.Error(), engineapi.ErrFeeProofOversized.Error())
+	require.Contains(t, alert.String(), "execution recovery deferred after retries")
+	require.Equal(t, 2, exec.attempts)
+	require.Equal(t, underlying.refs[0], underlying.finalized)
+	require.Empty(t, underlying.verify, "the unavailable proof did not reach block verification")
+
+	head, err := r.Recover(t.Context(), nil)
+	require.NoError(t, err)
+	require.Equal(t, underlying.refs[5], head)
+	require.Equal(t, []uint64{1, 2, 3, 4, 5}, underlying.verify)
 }

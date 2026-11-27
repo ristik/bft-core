@@ -3,7 +3,8 @@
 # Definitions only: sourcing starts nothing. Needs reth-paired-devnet.sh context (rpc, pyget, validators, ...).
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/portable.sh"
-m2_rpc_port() { echo $((25866 + $1 - 1)); }
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lane-slot.sh"   # LANE_SLOT: ports below are shifted into the lane's slot
+m2_rpc_port() { echo $(((25866+LANE_PORT_OFFSET) + $1 - 1)); }
 m2_p2p_port() { echo $((rootPortStart + $1 - 1)); }
 m2_root_addr() { boot_node "test-nodes/root$1" "$(m2_p2p_port "$1")"; }
 m2_online_validators() {
@@ -31,12 +32,26 @@ m2_start_root() { # node installEpoch bootnode  (an empty install epoch starts a
   local -a bootArgs=() installArgs=()
   [ "$epoch" -lt 2 ] || installArgs=(--install-handoff-epoch "$epoch")   # the flag is refused below epoch 2: a root started at the genesis epoch (the joiner's follower) takes none
   [ -z "$boot" ] || bootArgs=(--bootnodes "$boot")   # the first root of a cold network has no bootnode, as at genesis
-  if [ "${Q3_B1:-0}" = 1 ] && [ "${P85_LANE:-0}" != 1 ]; then shardConfArgs+=(--q3-lane --genesis-identities test-nodes/genesis-identities.json); fi   # Q3 #50: the coupled runtime (verified history, install journal, V3 handoffs)
+  if [ "${Q3_B1:-0}" = 1 ] && [ "${P85_LANE:-0}" != 1 ] && [ "${VR_LANE:-0}" != 1 ]; then shardConfArgs+=(--q3-lane --genesis-identities test-nodes/genesis-identities.json); fi   # Q3 #50: the coupled runtime (verified history, install journal, V3 handoffs)
+  if [ "${VR_LANE:-0}" = 1 ]; then   # a restarted root of a VR generation keeps VR mode: the VR identities, --vr-deployment and its ureth (scripts/lib/vr-lib.sh)
+    # the flags come from the VR library through the name it exports (VR_ROOT_FLAGS_FN), as P85's do through M2_ROOT_FLAGS_FN: the other lanes
+    # that source this file (the Q4 dry run resolves every command by name) need not carry the VR library
+    declare -F "${VR_ROOT_FLAGS_FN:-}" >/dev/null || source scripts/lib/vr-lib.sh || { echo "m2_start_root: VR_LANE needs scripts/lib/vr-lib.sh" >&2; return 1; }
+    declare -F "${VR_ROOT_FLAGS_FN:-}" >/dev/null || { echo "m2_start_root: the VR lane's VR_ROOT_FLAGS_FN is not a defined function" >&2; return 1; }
+    [ -s "${VR_DIR:-test-nodes/vr}/vr-deployment.json" ] && [ -s "${VR_DIR:-test-nodes/vr}/genesis-identities.json" ] ||
+      { echo "m2_start_root: the VR generation's deployment or identities are missing: refusing to restart root $node outside VR mode" >&2; return 1; }
+    shardConfArgs+=(--q3-lane $("$VR_ROOT_FLAGS_FN" "$node" "http://127.0.0.1:$(( ${rethEthBase:-(18545+LANE_PORT_OFFSET)} + node - 1 ))"))
+  fi
   if [ "${P85_LANE:-0}" = 1 ]; then   # a restarted root of the proof-of-stake lane runs the same coupled runtime and P85 executor
     # the flags come from the P85 library (its steps file sources it), called through a name the lane exports: the other lanes that source this
     # file (the Q4 dry run resolves every command by name) need not carry the P85 library
     declare -F "${M2_ROOT_FLAGS_FN:-}" >/dev/null || { echo "m2_start_root: the P85 lane's M2_ROOT_FLAGS_FN is not a defined function" >&2; return 1; }
-    shardConfArgs+=(--q3-lane $("$M2_ROOT_FLAGS_FN" "$node" "http://127.0.0.1:${rethEthBase:-18545}"))
+    shardConfArgs+=(--q3-lane $("$M2_ROOT_FLAGS_FN" "$node" "http://127.0.0.1:${rethEthBase:-$((18545+LANE_PORT_OFFSET))}"))
+  fi
+  # a root of a deployment whose EVM shards carry the B1 registry (--b1-profile) refuses a handoff above the registry's 16 members at admission, as
+  # the shards do (owner §49: the generic limit is 256, the B1 member ceiling stays 16)
+  if [ -n "${EVM_B1_PROFILE:-}" ]; then
+    case " ${shardConfArgs[*]} " in *" --q3-lane "*) shardConfArgs+=(--b1-registry) ;; esac
   fi
   port=$(m2_rpc_port "$node")
   if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
@@ -50,15 +65,18 @@ m2_start_root() { # node installEpoch bootnode  (an empty install epoch starts a
     local k; for k in $(seq 1 "${aggShards:-1}"); do shardConfArgs+=(--shard-conf "$("$ANYAGE_SHARD_CONF_FN" "$k")"); done
   fi
   if [ "${UTB_LANE:-0}" = 1 ]; then   # a restarted root of the UTB lane keeps the profile: the flags come from the UTB library through a name the lane exports
+    declare -F "${UTB_ROOT_FLAGS_FN:-}" >/dev/null || source scripts/lib/utb-lib.sh || return 1
     declare -F "${UTB_ROOT_FLAGS_FN:-}" >/dev/null || { echo "m2_start_root: the UTB lane's UTB_ROOT_FLAGS_FN is not a defined function" >&2; return 1; }
     shardConfArgs+=($("$UTB_ROOT_FLAGS_FN" "$node")) || return 1
   fi
+  lane_port_preflight "$(m2_p2p_port "$node")" "root$node p2p" && lane_port_preflight "$port" "root$node rpc" || return 1
   mkdir -p "test-nodes/root$node"
   for i in $(seq 1 90); do
     UBFT_Q4_SHIM_DIR="${Q4_SHIM_DIR:+$Q4_SHIM_DIR/root$node}" ${Q4_ROOT_BIN:-build/ubft} root-node run --home "test-nodes/root$node" \
       --address "/ip4/127.0.0.1/tcp/$(m2_p2p_port "$node")" \
       ${bootArgs[@]+"${bootArgs[@]}"} --trust-base test-nodes/trust-base.json \
       "${shardConfArgs[@]}" --profile-3 ${installArgs[@]+"${installArgs[@]}"} \
+      ${M2_IN_PROCESS_SWITCH:+--in-process-epoch-switch="$M2_IN_PROCESS_SWITCH"} \
       --rpc-server-address "127.0.0.1:$port" --log-format text --log-level debug \
       >>"test-nodes/root$node/debug.log" 2>&1 &
     pid=$!
@@ -325,10 +343,8 @@ m2_advance_authorities() {
       mkdir -p test-nodes/post-m2a-evidence/restarting && : >"test-nodes/post-m2a-evidence/restarting/$i"
       stop_one_evm_validator "$i" || [ "${M2_ADVANCE_TOLERATE_STOPPED:-0}" = 1 ] || return 1
     fi
-    build/ubft signing-authority advance-epoch \
-      --operator-socket "test-nodes/auth$i/operator.sock" \
-      --operator-credential "test-nodes/auth$i/operator.cred" \
-      --trust-base "test-nodes/$trustFile" --shard-conf "$conf" || return 1
+    source helper.sh
+    authority_advance_scope "$i" "$epoch" "test-nodes/$trustFile" "$conf" || return 1
     build/ubft signing-authority replace-session \
       --operator-socket "test-nodes/auth$i/operator.sock" \
       --operator-credential "test-nodes/auth$i/operator.cred" \

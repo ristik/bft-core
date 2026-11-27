@@ -4,12 +4,15 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"slices"
 	"testing"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/peerstore"
 	"github.com/stretchr/testify/require"
 
+	"github.com/unicitynetwork/bft-core/internal/testutils/logger"
 	"github.com/unicitynetwork/bft-core/internal/testutils/observability"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -46,14 +49,55 @@ func registerReceiver(t *testing.T, sender *Peer, p *Peer, kind recvKind) (*Peer
 	sender.Network().Peerstore().AddAddrs(p.ID(), p.MultiAddresses(), peerstore.PermanentAddrTTL)
 	var descs []ReceiveProtocolDescription
 	if kind != recvV2Only {
-		descs = append(descs, ReceiveProtocolDescription{ProtocolID: ProtocolUnicityCertificates, TypeFn: func() any { return &certification.CertificationResponse{} }})
+		descs = append(descs, ReceiveProtocolDescription{ProtocolID: ProtocolUnicityCertificates, MaxFrameSize: certification.MaxCertificationResponseV1Frame,
+			TypeFn: func() any { return &certification.CertificationResponse{} }})
 	}
 	if kind != recvLegacy {
 		descs = append(descs, ReceiveProtocolDescription{ProtocolID: ProtocolUnicityCertificatesV2, MaxFrameSize: certification.MaxCertificationResponseV2Frame,
 			TypeFn: func() any { return &certification.CertificationResponseV2{} }})
 	}
 	require.NoError(t, nw.RegisterReceiveProtocols(descs))
+	want := make([]string, 0, len(descs))
+	for _, d := range descs {
+		want = append(want, d.ProtocolID)
+	}
+	settleIdentify(t, p, want)
 	return p, nw
+}
+
+// settleIdentify waits until the receiver's identify service serves exactly the certificate protocols it registered (bft-core#1004).
+// Registering a handler emits EvtLocalProtocolsUpdated, and identify updates the snapshot it answers with asynchronously, in its own
+// goroutine: a sender that connects in between is identified without them, and then opens its streams by explicit negotiation, not the
+// lazy path a test expects, until an identify push corrects its peerstore. A probe peer connects, waits until it has been told the
+// protocols (by the answer or by the push), and leaves; every later connection is identified with the settled snapshot, and no push
+// about the protocols is pending for anyone.
+func settleIdentify(t *testing.T, p *Peer, want []string) {
+	t.Helper()
+	conf, err := NewPeerConfiguration(randomTestAddressStr, nil, generateKeyPair(t), nil, nil)
+	require.NoError(t, err)
+	probe, err := NewPeer(context.Background(), conf, logger.New(t), nil)
+	require.NoError(t, err)
+	defer func() { _ = probe.Close() }()
+	probe.host.Peerstore().AddAddrs(p.ID(), p.MultiAddresses(), peerstore.TempAddrTTL)
+	certs := map[string]bool{ProtocolUnicityCertificates: true, ProtocolUnicityCertificatesV2: true}
+	slices.Sort(want)
+	require.Eventually(t, func() bool {
+		if err := probe.host.Connect(context.Background(), peer.AddrInfo{ID: p.ID()}); err != nil {
+			return false
+		}
+		protos, err := probe.host.Peerstore().GetProtocols(p.ID())
+		if err != nil {
+			return false
+		}
+		var got []string
+		for _, id := range protos {
+			if certs[string(id)] {
+				got = append(got, string(id))
+			}
+		}
+		slices.Sort(got)
+		return slices.Equal(got, want)
+	}, recvBound, 5*time.Millisecond, "the receiver's identify never served its certificate protocols %v", want)
 }
 
 func newCertSender(t *testing.T) (*Peer, *LibP2PNetwork) {
@@ -139,16 +183,15 @@ func Test_SendCertificationResponse_OversizeViewIsOmitted(t *testing.T) {
 	require.NoError(t, v2.Legacy().IsValid())
 }
 
-func Test_SendCertificationResponse_FrameTooLargeUsesLegacy(t *testing.T) {
+// A response too large for the V2 envelope falls back to the legacy frame, which has the same limit (#956): one that fits neither is refused on the send side
+// and nothing is written, instead of a frame every shard would drop.
+func Test_SendCertificationResponse_FrameTooLargeInEveryFormatIsRefused(t *testing.T) {
 	senderPeer, senderNw := newCertSender(t)
 	p, nw := newCertReceiver(t, senderPeer, recvBoth)
 	cr := testCertResponse(t, nil)
 	cr.Technical.Leader = string(bytes.Repeat([]byte{'a'}, certification.MaxCertificationResponseV2Frame))
-	require.NoError(t, senderNw.SendCertificationResponse(context.Background(), cr, p.ID()))
-	// selected before sending: legacy path, no v2 attempt
-	legacy, ok := recv(t, nw).(*certification.CertificationResponse)
-	require.True(t, ok)
-	require.Equal(t, cr.Technical.Leader, legacy.Technical.Leader)
+	err := senderNw.SendCertificationResponse(context.Background(), cr, p.ID())
+	require.ErrorIs(t, err, ErrLegacyFrameTooLarge)
 	requireNoMore(t, nw)
 }
 

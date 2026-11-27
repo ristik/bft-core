@@ -281,6 +281,9 @@ func (a *v1HandoffAuthority) verifyAssignmentBinding(r evmroot.OrderedHandoffRec
 }
 
 // CurrentRoot is the old root committee in candidate order, for the EVM-only refusal at freeze admission.
+// CurrentQuorumThreshold is the trust base's own commit threshold.
+func (a *v1HandoffAuthority) CurrentQuorumThreshold() uint64 { return a.trust.QuorumThreshold }
+
 func (a *v1HandoffAuthority) CurrentRoot() []evmassign.RootMember {
 	out := make([]evmassign.RootMember, 0, len(a.trust.RootNodes))
 	for _, n := range a.trust.RootNodes {

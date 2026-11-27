@@ -57,9 +57,10 @@ knownScenarios="baseline follower-restart leader-kill reth-only-restart pair-res
 : "${chainID:=31337}"
 : "${pinnedRethCommit:=$URETH_PIN_COMMIT}"   # the fork client the seal-capable shard node requires
 
-: "${rethEngineBase:=18551}"
-: "${rethEthBase:=18545}"
-: "${rethP2PBase:=30401}"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lane-slot.sh"   # LANE_SLOT: ports below are shifted into the lane's slot
+: "${rethEngineBase:=$((18551+LANE_PORT_OFFSET))}"
+: "${rethEthBase:=$((18545+LANE_PORT_OFFSET))}"
+: "${rethP2PBase:=$((30401+LANE_PORT_OFFSET))}"
 
 : "${failures:=0}"
 pass() { echo "  PASS: $1"; }
@@ -147,18 +148,18 @@ startReth() {
 # stopReth - stop a client and WAIT for it to actually exit before returning. Dropping the pid
 # file immediately let a restart race the dying process for its datadir and ports.
 stopReth() {
-  local i=$1 pid waited=0
+  local i=$1 pid pattern waited=0
   [ -f "test-nodes/reth$i/pid" ] || return 0
   pid=$(cat "test-nodes/reth$i/pid")
   rm -f "test-nodes/reth$i/pid"
-  # Only a pid that is still a `reth node` running from this checkout (helper.sh, "ownership"): the
-  # integer in a stale pid file may by now belong to anything.
+  # The PID must still belong to this checkout and to the verified executable we launched.
   declare -F owned_pid >/dev/null || source helper.sh
-  owned_pid "$pid" 'reth node' || return 0
+  pattern=$(reth_node_pattern "${URETH_BIN:-}")
+  owned_pid "$pid" "$pattern" || return 0
   kill "$pid" 2>/dev/null || return 0
   while ps -p "$pid" >/dev/null 2>&1; do
     if [ "$waited" -ge 30 ]; then
-      kill -9 "$pid" 2>/dev/null
+      owned_pid "$pid" "$pattern" && kill -9 "$pid" 2>/dev/null
       break
     fi
     sleep 1; waited=$((waited + 1))

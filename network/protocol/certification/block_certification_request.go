@@ -16,6 +16,11 @@ var (
 	errEmptyNodeID                    = errors.New("node identifier is empty")
 )
 
+// MaxBlockCertificationRequestFrame bounds the CBOR payload of a received block certification request frame before it is decoded
+// (#1032): the receive side otherwise allocates whatever length the sender states. It is generous on purpose: a request is a few
+// hundred bytes plus its ZK proof, and no proof any shard produces approaches it.
+const MaxBlockCertificationRequestFrame = 64 << 20
+
 type BlockCertificationRequest struct {
 	_           struct{}           `cbor:",toarray"`
 	PartitionID types.PartitionID  `json:"partitionId"`

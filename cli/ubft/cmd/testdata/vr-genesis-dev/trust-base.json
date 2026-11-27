@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "networkId": 3,
+  "epoch": 1,
+  "epochStartRound": 1,
+  "rootNodes": [
+    {
+      "nodeId": "16Uiu2HAkx7S6zT3FXQrJxuCnSgsCS7U9A8gqRDGxGE8uPZ3gzEyV",
+      "sigKey": "0x0245139d23aaabfcf124cc07cd7a92a8ba73a3b4ca31e00465da8646ad6a91a881",
+      "stake": 1
+    },
+    {
+      "nodeId": "16Uiu2HAm3C4RGt5Xg9ZhCUeZeR1KvNbcTR4JhvsqfUt37v2bbzet",
+      "sigKey": "0x0374edf6c6371ae24b2a9f50e1a98c64dd96fcbea74131d938567bbd6b5f815449",
+      "stake": 1
+    },
+    {
+      "nodeId": "16Uiu2HAm6ArjTCNZnuz5Zxf9NZ4ni4L4NDH4QWPk4ts7RCNQxfBb",
+      "sigKey": "0x0251b3fa28e8b7afbf85a99259efde78105f000c28a657f33ae98438c0e4892c93",
+      "stake": 1
+    },
+    {
+      "nodeId": "16Uiu2HAmUbkJ1Q12iv4FU47YhZBQ3MuUMAQjwMYhtXaCTPctNzgS",
+      "sigKey": "0x02b352dda672ae6520328e0f34d388bb2d10685d89fd63e619868a824e92e7d823",
+      "stake": 1
+    }
+  ],
+  "quorumThreshold": 3,
+  "stateHash": "",
+  "changeRecordHash": "",
+  "previousEntryHash": "",
+  "signatures": {
+    "16Uiu2HAkx7S6zT3FXQrJxuCnSgsCS7U9A8gqRDGxGE8uPZ3gzEyV": "0x578bad3e808079adff1c280aedf625d1c115f989a092d4bfea2eac2a29d5adf561b32e127b1613476265caeb57078e2e9b063b887fa3f40cddccad287bc467e601",
+    "16Uiu2HAm3C4RGt5Xg9ZhCUeZeR1KvNbcTR4JhvsqfUt37v2bbzet": "0x0ebb51ff6a1ce9847acab180afeed3129aeaa53a63b72e20a6f8b52adeac347110a1be792b45a3734294b025aef1e67ad57a4251b1f1f4c627035b6faa69f19400",
+    "16Uiu2HAm6ArjTCNZnuz5Zxf9NZ4ni4L4NDH4QWPk4ts7RCNQxfBb": "0x04e244ee797c3e2474558cc16039d496a11fe0849588f0363eee5bebef749f4541fc9c47982dcac109848463ea73c923629d3a1a14de6bd53f3ab001173c582101",
+    "16Uiu2HAmUbkJ1Q12iv4FU47YhZBQ3MuUMAQjwMYhtXaCTPctNzgS": "0x334fb9395ac5e1b308e4a5fe49771b9b5c12bf8ec0d9fde8c6abb30ad3832f457c5f4f5d915b33ddddfed63b41ea5afd19b3e52b011c539bc393083e716274a501"
+  }
+}

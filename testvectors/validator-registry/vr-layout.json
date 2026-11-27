@@ -1,0 +1,562 @@
+{
+ "schema": "unicity.vr.schema/v1",
+ "address": "0xff00000000000000000000000000000000000003",
+ "namespace": "0x2015195c564edf8b5942ad7bb1fe48e96d190815eb762db2ddff1d85ce73f900",
+ "namespaceId": "unicity.vr.registry.v1",
+ "derivation": "keccak256(abi.encode(uint256(keccak256(id)) - 1)) & ~bytes32(uint256(0xff))",
+ "vr": [
+  {
+   "name": "network",
+   "slot": "V+0",
+   "value": "0x2015195c564edf8b5942ad7bb1fe48e96d190815eb762db2ddff1d85ce73f900",
+   "comment": "bytes32 deployment network word"
+  },
+  {
+   "name": "openOutput",
+   "slot": "V+1",
+   "value": "0x2015195c564edf8b5942ad7bb1fe48e96d190815eb762db2ddff1d85ce73f901",
+   "comment": "bytes32 result id, zero when none"
+  },
+  {
+   "name": "lastAcked",
+   "slot": "V+2",
+   "value": "0x2015195c564edf8b5942ad7bb1fe48e96d190815eb762db2ddff1d85ce73f902",
+   "comment": "bytes32, GENESIS_RESULT before the first acknowledgement"
+  },
+  {
+   "name": "pendingPair",
+   "slot": "V+3",
+   "value": "0x2015195c564edf8b5942ad7bb1fe48e96d190815eb762db2ddff1d85ce73f903",
+   "comment": "bytes32, zero when none"
+  },
+  {
+   "name": "committeeLimits",
+   "slot": "V+4",
+   "value": "0x2015195c564edf8b5942ad7bb1fe48e96d190815eb762db2ddff1d85ce73f904",
+   "packed": [
+    {
+     "name": "nMin",
+     "offset": 0,
+     "size": 4,
+     "kind": "uint"
+    },
+    {
+     "name": "nTarget",
+     "offset": 4,
+     "size": 4,
+     "kind": "uint"
+    },
+    {
+     "name": "nMax",
+     "offset": 8,
+     "size": 4,
+     "kind": "uint"
+    }
+   ]
+  },
+  {
+   "name": "hookLimits",
+   "slot": "V+5",
+   "value": "0x2015195c564edf8b5942ad7bb1fe48e96d190815eb762db2ddff1d85ce73f905",
+   "packed": [
+    {
+     "name": "vMax",
+     "offset": 0,
+     "size": 4,
+     "kind": "uint"
+    },
+    {
+     "name": "lMax",
+     "offset": 4,
+     "size": 4,
+     "kind": "uint"
+    },
+    {
+     "name": "rMax",
+     "offset": 8,
+     "size": 4,
+     "kind": "uint"
+    },
+    {
+     "name": "maxBatch",
+     "offset": 12,
+     "size": 4,
+     "kind": "uint"
+    }
+   ]
+  },
+  {
+   "name": "status",
+   "slot": "V+6",
+   "value": "0x2015195c564edf8b5942ad7bb1fe48e96d190815eb762db2ddff1d85ce73f906",
+   "packed": [
+    {
+     "name": "health",
+     "offset": 0,
+     "size": 1,
+     "kind": "uint"
+    },
+    {
+     "name": "knownRootEpoch",
+     "offset": 1,
+     "size": 8,
+     "kind": "uint"
+    },
+    {
+     "name": "recordCursor",
+     "offset": 9,
+     "size": 8,
+     "kind": "uint"
+    },
+    {
+     "name": "activationCount",
+     "offset": 17,
+     "size": 4,
+     "kind": "uint"
+    },
+    {
+     "name": "holderCount",
+     "offset": 21,
+     "size": 1,
+     "kind": "uint"
+    }
+   ]
+  },
+  {
+   "name": "activeModule",
+   "slot": "V+7",
+   "value": "0x2015195c564edf8b5942ad7bb1fe48e96d190815eb762db2ddff1d85ce73f907",
+   "packed": [
+    {
+     "name": "address",
+     "offset": 0,
+     "size": 20,
+     "kind": "address"
+    }
+   ]
+  },
+  {
+   "name": "activeModuleCodeHash",
+   "slot": "V+8",
+   "value": "0x2015195c564edf8b5942ad7bb1fe48e96d190815eb762db2ddff1d85ce73f908"
+  },
+  {
+   "name": "governor",
+   "slot": "V+9",
+   "value": "0x2015195c564edf8b5942ad7bb1fe48e96d190815eb762db2ddff1d85ce73f909",
+   "packed": [
+    {
+     "name": "address",
+     "offset": 0,
+     "size": 20,
+     "kind": "address"
+    }
+   ]
+  },
+  {
+   "name": "counters",
+   "slot": "V+10",
+   "value": "0x2015195c564edf8b5942ad7bb1fe48e96d190815eb762db2ddff1d85ce73f90a",
+   "packed": [
+    {
+     "name": "nextChangeId",
+     "offset": 0,
+     "size": 8,
+     "kind": "uint"
+    },
+    {
+     "name": "identityCount",
+     "offset": 8,
+     "size": 8,
+     "kind": "uint"
+    },
+    {
+     "name": "nativeAttempt",
+     "offset": 16,
+     "size": 8,
+     "kind": "uint"
+    }
+   ]
+  },
+  {
+   "name": "fees.previous",
+   "slot": "V+11",
+   "value": "0x2015195c564edf8b5942ad7bb1fe48e96d190815eb762db2ddff1d85ce73f90b",
+   "packed": [
+    {
+     "name": "baseFeeFloor",
+     "offset": 0,
+     "size": 8,
+     "kind": "uint"
+    },
+    {
+     "name": "changeDenominator",
+     "offset": 8,
+     "size": 8,
+     "kind": "uint"
+    }
+   ]
+  },
+  {
+   "name": "fees.previous.feeCollector",
+   "slot": "V+12",
+   "value": "0x2015195c564edf8b5942ad7bb1fe48e96d190815eb762db2ddff1d85ce73f90c",
+   "packed": [
+    {
+     "name": "address",
+     "offset": 0,
+     "size": 20,
+     "kind": "address"
+    }
+   ]
+  },
+  {
+   "name": "fees.current",
+   "slot": "V+13",
+   "value": "0x2015195c564edf8b5942ad7bb1fe48e96d190815eb762db2ddff1d85ce73f90d",
+   "packed": [
+    {
+     "name": "baseFeeFloor",
+     "offset": 0,
+     "size": 8,
+     "kind": "uint"
+    },
+    {
+     "name": "changeDenominator",
+     "offset": 8,
+     "size": 8,
+     "kind": "uint"
+    }
+   ]
+  },
+  {
+   "name": "fees.current.feeCollector",
+   "slot": "V+14",
+   "value": "0x2015195c564edf8b5942ad7bb1fe48e96d190815eb762db2ddff1d85ce73f90e",
+   "packed": [
+    {
+     "name": "address",
+     "offset": 0,
+     "size": 20,
+     "kind": "address"
+    }
+   ]
+  },
+  {
+   "name": "fees.effectiveBlock",
+   "slot": "V+15",
+   "value": "0x2015195c564edf8b5942ad7bb1fe48e96d190815eb762db2ddff1d85ce73f90f",
+   "packed": [
+    {
+     "name": "effectiveBlock",
+     "offset": 0,
+     "size": 8,
+     "kind": "uint"
+    }
+   ]
+  },
+  {
+   "name": "outputs[resultId]",
+   "slot": "keccak256(abi.encode(resultId, V+32)) + j",
+   "value": "0x2015195c564edf8b5942ad7bb1fe48e96d190815eb762db2ddff1d85ce73f920",
+   "words": 11
+  },
+  {
+   "name": "changes[id]",
+   "slot": "keccak256(abi.encode(uint256(id), V+33)) + j",
+   "value": "0x2015195c564edf8b5942ad7bb1fe48e96d190815eb762db2ddff1d85ce73f921",
+   "words": 4
+  },
+  {
+   "name": "changePayload[id]",
+   "slot": "keccak256(abi.encode(uint256(id), V+34)) (Solidity bytes)",
+   "value": "0x2015195c564edf8b5942ad7bb1fe48e96d190815eb762db2ddff1d85ce73f922"
+  },
+  {
+   "name": "activations[i]",
+   "slot": "keccak256(abi.encode(uint256(i), V+35)) + j",
+   "value": "0x2015195c564edf8b5942ad7bb1fe48e96d190815eb762db2ddff1d85ce73f923",
+   "words": 3
+  },
+  {
+   "name": "activations[i].word2",
+   "slot": "+2",
+   "packed": [
+    {
+     "name": "rootEpoch",
+     "offset": 0,
+     "size": 8,
+     "kind": "uint"
+    },
+    {
+     "name": "notBeforeUcTime",
+     "offset": 8,
+     "size": 8,
+     "kind": "uint"
+    },
+    {
+     "name": "state",
+     "offset": 16,
+     "size": 1,
+     "kind": "uint"
+    },
+    {
+     "name": "changeId",
+     "offset": 17,
+     "size": 8,
+     "kind": "uint"
+    }
+   ]
+  },
+  {
+   "name": "holders[h]",
+   "slot": "keccak256(abi.encode(uint256(h), V+36)) + j",
+   "value": "0x2015195c564edf8b5942ad7bb1fe48e96d190815eb762db2ddff1d85ce73f924",
+   "words": 3
+  },
+  {
+   "name": "holders[h].word0",
+   "slot": "+0",
+   "packed": [
+    {
+     "name": "holder",
+     "offset": 0,
+     "size": 20,
+     "kind": "address"
+    },
+    {
+     "name": "registeredEpoch",
+     "offset": 20,
+     "size": 8,
+     "kind": "uint"
+    }
+   ],
+   "comment": "word1 holderCodeHash, word2 module address"
+  },
+  {
+   "name": "retired[h][id][gen]",
+   "slot": "keccak256(abi.encode(uint256(gen), keccak256(abi.encode(uint256(id), keccak256(abi.encode(uint256(h), V+37))))))",
+   "value": "0x2015195c564edf8b5942ad7bb1fe48e96d190815eb762db2ddff1d85ce73f925",
+   "comment": "canonical bool"
+  },
+  {
+   "name": "outputs[R].word0",
+   "slot": "+0",
+   "packed": [
+    {
+     "name": "state",
+     "offset": 0,
+     "size": 1,
+     "kind": "uint"
+    },
+    {
+     "name": "attempt",
+     "offset": 1,
+     "size": 8,
+     "kind": "uint"
+    },
+    {
+     "name": "reservedProgress",
+     "offset": 9,
+     "size": 8,
+     "kind": "uint"
+    },
+    {
+     "name": "expiresAtProgress",
+     "offset": 17,
+     "size": 8,
+     "kind": "uint"
+    }
+   ]
+  },
+  {
+   "name": "outputs[R].word2",
+   "slot": "+2",
+   "packed": [
+    {
+     "name": "sourceModule",
+     "offset": 0,
+     "size": 20,
+     "kind": "address"
+    },
+    {
+     "name": "native",
+     "offset": 20,
+     "size": 1,
+     "kind": "bool"
+    }
+   ]
+  },
+  {
+   "name": "outputs[R].word10",
+   "slot": "+10",
+   "packed": [
+    {
+     "name": "invalidReason",
+     "offset": 0,
+     "size": 1,
+     "kind": "uint"
+    },
+    {
+     "name": "invalidAtProgress",
+     "offset": 1,
+     "size": 8,
+     "kind": "uint"
+    }
+   ]
+  },
+  {
+   "name": "changes[id].word0",
+   "slot": "+0",
+   "packed": [
+    {
+     "name": "kind",
+     "offset": 0,
+     "size": 1,
+     "kind": "uint"
+    },
+    {
+     "name": "state",
+     "offset": 1,
+     "size": 1,
+     "kind": "uint"
+    },
+    {
+     "name": "rejectReason",
+     "offset": 2,
+     "size": 1,
+     "kind": "uint"
+    },
+    {
+     "name": "notBeforeProgress",
+     "offset": 3,
+     "size": 8,
+     "kind": "uint"
+    },
+    {
+     "name": "notBeforeTime",
+     "offset": 11,
+     "size": 8,
+     "kind": "uint"
+    },
+    {
+     "name": "activeRootEpoch",
+     "offset": 19,
+     "size": 8,
+     "kind": "uint"
+    }
+   ]
+  },
+  {
+   "name": "changes[id].word3",
+   "slot": "+3",
+   "packed": [
+    {
+     "name": "scheduledAt",
+     "offset": 0,
+     "size": 8,
+     "kind": "uint"
+    },
+    {
+     "name": "payloadLength",
+     "offset": 8,
+     "size": 4,
+     "kind": "uint"
+    }
+   ]
+  }
+ ],
+ "liability": [
+  {
+   "name": "cursor",
+   "slot": "B+0",
+   "value": "0xb2905100cfe7c1af5dee2b1b6726fdfd755820e0f51ef675ed653be4f1102d00",
+   "packed": [
+    {
+     "name": "cursor",
+     "offset": 0,
+     "size": 8,
+     "kind": "uint"
+    }
+   ]
+  },
+  {
+   "name": "facts[id][generation]",
+   "slot": "s = keccak256(abi.encode(uint256(gen), keccak256(abi.encode(uint256(id), B+1)))); words s, s+1",
+   "value": "0xb2905100cfe7c1af5dee2b1b6726fdfd755820e0f51ef675ed653be4f1102d01",
+   "words": 2
+  },
+  {
+   "name": "facts.word0",
+   "slot": "s+0",
+   "packed": [
+    {
+     "name": "requested",
+     "offset": 0,
+     "size": 1,
+     "kind": "bool"
+    },
+    {
+     "name": "liveExposures",
+     "offset": 1,
+     "size": 4,
+     "kind": "uint"
+    },
+    {
+     "name": "lotReferences",
+     "offset": 5,
+     "size": 4,
+     "kind": "uint"
+    },
+    {
+     "name": "maxLiabilityAnchor",
+     "offset": 9,
+     "size": 8,
+     "kind": "uint"
+    }
+   ]
+  },
+  {
+   "name": "facts.word1",
+   "slot": "s+1",
+   "comment": "refDigest"
+  }
+ ],
+ "liabilityNamespace": "0xb2905100cfe7c1af5dee2b1b6726fdfd755820e0f51ef675ed653be4f1102d00",
+ "liabilityNamespaceId": "unicity.vr.liability.v1",
+ "reserved": "V+16..V+31 and V+38..V+63 are VR-internal (VT-02); nothing outside VR reads them",
+ "packingRule": "packed fields are placed from the low-order byte (Solidity struct packing); offset is bytes from the low end; every other byte is reserved and zero",
+ "outputWords": [
+  "word0 state|attempt|reservedProgress|expiresAtProgress",
+  "word1 predecessor",
+  "word2 sourceModule|native",
+  "word3 moduleTag",
+  "word4 membersDigest",
+  "word5 kDigest",
+  "word6 changesDigest",
+  "word7 snapshotDigest",
+  "word8 policyDigest",
+  "word9 outputCommit",
+  "word10 invalidReason|invalidAtProgress"
+ ],
+ "changeWords": [
+  "word0 kind|state|rejectReason|notBeforeProgress|notBeforeTime|activeRootEpoch",
+  "word1 payloadHash",
+  "word2 boundTo",
+  "word3 scheduledAt|payloadLength"
+ ],
+ "domains": {
+  "RetirementRequested(uint64,uint64)": "0x1c365a570b27d3752591f304a03ab5f06fecb66c11b0f7e38b73050e479e8903",
+  "unicity.p85.exposure": "0x4423be7c86bd872ed92508e1d1626d3f80b299a87103c5df6385efed783d17dc",
+  "unicity.seal-registry/records.retirement.v2": "0x8555079b2919f53b200996613c44b8cd85beeaf231b4a9bfe62d837e88ebad09",
+  "unicity.vr.binding": "0x5a5bc51918db2053987512595e34b48781b5e27db5260dca647518b5d38f6756",
+  "unicity.vr.changes.v1": "0x81f1c9ff5b6b872bdf628e72a36befd46d489d132e2cd8c7754d7571fa00bc55",
+  "unicity.vr.genesis-result.v1": "0xa8f78bb06266dfd716c6f47493cefe6dfc3bea1ec2b85965ecddbc9947d01c12",
+  "unicity.vr.members.v1": "0x36b9aba546beffe2efc054be8bb544701e0dfbc3015f989045cb5989cdb901b5",
+  "unicity.vr.native-result.v1": "0x04a3856b2ba424cb9e30e6c1d7b6b087a1ead7001e45d74362ce4ad502893fb3",
+  "unicity.vr.output.v1": "0x7022f759bdf16252d3448773698ed539c63440a03c2b77dd7c6b764f67c799aa",
+  "unicity.vr.poa.v1": "0xbcaea3db6891e775ad29d518c8f60e5bd039e96222333877246cf89d5c77e3bd",
+  "unicity.vr.register": "0x101696c29e5e72bf37c16ca74302fe86d76e21bbf57b3e3926a7fc5d355243a0",
+  "unicity.vr.registry-native.v1": "0x8bb02fcf42fe403f85792d37a3a81d283a4ec1b9cbc8a55da23527d8dfc7b9fe"
+ }
+}

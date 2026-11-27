@@ -6,8 +6,8 @@ func (g *gen) structure(seed string) {
 	f := newFixture(seed, 4)
 	pre := f.pre()
 	q := f.vals[:3]
-	cs := f.build("a", f.round, q, false)
-	cs2 := f.build("a", f.round+1, q, false)
+	cs := f.build("a", f.round, q, true)
+	cs2 := f.build("a", f.round+1, q, true)
 	keys := [][2]interface{}{{uint32(1), ""}, {uint32(2), "0"}, {uint32(2), "1"}, {uint32(3), ""}, {uint32(4), ""}, {uint32(5), ""}, {uint32(6), ""}, {uint32(7), ""}}
 	var all []ucSpec
 	for _, set := range []*certSet{cs, cs2} {
@@ -35,7 +35,7 @@ func (g *gen) structure(seed string) {
 	g.ok("cert.neg.ir-invalid", fam, "input record with a changed state hash but no block hash", req(claimOf(x)), pre, "ErrNativeInvalid", nil, nil)
 	x = all[0]
 	x.seal.timestamp = genesisTime - 1
-	x.seal.signWith(q, false)
+	x.seal.signWith(q, true)
 	g.ok("cert.neg.seal-timestamp", fam, "seal timestamp before the genesis minimum, re-signed", req(claimOf(x)), pre, "ErrNativeInvalid", nil, nil)
 
 	// null and empty signature containers.

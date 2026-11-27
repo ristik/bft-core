@@ -34,9 +34,9 @@ func TestFrontierIsolatedAdvanceGuards(t *testing.T) {
 		mutate func(*Store, *frontier.Coverage)
 		want   error
 	}{
-		{"missing binding", func(s *Store, _ *frontier.Coverage) { s.frontier.Binding = nil }, frontier.ErrAcknowledgment},
-		{"certified binding", func(s *Store, _ *frontier.Coverage) { s.frontier.Binding = rejectingBinding{} }, frontier.ErrInvalid},
-		{"replica read back", func(s *Store, _ *frontier.Coverage) { s.frontier.Availability = rejectingAvailability{} }, frontier.ErrAcknowledgment},
+		{"missing binding", func(s *Store, _ *frontier.Coverage) { s.frontierP().Binding = nil }, frontier.ErrAcknowledgment},
+		{"certified binding", func(s *Store, _ *frontier.Coverage) { s.frontierP().Binding = rejectingBinding{} }, frontier.ErrInvalid},
+		{"replica read back", func(s *Store, _ *frontier.Coverage) { s.frontierP().Availability = rejectingAvailability{} }, frontier.ErrAcknowledgment},
 		{"ack manifest", func(_ *Store, c *frontier.Coverage) {
 			c.Anchor.Acks[0].ManifestDigest[0] ^= 1
 			c.Anchor.Acks[1].ManifestDigest = c.Anchor.Acks[0].ManifestDigest
@@ -388,7 +388,7 @@ func TestFrontierReauthenticatesStoredAnchor(t *testing.T) {
 	s, c, _, item, limits := frontierTestSetup(t, t.TempDir()+"/journal.db")
 	defer s.Close()
 	require.NoError(t, s.AdvanceFrontier(context.Background(), c, limits, []frontier.Coverage{item}))
-	s.frontier.Binding = rejectingBinding{}
+	s.frontierP().Binding = rejectingBinding{}
 	_, err := s.LoadFrontier(context.Background(), c, limits)
 	require.ErrorIs(t, err, frontier.ErrInvalid)
 }

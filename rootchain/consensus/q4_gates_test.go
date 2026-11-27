@@ -37,15 +37,17 @@ type q4Site struct {
 }
 
 var q4LookupSites = []q4Site{
-	{Func: "Run", Arg: "x.pacemaker.GetCurrentRound()", Source: "local"},
-	{Func: "handlePacemakerEvent", Arg: "currentRound", Source: "local"}, // leaderAfter: the successor is overflow-checked
+	{Func: "startContext", Arg: "x.pacemaker.GetCurrentRound()", Source: "local"}, // the start of every consensus context (Run, and the in-process epoch switch, #1086)
+	{Func: "handlePacemakerEvent", Arg: "currentRound", Source: "local"},          // leaderAfter: the successor is overflow-checked
 	{Func: "handlePacemakerEvent", Arg: "2", Source: "local"},
 	{Func: "onIRChangeMsg", Arg: "x.pacemaker.GetCurrentRound()", Source: "local"},
-	{Func: "onTimeoutMsg", Arg: "x.pacemaker.GetCurrentRound()", Source: "local"},
-	{Func: "onProposalMsg", Arg: "x.pacemaker.GetCurrentRound()", Source: "local"},
+	{Func: "proposeIfLeader", Arg: "x.pacemaker.GetCurrentRound()", Source: "local"},
+	{Func: "castVote", Arg: "x.pacemaker.GetCurrentRound()", Source: "local"},              // the vote of onProposalMsg, or a deferred one (residence rule)
 	{Func: "leaderAfter", Arg: "round + 1", Source: "local"},                               // reached only after the math.MaxUint64 refusal
 	{Func: "timeoutUnknownLeader", Arg: "round", Source: "local"},                          // round := x.pacemaker.GetCurrentRound() on the line above
 	{Func: "processNewRoundEvent", Arg: "round", Source: "local"},                          // round := x.pacemaker.GetCurrentRound() on the line above
+	{Func: "refreshProposers", Arg: "round", Source: "local"},                              // round := x.pacemaker.GetCurrentRound(): the proposal ingress priority (#1113)
+	{Func: "refreshProposers", Arg: "round", Source: "local"},                              // leaderAfter: likewise, the next round's leader
 	{Func: "voteAfterRecovery", Arg: "x.pacemaker.GetCurrentRound() + 1", Source: "local"}, // the next leader after the vote: the pacemaker's own round
 	{Func: "onVoteMsg", Arg: "vote.VoteInfo.RoundNumber", Source: "message",
 		Prerequisite: "a vote for a round ahead of the pacemaker is buffered and returns before the lookup; a stale one is refused; the author is verified under its epoch first",

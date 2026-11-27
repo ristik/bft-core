@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	"github.com/unicitynetwork/bft-core/certifiedstore"
@@ -107,11 +108,15 @@ type Store struct {
 	settings   Settings
 	checkpoint func(string) error
 	journal    bool
-	frontier   *frontier.Policy
+	frontier   atomic.Pointer[frontier.Policy] // swapped whole on an archive policy switch (bft-core#1030); read once per operation
 	log        *slog.Logger
 	vm         verifyMemo   // successful certificate verifications of the loads, see verifymemo.go
 	jc         journalCache // the last full journal load and its sampler, see journal_cache.go
 }
+
+// frontierP is the frontier policy in force, nil until EnableFrontier. Every operation reads it once, so a policy switch never mixes two
+// policies inside one operation: work planned under the old one fails its checks under the new one and is replanned.
+func (s *Store) frontierP() *frontier.Policy { return s.frontier.Load() }
 
 // SetLogger sets the logger EnableFrontier reports a replica pair change to.
 func (s *Store) SetLogger(l *slog.Logger) {

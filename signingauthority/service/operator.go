@@ -55,6 +55,44 @@ func (o *OperatorClient) ReplaceSession(ctx context.Context) ([]byte, error) {
 	return o.ex.call(ctx, opReplaceSession, nil)
 }
 
+// ReplaceSessionFor deliberately fences the configured client in favor of an
+// operator-managed credential at a different target. Legacy servers ignore the target.
+func (o *OperatorClient) ReplaceSessionFor(ctx context.Context, target string) ([]byte, error) {
+	payload, err := types.Cbor.Marshal(target)
+	if err != nil {
+		return nil, err
+	}
+	return o.ex.call(ctx, opReplaceSession, payload)
+}
+
+// SessionPublication describes the managed publication requested by the operator.
+// ActiveAlternate names an admitted alternate destination relative to the operator
+// socket when a non-forced managed operation preserves that session.
+type SessionPublication struct {
+	Managed         bool
+	Issued          bool
+	ActiveAlternate string
+}
+
+// PublishSession asks the authority to publish its configured credential. A different
+// target or a legacy server leaves publication to the caller.
+func (o *OperatorClient) PublishSession(ctx context.Context, target string, replace bool) (SessionPublication, error) {
+	payload, err := types.Cbor.Marshal(publishSessionRequest{Target: target, Replace: replace})
+	if err != nil {
+		return SessionPublication{}, err
+	}
+	answer, err := o.ex.call(ctx, opPublishSession, payload)
+	if errors.Is(err, ErrWrongEndpoint) {
+		return SessionPublication{}, nil
+	}
+	if err != nil {
+		return SessionPublication{}, err
+	}
+	var result publishSessionResult
+	err = types.Cbor.Unmarshal(answer, &result)
+	return SessionPublication{Managed: result.Managed, Issued: result.Issued, ActiveAlternate: result.ActiveAlternate}, err
+}
+
 /*
 CompleteEnrollment states the shard configuration of a pending authority.
 
@@ -97,10 +135,61 @@ func (o *OperatorClient) AdvanceEpoch(ctx context.Context, conf *types.Partition
 	return err
 }
 
+// AdvanceWithProof hands the authority one root activation bundle (the root's staged q3active.Bundle encoding), which it verifies
+// against its own lineage before it changes anything (#1085). An advance fences the old client credential; issue a new session before
+// resuming. Send the bundles of several epochs one call each, in epoch order.
+func (o *OperatorClient) AdvanceWithProof(ctx context.Context, bundle []byte) (signingauthority.AdvanceResult, error) {
+	if len(bundle) == 0 {
+		return signingauthority.AdvanceResult{}, fmt.Errorf("%w: no activation bundle", signingauthority.ErrLineageUnverified)
+	}
+	answer, err := o.ex.call(ctx, opAdvanceWithProof, bundle)
+	if err != nil {
+		return signingauthority.AdvanceResult{}, err
+	}
+	var wire advanceResultPayload
+	if err := types.Cbor.Unmarshal(answer, &wire); err != nil {
+		return signingauthority.AdvanceResult{}, fmt.Errorf("decoding the advance result: %w", err)
+	}
+	return signingauthority.AdvanceResult{Epoch: wire.Epoch, Replay: wire.Replay, Advanced: wire.Advanced, Retired: wire.Retired,
+		RootEpoch: wire.RootEpoch, ShardEpoch: wire.ShardEpoch, LineageEpoch: wire.LineageEpoch}, nil
+}
+
 // SignHandoffPoP asks the authority for the possession proof its own key owes a coupled handoff: the one signing operation
-// outside certification, narrow and domain-separated (see signingauthority.SignHandoffPoP). It is an operator operation: the shard
-// node's client channel refuses it.
+// outside certification, narrow and domain-separated (see signingauthority.SignHandoffPoP). It is an operator operation, also served to the
+// automated member on the possession-proof endpoint (PoPClient): the shard node's client channel refuses it.
 func (o *OperatorClient) SignHandoffPoP(ctx context.Context, req signingauthority.HandoffPoPRequest) (evmassign.PoP, error) {
+	return signHandoffPoP(ctx, o.ex, req)
+}
+
+/*
+PoPClient is the automated root member's end of its authority: the one operation its handoff duty needs, over the possession-proof
+endpoint and under its own credential. It cannot replace a session, advance an epoch, read the enrollment or status, or sign a
+registration, and its credential is refused on every other endpoint. The authority keeps its own checks on every proof it signs
+(enrollment, health, retirement, the permitted epoch range, the exact node id and key).
+*/
+type PoPClient struct {
+	ex *exchange
+}
+
+// NewPoPClient provisions the member's client. It does not connect.
+func NewPoPClient(cfg ClientConfig) (*PoPClient, error) {
+	if cfg.Dial == nil {
+		return nil, errors.New("service: no dialer for the authority")
+	}
+	if len(cfg.Credential) < CredentialBytes {
+		return nil, fmt.Errorf("service: the possession-proof credential must be at least %d bytes", CredentialBytes)
+	}
+	return &PoPClient{ex: newExchange(cfg)}, nil
+}
+
+func (c *PoPClient) Close() error { return c.ex.close() }
+
+// SignHandoffPoP asks for the possession proof of the authority's own key (see signingauthority.SignHandoffPoP).
+func (c *PoPClient) SignHandoffPoP(ctx context.Context, req signingauthority.HandoffPoPRequest) (evmassign.PoP, error) {
+	return signHandoffPoP(ctx, c.ex, req)
+}
+
+func signHandoffPoP(ctx context.Context, ex *exchange, req signingauthority.HandoffPoPRequest) (evmassign.PoP, error) {
 	if req.Successor == nil {
 		return evmassign.PoP{}, fmt.Errorf("%w: no successor binding", signingauthority.ErrContextMismatch)
 	}
@@ -113,7 +202,7 @@ func (o *OperatorClient) SignHandoffPoP(ctx context.Context, req signingauthorit
 	if err != nil {
 		return evmassign.PoP{}, err
 	}
-	answer, err := o.ex.call(ctx, opSignHandoffPoP, payload)
+	answer, err := ex.call(ctx, opSignHandoffPoP, payload)
 	if err != nil {
 		return evmassign.PoP{}, err
 	}
@@ -161,6 +250,62 @@ func (o *OperatorClient) SignDelegationPossession(ctx context.Context, req signi
 	return o.ex.call(ctx, opSignDelegationPossession, payload)
 }
 
+// SignPosPoP asks the authority for the P85 assignment possession proof its own key owes a frozen member (see signingauthority.SignPosPoP).
+func (o *OperatorClient) SignPosPoP(ctx context.Context, req signingauthority.PosPoPRequest) (evmassign.EVMPoP, error) {
+	payload, err := types.Cbor.Marshal(posPoPPayload{ResultID: req.ResultID[:], AssignmentID: req.AssignmentID[:], Snapshot: req.Snapshot[:],
+		Attempt: req.Attempt, ID: req.ID, Generation: req.Generation})
+	if err != nil {
+		return evmassign.EVMPoP{}, err
+	}
+	answer, err := o.ex.call(ctx, opSignPosPoP, payload)
+	if err != nil {
+		return evmassign.EVMPoP{}, err
+	}
+	var pop evmassign.EVMPoP
+	if err := types.Cbor.Unmarshal(answer, &pop); err != nil {
+		return evmassign.EVMPoP{}, fmt.Errorf("decoding the P85 possession proof: %w", err)
+	}
+	return pop, nil
+}
+
+// SetPosPolicy pins the P85 election scope of the running authority (see signingauthority.SetPosPolicy); it cannot be changed afterwards.
+func (o *OperatorClient) SetPosPolicy(ctx context.Context, p signingauthority.PosPolicy) error {
+	payload, err := types.Cbor.Marshal(posPolicyPayload{Network: p.Network[:], ChainID: p.ChainID[:], Election: p.Election[:], IDs: p.IDs})
+	if err != nil {
+		return err
+	}
+	_, err = o.ex.call(ctx, opSetPosPolicy, payload)
+	return err
+}
+
+// SignRegistration asks the authority for the EVM possession signature of a VR registration or binding proposal (see
+// signingauthority.SignRegistration). It carries the typed fields, never a digest; the authority computes the digest from its pinned
+// deployment.
+func (o *OperatorClient) SignRegistration(ctx context.Context, req signingauthority.RegistrationRequest) ([]byte, error) {
+	r := req.Registration
+	payload, err := types.Cbor.Marshal(registrationPayload{Domain: req.Domain, Owner: req.Owner[:], ID: req.ID, RootNodeID: r.RootNodeID, RootKey: r.RootKey,
+		EVMNodeID: r.EVMNodeID, EVMKey: r.EVMKey, Payee: r.Payee[:], Nonce: r.Nonce})
+	if err != nil {
+		return nil, err
+	}
+	return o.ex.call(ctx, opSignRegistration, payload)
+}
+
+// ReloadRegistrationPolicy replaces the authorized registrations of the running authority (see
+// signingauthority.ReloadRegistrationAuthorizations); the deployment pin, the key and the signing record are untouched.
+func (o *OperatorClient) ReloadRegistrationPolicy(ctx context.Context, expect signingauthority.RegistrationDeployment, list []signingauthority.RegistrationAuthorization) error {
+	w := registrationPolicyPayload{Network: expect.Network[:], ChainID: expect.ChainID[:], Registry: expect.Registry[:], Authorized: []authorizedRegistration{}}
+	for _, x := range list {
+		w.Authorized = append(w.Authorized, authorizedRegistration{Domain: x.Domain, Owner: x.Owner[:], ID: x.ID, RootNodeID: x.RootNodeID, RootKey: x.RootKey, Payee: x.Payee[:]})
+	}
+	payload, err := types.Cbor.Marshal(w)
+	if err != nil {
+		return err
+	}
+	_, err = o.ex.call(ctx, opReloadRegistrationPolicy, payload)
+	return err
+}
+
 // Status reports what the authority is holding.
 func (o *OperatorClient) Status(ctx context.Context) (signingauthority.Status, error) {
 	answer, err := o.ex.call(ctx, opStatus, nil)
@@ -176,6 +321,7 @@ func (o *OperatorClient) Status(ctx context.Context) (signingauthority.Status, e
 		Generation: wire.Generation, ReservedRound: wire.ReservedRound,
 		HasReservation: wire.HasReservation, ResponseRetained: wire.ResponseRetained,
 		Faulted: wire.Faulted, KeyLost: wire.KeyLost,
+		LineagePinned: wire.LineagePinned, LineageEpoch: wire.LineageEpoch, Retired: wire.Retired, SessionIssued: wire.SessionIssued,
 	}, nil
 }
 

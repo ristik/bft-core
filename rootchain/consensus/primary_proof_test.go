@@ -75,7 +75,9 @@ func managerFor(judged bool) *ConsensusManager {
 		svc.Deployment.ChainID = [32]byte{31: 1}
 	}
 	bs.SetPosServices(svc)
-	return &ConsensusManager{blockStore: bs, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	cm := &ConsensusManager{log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	cm.storeRef.Store(bs)
+	return cm
 }
 
 type memberFx struct {
@@ -98,7 +100,7 @@ func newMemberFx(t *testing.T, n int) memberFx {
 }
 
 func (f memberFx) dep(x *ConsensusManager) evmassign.ElectionDeployment {
-	svc := x.blockStore.PosServices()
+	svc := x.blockStore().PosServices()
 	return evmassign.ElectionDeployment{Deployment: svc.Deployment.Deployment, Election: svc.Deployment.Election}
 }
 
@@ -337,7 +339,8 @@ func TestParkedApprovalsAreBoundedOnePerSignerAndExpire(t *testing.T) {
 		x.parkApproval(&abdrc.HandoffApprovalMsg{Signer: string(rune('A'+i%64)) + string(rune('a'+i/64))}, result)
 	}
 	x.primaryCache.mu.Lock()
-	require.LessOrEqual(t, len(x.primaryCache.parked), maxParkedApprovals, "a flood cannot grow the set")
+	require.Equal(t, 256, maxParkedApprovals, "§49: one parked approval per signer, up to the 256-member ceiling")
+	require.Equal(t, maxParkedApprovals, len(x.primaryCache.parked), "a flood fills the set to its bound and cannot grow it")
 	x.primaryCache.mu.Unlock()
 
 	x2 := managerFor(true)
@@ -384,7 +387,7 @@ func TestRealIntakeParksAnApprovalUntilItsFactsLandAndThenJudgesIt(t *testing.T)
 	f := newOperatorAssignmentFixture(t)
 	svc := &storage.PosServices{Primary: fakeAuthority{}}
 	svc.Deployment.Election = [20]byte{19: 3}
-	f.cm.blockStore.SetPosServices(svc)
+	f.cm.blockStore().SetPosServices(svc)
 
 	plan, err := f.cm.buildHandoffPlanFromState(f.next, f.state, f.proposal(t))
 	require.NoError(t, err)

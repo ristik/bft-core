@@ -4,10 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -305,10 +303,11 @@ func TestFrontierPacedAuditRepairsPrunedReplica(t *testing.T) {
 	require.NoError(t, worker.Pass(context.Background()))
 	require.NoError(t, worker.Pass(context.Background()))
 	q, _ := f.record(t, 0)
-	request, err := archive.EncodeRequest(q)
+	paths, err := archive.RecordPaths(secondDir, q, nil)
 	require.NoError(t, err)
-	key := sha256.Sum256(request)
-	require.NoError(t, os.RemoveAll(filepath.Join(secondDir, "v2-"+hex.EncodeToString(key[:]))))
+	for _, p := range paths {
+		require.NoError(t, os.RemoveAll(p))
+	}
 	_, err = second.Get(q)
 	require.ErrorIs(t, err, archive.ErrUnavailable)
 	require.NoError(t, worker.Pass(context.Background()))

@@ -56,14 +56,12 @@ func (h *History) Pre() PreState {
 	return p
 }
 
-// Closed is Pre with epoch 9 imported, closing epoch 8 at O+500, while U stays 8: the preload state the contract no longer admits
-// (I != U while ready, and a closed usable epoch), so it is impossible registry state.
-func (h *History) Closed() PreState {
+// At returns the history immediately after acknowledgement of epoch tip at round.
+func (h *History) At(tip, round uint64) PreState {
 	p := h.Pre()
-	p.ImportedTip = 9
-	p.Epochs[len(p.Epochs)-1].End, p.Epochs[len(p.Epochs)-1].HasEnd = HistoryClock+500, true
-	auth := authorityOf(h.f.network, 9, 2, newDRBG(h.f.seed, "body/9").hash(), h.set(9))
-	p.Epochs = append(p.Epochs, h.f.epochWords(auth, 9, HistoryClock+500, 0, false))
+	p.ImportedTip, p.Origin, p.ClockRound = tip, tip, round
+	p.Epochs = p.Epochs[:tip-h.g+1]
+	p.Epochs[len(p.Epochs)-1].End, p.Epochs[len(p.Epochs)-1].HasEnd = 0, false
 	return p
 }
 
@@ -117,11 +115,11 @@ func (h *History) uc(s Seal, part uint32, shard string) ucSpec {
 	for _, i := range s.Signers {
 		signers = append(signers, h.vals[i])
 	}
-	u := f.build(s.Variant, s.Round, signers, false).get(part, shard)
+	u := f.build(s.Variant, s.Round, signers, true).get(part, shard)
 	if s.BadLast {
 		n := len(u.seal.sigs) - 1
 		u.seal.sigs = append([]entry{}, u.seal.sigs...)
-		u.seal.sigs[n] = entry{u.seal.sigs[n].key, h.vals[s.Signers[n]].sign([]byte("other"), false)}
+		u.seal.sigs[n] = entry{u.seal.sigs[n].key, h.vals[s.Signers[n]].sign([]byte("other"), true)}
 	}
 	return u
 }

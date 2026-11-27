@@ -7,12 +7,18 @@
 //
 // Nothing blocks the consensus loop, and nothing is persisted: Prepare starts bounded background work, Ready only reads the cache, and a
 // restart rediscovers everything from chain state.
+//
+// In validator-registry mode (Config.VR, ristik/bft-core#1311) the same service builds RejectResult v2 instead: it discovers VR's open
+// output at the parent's certified EVM state, collects the two-account witness (VR and the SealRegistry's progress, vrstate.BuildRejectWitness),
+// checks it against the certified state root, and once the due table makes the output due (Expired for a Reserved or Published output at
+// progress >= expiresAtProgress, Invalidated immediately) hands the leader the OutputRejected control under the VR tag.
 package posreject
 
 import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"log/slog"
 	"slices"
 	"sync"
@@ -21,6 +27,8 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/evmstate"
+	"github.com/unicitynetwork/bft-core/rootchain/vrstate"
+	"github.com/unicitynetwork/bft-core/vrschema"
 )
 
 // Bounds. Every one of them is a cap on work or memory, never a correctness rule.
@@ -49,6 +57,13 @@ type Config struct {
 	// Open and Build are seams for tests (defaults evmstate.OpenResult and evmstate.BuildRejectWitness).
 	Open  func(ctx context.Context, src evmstate.ProofSource, pins evmstate.Pins) ([32]byte, error)
 	Build func(ctx context.Context, src evmstate.ProofSource, pins evmstate.Pins, resultID [32]byte) ([]byte, storage.RejectFacts, error)
+	// VR, when set, makes the service build RejectResult v2 of a validator-registry generation over these pins (Pins and Election are
+	// then unused, and Deployment.Custody is VR's address).
+	VR *vrstate.Pins
+	// Ready, VR mode only, is the readyBitmap of an expiry (schema-v1 section 4.1: bit i, the i-th successor by ascending id, was ready):
+	// presence only, never evidence (design 3.7.4). PoaElection parks the expired output's joiners whose bit is clear. The executor does
+	// not judge it; nil gives an empty bitmap.
+	Ready func(resultID [32]byte) uint16
 	Log   *slog.Logger
 	Now   func() time.Time
 }
@@ -79,7 +94,11 @@ var _ storage.RejectProposer = (*Service)(nil)
 
 // New makes the service. It needs a proof source and the pinned election.
 func New(cfg Config) (*Service, error) {
-	if cfg.Proofs == nil || cfg.Pins.Election == ([20]byte{}) {
+	if cfg.VR != nil {
+		if cfg.Proofs == nil || cfg.VR.Registry == ([20]byte{}) || cfg.VR.SealRegistry == ([20]byte{}) {
+			return nil, errors.New("posreject: a proof source and the pinned VR and SealRegistry are required")
+		}
+	} else if cfg.Proofs == nil || cfg.Pins.Election == ([20]byte{}) {
 		return nil, errors.New("posreject: a proof source and a pinned election are required")
 	}
 	if cfg.Open == nil {
@@ -195,11 +214,21 @@ func (s *Service) collect(ctx storage.RejectionContext, fetchAt [32]byte) {
 	e := &entry{ctx: ctx, prepared: prepared, submitted: s.cfg.Now()}
 	s.cache = append(s.cache, e)
 	s.mu.Unlock()
-	s.log.Info("election result due for rejection", "result", prepared.ResultID, "attempt", ctx.Attempt)
+	attrs := []any{"result", fmt.Sprintf("%x", prepared.ResultID), "attempt", ctx.Attempt, "registry", s.cfg.VR != nil}
+	if s.cfg.VR != nil {
+		// the reason and the ready bitmap this root built (#1303: an Expired rejection parks the joiners whose bit is clear)
+		if d, err := vrschema.DecodeOutputRejected(prepared.Control.Data); err == nil {
+			attrs = append(attrs, "reason", d.Reason, "readyBitmap", fmt.Sprintf("0x%04x", d.ReadyBitmap))
+		}
+	}
+	s.log.Info("election result due for rejection", attrs...)
 	s.submit(prepared)
 }
 
 func (s *Service) build(ctx context.Context, src evmstate.ProofSource, rc storage.RejectionContext) (storage.PreparedRejection, bool, error) {
+	if s.cfg.VR != nil {
+		return s.buildVR(ctx, src, rc)
+	}
 	var out storage.PreparedRejection
 	id, err := s.cfg.Open(ctx, src, s.cfg.Pins)
 	if err != nil {
@@ -218,6 +247,54 @@ func (s *Service) build(ctx context.Context, src evmstate.ProofSource, rc storag
 	dep := s.cfg.Deployment
 	c := rctypes.PosControl{Network: dep.RootNetwork, ChainID: dep.ChainID, Custody: dep.Custody, Op: rctypes.OpRejectResult,
 		WitnessHash: sha256.Sum256(witness), Data: append([]byte(nil), id[:]...),
+		Reject: &rctypes.RejectContext{PredecessorBodyID: rc.Predecessor, Attempt: rc.Attempt, EVMBlockHash: rc.Parent.BlockHash,
+			EVMStateRoot: rc.Parent.StateRoot}}
+	if err := c.Validate(); err != nil {
+		return out, false, err
+	}
+	return storage.PreparedRejection{ResultID: id, Control: c, Witness: witness}, false, nil
+}
+
+// buildVR is build in validator-registry mode: VR's open output at the parent, its RejectResult v2 witness checked against the parent's
+// certified state root, and the reason the due table gives. Only the reasons the proven state alone establishes are built (Expired and
+// Invalidated); an Invalid rejection needs the root's acknowledged committee, and such an output is rejected as Expired at its expiry.
+func (s *Service) buildVR(ctx context.Context, src evmstate.ProofSource, rc storage.RejectionContext) (storage.PreparedRejection, bool, error) {
+	var out storage.PreparedRejection
+	pins := *s.cfg.VR
+	var open vrschema.Word
+	if _, err := evmstate.BuildAccounts(ctx, src, [][20]byte{pins.Registry}, func(a []evmstate.SlotReader) error {
+		var err error
+		open, err = vrstate.Reader{W: a[0]}.Scalar(vrschema.SlotOpenOutput)
+		return err
+	}); err != nil {
+		return out, false, err
+	}
+	id := [32]byte(open)
+	if id == ([32]byte{}) || s.isResolved(id) {
+		return out, true, nil
+	}
+	witness, _, err := vrstate.BuildRejectWitness(ctx, src, pins, open)
+	if err != nil {
+		return out, false, err
+	}
+	// the facts are the verifier's, read back from the witness against the certified root (a proof source at an earlier block of a quiet
+	// parent, or one that moved, is caught here rather than by every voter)
+	st, err := vrstate.VerifyReject(witness, rc.Parent.StateRoot, pins, open)
+	if err != nil {
+		return out, false, err
+	}
+	o := st.Output.Output
+	reason, due := vrschema.RejectDue(o.State, st.Progress, o.ExpiresAtProgress, false)
+	if !due {
+		return out, true, nil
+	}
+	data := vrschema.OutputRejected{ResultID: open, Reason: reason}
+	if reason == vrschema.RejExpired && s.cfg.Ready != nil {
+		data.ReadyBitmap = s.cfg.Ready(id)
+	}
+	dep := s.cfg.Deployment
+	c := rctypes.PosControl{Registry: true, Network: dep.RootNetwork, ChainID: dep.ChainID, Custody: dep.Custody, Op: rctypes.OpRejectResult,
+		WitnessHash: sha256.Sum256(witness), Data: data.Encode(),
 		Reject: &rctypes.RejectContext{PredecessorBodyID: rc.Predecessor, Attempt: rc.Attempt, EVMBlockHash: rc.Parent.BlockHash,
 			EVMStateRoot: rc.Parent.StateRoot}}
 	if err := c.Validate(); err != nil {

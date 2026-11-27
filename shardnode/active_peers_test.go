@@ -119,3 +119,113 @@ func TestActivePeersServeTheStagedSuccessorUntilItIsInstalledOrReplaced(t *testi
 	require.NoError(t, held.Stage([]string{joiner.String()}))
 	require.False(t, held.Allowed(joiner), "a held set authorizes nobody, staged or not")
 }
+
+// Member is the node's role fact for source selection: a joiner is non-active until the assignment naming it is installed, and a retired
+// validator becomes non-active when its successor is installed; an older or repeated set changes nothing.
+func TestActivePeersMemberFollowsTheInstalledAssignment(t *testing.T) {
+	self, v2, v3, v4 := newPeerID(t), newPeerID(t), newPeerID(t), newPeerID(t)
+	joiner, err := NewActivePeers(self, validatorsOf(v2, v3, v4))
+	require.NoError(t, err)
+	require.False(t, joiner.Member(), "a joiner is not a member of the genesis set")
+	require.NoError(t, joiner.Install(1, validatorsOf(self, v2, v3)))
+	require.True(t, joiner.Member(), "the installed assignment names it")
+	require.NoError(t, joiner.Install(0, validatorsOf(v2, v3, v4)))
+	require.True(t, joiner.Member(), "an older set is history and does not demote it")
+	joiner.Hold()
+	require.True(t, joiner.Member(), "the inbound hold does not change the role")
+	joiner.Release()
+	require.NoError(t, joiner.Install(2, validatorsOf(v2, v3, v4)))
+	require.False(t, joiner.Member(), "retired by the successor assignment")
+}
+
+// The same epoch installed again with or without this node is a different assignment, not a repeat: both orders are refused and the
+// role stays as first installed.
+func TestActivePeersSameEpochDifferingOnlyInSelfIsAConflict(t *testing.T) {
+	self, b := newPeerID(t), newPeerID(t)
+	withSelf, err := NewActivePeers(self, validatorsOf(b))
+	require.NoError(t, err)
+	require.NoError(t, withSelf.Install(1, validatorsOf(self, b)))
+	require.ErrorIs(t, withSelf.Install(1, validatorsOf(b)), ErrActivePeersConflict)
+	require.True(t, withSelf.Member())
+
+	without, err := NewActivePeers(self, validatorsOf(b))
+	require.NoError(t, err)
+	require.NoError(t, without.Install(1, validatorsOf(b)))
+	require.ErrorIs(t, without.Install(1, validatorsOf(self, b)), ErrActivePeersConflict)
+	require.False(t, without.Member())
+	require.NoError(t, without.Install(1, validatorsOf(b)), "the same assignment again is a no-op")
+}
+
+// Each accepted stage tells the prewarm hook its peers (never this node); a refused stage tells it nothing.
+func TestActivePeersTellTheStageHookItsPeers(t *testing.T) {
+	self, v2, j := newPeerID(t), newPeerID(t), newPeerID(t)
+	peers, err := NewActivePeers(self, validatorsOf(self, v2))
+	require.NoError(t, err)
+	var told []peer.ID
+	peers.OnStage(func(ids []peer.ID) { told = append(told, ids...) })
+	require.NoError(t, peers.Stage([]string{self.String(), j.String()}))
+	require.Equal(t, []peer.ID{j}, told)
+	require.Error(t, peers.Stage([]string{"not a peer id"}))
+	require.Equal(t, []peer.ID{j}, told)
+}
+
+func TestActivePeersReportTheStagedPeersUntilTheInstall(t *testing.T) {
+	self, v2, j := newPeerID(t), newPeerID(t), newPeerID(t)
+	peers, err := NewActivePeers(self, validatorsOf(self, v2))
+	require.NoError(t, err)
+	require.Empty(t, peers.StagedPeers())
+	require.NoError(t, peers.Stage([]string{self.String(), j.String()}))
+	require.Equal(t, []peer.ID{j}, peers.StagedPeers(), "never this node")
+	require.NoError(t, peers.Install(1, validatorsOf(self, j)))
+	require.Empty(t, peers.StagedPeers(), "an install clears the stage")
+}
+
+// A staged set is bound to a generation: a delayed older request cannot repopulate what a newer one revoked, a set for an assignment that is
+// not the next one (already installed) is stale, an empty set clears under the same ordering, and the same stamp again is idempotent.
+func TestAStagedSetIsBoundToItsGeneration(t *testing.T) {
+	self := newPeerID(t)
+	other := newPeerID(t)
+	a, err := NewActivePeers(self, nil)
+	require.NoError(t, err)
+	next := a.Epoch() + 1
+	require.NoError(t, a.StageGeneration(next, 10, []string{other.String()}))
+	require.True(t, a.AllowedStagedOnly(other))
+	require.False(t, a.AllowedInstalled(other))
+	require.NoError(t, a.StageGeneration(next, 10, []string{other.String()}), "the same generation again is idempotent")
+
+	require.NoError(t, a.StageGeneration(0, 11, []string{})) // the intent died: cleared
+	require.False(t, a.AllowedStagedOnly(other))
+	require.ErrorIs(t, a.StageGeneration(next, 10, []string{other.String()}), ErrActivePeersStale, "a delayed older request cannot repopulate it")
+	require.False(t, a.AllowedStagedOnly(other))
+	require.ErrorIs(t, a.StageGeneration(next+1, 12, []string{other.String()}), ErrActivePeersStale, "not the next assignment")
+	require.ErrorIs(t, a.StageGeneration(next, 5, []string{}), ErrActivePeersStale, "an old clear is stale too")
+
+	require.NoError(t, a.StageGeneration(next, 13, []string{other.String()}))
+	require.NoError(t, a.Install(next, nil)) // the assignment installs: the set is cleared
+	require.False(t, a.AllowedStagedOnly(other))
+	require.ErrorIs(t, a.StageGeneration(next, 14, []string{other.String()}), ErrActivePeersStale, "a request for the installed assignment cannot restage it")
+}
+
+// The same stamp is accepted again only for the same update; a different update cannot reuse a generation. A non-empty list for the wrong epoch
+// is stale even when it filters to nothing (only this node's own id): it does not clear an existing stage.
+func TestAStagedGenerationIsBoundToItsPayload(t *testing.T) {
+	self := newPeerID(t)
+	b := newPeerID(t)
+	c := newPeerID(t)
+	a, err := NewActivePeers(self, nil)
+	require.NoError(t, err)
+	next := a.Epoch() + 1
+	require.NoError(t, a.StageGeneration(next, 7, []string{b.String(), c.String()}))
+	require.NoError(t, a.StageGeneration(next, 7, []string{c.String(), b.String()}), "the same update again, in another order")
+	require.ErrorIs(t, a.StageGeneration(next, 7, []string{b.String()}), ErrActivePeersStale, "a different update under the same stamp")
+	require.ErrorIs(t, a.StageGeneration(next+3, 8, []string{self.String()}), ErrActivePeersStale, "a self-only list for the wrong epoch is not a clear")
+	require.True(t, a.AllowedStagedOnly(b), "the stage is intact")
+}
+
+// A zero stamp is never a generation: it cannot bypass the equal-stamp payload check on a fresh shard.
+func TestAZeroStampIsRefused(t *testing.T) {
+	a, err := NewActivePeers(newPeerID(t), nil)
+	require.NoError(t, err)
+	require.ErrorIs(t, a.StageGeneration(a.Epoch()+1, 0, []string{newPeerID(t).String()}), ErrActivePeersInvalid)
+	require.ErrorIs(t, a.StageGeneration(0, 0, []string{}), ErrActivePeersInvalid)
+}

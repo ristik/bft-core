@@ -37,15 +37,16 @@ func (h *saturatedHost) CreateStream(ctx context.Context, id peer.ID, protocol s
 }
 
 type retryRestoreFixture struct {
-	restore  *ArchiveRestore
-	host     *saturatedHost
-	journal  *configuredprogress.Store
-	local    *archive.Store
-	wf       *wiringFixture
-	limits   configuredprogress.JournalLimits
-	executor *restoreExecutorFixture
-	stores   []*archive.Store // the two replicas' stores, in Replicas order
-	senderID peer.ID
+	restore                  *ArchiveRestore
+	host                     *saturatedHost
+	journal                  *configuredprogress.Store
+	journalPath, archivePath string
+	local                    *archive.Store
+	wf                       *wiringFixture
+	limits                   configuredprogress.JournalLimits
+	executor                 *restoreExecutorFixture
+	stores                   []*archive.Store // the two replicas' stores, in Replicas order
+	senderID                 peer.ID
 }
 
 func newRetryRestoreFixture(t *testing.T, failures int64, retry FetchRetry) *retryRestoreFixture {
@@ -102,14 +103,16 @@ func buildRetryRestoreFixtureMutating(t *testing.T, failures int64, retry FetchR
 		id := remote.ID()
 		replicas = append(replicas, &id)
 	}
-	journal, err := configuredprogress.OpenConfiguredV2(t.TempDir()+"/restored.db", configuredprogress.Settings{Retain: 16})
+	journalPath := t.TempDir() + "/restored.db"
+	journal, err := configuredprogress.OpenConfiguredV2(journalPath, configuredprogress.Settings{Retain: 16})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = journal.Close() })
 	_, _, err = journal.Initialize(context.Background(), f.context)
 	require.NoError(t, err)
 	limits := configuredprogress.JournalLimits{Candidates: 3, Observations: 4, Bytes: 16 << 20}
 	require.NoError(t, journal.EnableJournal(context.Background(), f.context, limits))
-	local, err := archive.Open(t.TempDir())
+	archivePath := t.TempDir()
+	local, err := archive.Open(archivePath)
 	require.NoError(t, err)
 	last := f.entries[len(f.entries)-1]
 	for _, entry := range f.entries {
@@ -124,7 +127,7 @@ func buildRetryRestoreFixtureMutating(t *testing.T, failures int64, retry FetchR
 		restore: &ArchiveRestore{Journal: journal, Context: f.context, JournalLimits: limits, Archive: local,
 			Subject: f.subject, Replicas: []peer.ID{*replicas[0], *replicas[1]}, Host: host,
 			Limits: DefaultLimits(), Retry: retry, Adapter: executor, Genesis: genesis, TipUC: last.ResultingUC, TipTR: last.ResultingTR},
-		host: host, journal: journal, local: local, wf: f, limits: limits, executor: executor, stores: stores, senderID: sender.ID(),
+		host: host, journal: journal, journalPath: journalPath, archivePath: archivePath, local: local, wf: f, limits: limits, executor: executor, stores: stores, senderID: sender.ID(),
 	}
 }
 

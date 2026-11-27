@@ -24,7 +24,7 @@ const (
 	maxConfigBytes       = 1 << 20
 	maxResponseBytes     = 4 << 20
 	maxStatusBytes       = 1 << 20
-	maxNodes             = 64
+	maxNodes             = 256
 	maxSamples           = 1000
 	maxTotalSamplingTime = 24 * time.Hour
 	maxArchiveEntries    = 250_000

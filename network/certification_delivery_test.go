@@ -3,8 +3,12 @@ package network
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net"
+	"runtime"
+	"runtime/pprof"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +19,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peerstore"
 	libp2pprotocol "github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/libp2p/go-libp2p/p2p/muxer/yamux"
+	"github.com/libp2p/go-libp2p/p2p/protocol/identify"
 	msmux "github.com/multiformats/go-multistream"
 	"github.com/stretchr/testify/require"
 
@@ -55,13 +60,15 @@ func (m *countingMuxer) NewConn(c net.Conn, isServer bool, scope network.PeerSco
 	return &countingConn{MuxedConn: mc, m: m}, nil
 }
 
-// stats returns the certificate streams opened since the last call to reset.
+// stats returns the certificate streams this side opened since the last call to reset. Accepted streams are traced only (#1004): an
+// inbound identify push names the certificate protocols too, and counting it as a certificate stream failed the counts whenever a push
+// arrived during a test.
 func (m *countingMuxer) stats() (res []streamStats) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, s := range m.streams {
 		s.mu.Lock()
-		if s.cert {
+		if s.cert && !s.inbound {
 			res = append(res, s.streamStats)
 		}
 		s.mu.Unlock()
@@ -85,7 +92,20 @@ func (c *countingConn) OpenStream(ctx context.Context) (network.MuxedStream, err
 	if err != nil {
 		return nil, err
 	}
-	cs := &countingStream{MuxedStream: s, delay: c.m.delay}
+	cs := &countingStream{MuxedStream: s, delay: c.m.delay, opened: time.Now()}
+	c.m.mu.Lock()
+	c.m.streams = append(c.m.streams, cs)
+	c.m.mu.Unlock()
+	return cs, nil
+}
+
+// AcceptStream wraps the inbound streams as well, as a pure trace (no delay): it shows what the receiver's side of the muxer got and when (#1004).
+func (c *countingConn) AcceptStream() (network.MuxedStream, error) {
+	s, err := c.MuxedConn.AcceptStream()
+	if err != nil {
+		return nil, err
+	}
+	cs := &countingStream{MuxedStream: s, opened: time.Now(), inbound: true}
 	c.m.mu.Lock()
 	c.m.streams = append(c.m.streams, cs)
 	c.m.mu.Unlock()
@@ -94,10 +114,57 @@ func (c *countingConn) OpenStream(ctx context.Context) (network.MuxedStream, err
 
 type countingStream struct {
 	network.MuxedStream
-	delay time.Duration
-	mu    sync.Mutex
-	cert  bool
+	inbound bool // accepted by this side: traced only; it is a certificate stream once its data names one
+	delay   time.Duration
+	opened  time.Time
+	mu      sync.Mutex
+	cert    bool
+	trace   []string // every read and write with its offset from the open, size and error (diagnostic for #1004)
 	streamStats
+}
+
+// note records one stream event for dump.
+func (s *countingStream) note(format string, args ...any) {
+	s.mu.Lock()
+	s.trace = append(s.trace, fmt.Sprintf("+%v %s", time.Since(s.opened).Round(time.Millisecond), fmt.Sprintf(format, args...)))
+	s.mu.Unlock()
+}
+
+// caller is the stack of the goroutine making the first read or write: who touched the stream first decides whether the lazy handshake was started by a
+// Read (which writes the handshake alone) or by the Write (which sends it with the payload in one write).
+func caller() string {
+	buf := make([]byte, 4096)
+	buf = buf[:runtime.Stack(buf, false)]
+	return strings.ReplaceAll(strings.TrimSpace(string(buf)), "\n", "\n      ")
+}
+
+// dump is the failure diagnostic of the latency test (#1004): per certificate stream the counters and the timed read/write trace, then every goroutine.
+// It runs only on a failure, so the next occurrence says which side was waiting for what.
+func (m *countingMuxer) dump() string {
+	return m.streamsDump() + "goroutines:\n" + goroutines()
+}
+
+func goroutines() string {
+	var b strings.Builder
+	_ = pprof.Lookup("goroutine").WriteTo(&b, 2)
+	return b.String()
+}
+
+// streamsDump is the per-stream part of dump.
+func (m *countingMuxer) streamsDump() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var b strings.Builder
+	for i, s := range m.streams {
+		s.mu.Lock()
+		if !s.cert {
+			s.mu.Unlock()
+			continue
+		}
+		fmt.Fprintf(&b, "stream %d inbound=%v cert=%v writes=%d reads=%d repliesBeforeLastWrite=%d\n  %s\n", i, s.inbound, s.cert, s.writes, s.reads, s.repliesBeforeLastWrite, strings.Join(s.trace, "\n  "))
+		s.mu.Unlock()
+	}
+	return b.String()
 }
 
 func (s *countingStream) Write(b []byte) (int, error) {
@@ -110,6 +177,9 @@ func (s *countingStream) Write(b []byte) (int, error) {
 		s.firstWriteHeader = bytes.HasPrefix(b, []byte("\x13/multistream/1.0.0\n"))
 		s.readsBeforeFirstWrite = s.reads
 	}
+	if s.writes == 0 && s.cert {
+		s.trace = append(s.trace, "first write by: "+caller())
+	}
 	s.writes++
 	s.repliesBeforeLastWrite = s.reads - s.readsBeforeFirstWrite
 	cert := s.cert
@@ -117,11 +187,25 @@ func (s *countingStream) Write(b []byte) (int, error) {
 	if cert {
 		time.Sleep(s.delay)
 	}
-	return s.MuxedStream.Write(b)
+	n, err := s.MuxedStream.Write(b)
+	s.note("write %d bytes (asked %d) err=%v", n, len(b), err)
+	return n, err
 }
 
 func (s *countingStream) Read(b []byte) (int, error) {
+	s.mu.Lock()
+	first := s.reads == 0 && len(s.trace) == 0 && !s.inbound
+	s.mu.Unlock()
+	if first {
+		s.note("first read by: %s", caller())
+	}
 	n, err := s.MuxedStream.Read(b)
+	s.note("read %d bytes (asked %d) err=%v", n, len(b), err)
+	if s.inbound && n > 0 && bytes.Contains(b[:n], []byte("/ab/certificates/")) {
+		s.mu.Lock()
+		s.cert = true
+		s.mu.Unlock()
+	}
 	if n > 0 {
 		s.mu.Lock()
 		s.reads++
@@ -187,7 +271,9 @@ func Test_SendCertificationResponse_ExplicitNegotiationIsCounted(t *testing.T) {
 	require.NoError(t, senderNw.SendCertificationResponse(context.Background(), testCertResponse(t, []byte{1}), p.ID()))
 	recv(t, nw)
 	cm.reset()
-	// forget what identify said: the next send has to ask (the receiver is v1 only, so v2 is refused first)
+	// forget what identify said: the next send has to ask (the receiver is v1 only, so v2 is refused first). The sender stops taking
+	// identify pushes first: one in flight (a receiver address update) would otherwise put the protocols back before the send (#1004)
+	senderPeer.host.RemoveStreamHandler(identify.IDPush)
 	require.NoError(t, senderPeer.host.Peerstore().SetProtocols(p.ID()))
 	require.NoError(t, senderNw.SendCertificationResponse(context.Background(), testCertResponse(t, []byte{1}), p.ID()))
 	recv(t, nw)
@@ -195,6 +281,33 @@ func Test_SendCertificationResponse_ExplicitNegotiationIsCounted(t *testing.T) {
 	st := cm.stats()[0]
 	require.Greater(t, st.writes, 1, "explicit negotiation writes more than once")
 	require.Positive(t, st.repliesBeforeLastWrite, "and waits for a reply before the last write")
+}
+
+// bft-core#1004: a send that libp2p negotiated explicitly (the sender did not know the receiver's protocols when it opened the stream, as
+// before identify has delivered them) returns once the payload is written. Its handshake reply was read during the negotiation; waiting for
+// another would wait for the receiver, which waits for this side's close, until the send deadline, reporting a delivered certificate failed.
+func Test_SendCertificationResponse_ExplicitNegotiationDoesNotWaitForTheReceiver(t *testing.T) {
+	senderPeer, senderNw, cm := newCountingCertSender(t)
+	p, nw := newCertReceiver(t, senderPeer, recvBoth)
+	nw.streamReadTimeout = recvBound // the receiver would wait for the sender as long as the sender's deadline
+	require.NoError(t, senderNw.SendCertificationResponse(context.Background(), testCertResponse(t, nil), p.ID()))
+	recv(t, nw)
+	senderPeer.host.RemoveStreamHandler(identify.IDPush)
+	require.NoError(t, senderPeer.host.Peerstore().SetProtocols(p.ID()))
+	cm.reset()
+	ctx, cancel := context.WithTimeout(context.Background(), recvBound)
+	defer cancel()
+	start := time.Now()
+	err := senderNw.sendCertificationFrame(ctx, p.ID(), []string{ProtocolUnicityCertificatesV2, ProtocolUnicityCertificates}, ProtocolUnicityCertificates,
+		&certificationFrames{cr: testCertResponse(t, nil)})
+	elapsed := time.Since(start)
+	require.NoError(t, err)
+	require.IsType(t, &certification.CertificationResponseV2{}, recv(t, nw))
+	requireNoMore(t, nw)
+	require.Less(t, elapsed, recvBound/2, "the send does not wait for the receiver (bounded far below the deadline, never a latency window)")
+	st := cm.stats()
+	require.Len(t, st, 1)
+	require.Positive(t, st[0].repliesBeforeLastWrite, "it was the explicit path")
 }
 
 // When the receiver advertises none of the protocols libp2p negotiates explicitly, which is
@@ -319,7 +432,18 @@ func Test_SendCertificationResponse_DeliveredWithLatencyWithinTimeout(t *testing
 	require.NoError(t, err)
 
 	for _, kind := range []recvKind{recvLegacy, recvBoth} {
-		p, nw := newCertReceiver(t, senderPeer, kind)
+		// the receiver's muxer traces what it accepted (#1004): did the sender's payload bytes reach it
+		rm := &countingMuxer{}
+		rconf, rerr := NewPeerConfiguration(randomTestAddressStr, nil, generateKeyPair(t), nil, nil)
+		require.NoError(t, rerr)
+		rp, rerr := newPeer(context.Background(), rconf, logger.New(t), nil, libp2p.Muxer("/yamux/1.0.0", rm))
+		require.NoError(t, rerr)
+		t.Cleanup(func() { _ = rp.Close() })
+		p, nw := registerReceiver(t, senderPeer, rp, kind)
+		// The receiver's stream deadline (1 s by default) runs from the start of its handler until the sender closes the stream, so it also counts the
+		// sender's injected delays while it reads the handshake reply. That is a property of the product, not of what this test asserts (the exchange
+		// itself): on a loaded runner it reset the stream under the sender (#950). The deadline is out of the way here; see the control below.
+		nw.streamReadTimeout = recvBound
 		// connection setup and identify are not part of the send
 		require.NoError(t, senderPeer.host.Connect(context.Background(), peer.AddrInfo{ID: p.ID()}))
 		cm.reset()
@@ -327,6 +451,9 @@ func Test_SendCertificationResponse_DeliveredWithLatencyWithinTimeout(t *testing
 		err := senderNw.sendCertificationFrame(ctx, p.ID(), []string{ProtocolUnicityCertificatesV2, ProtocolUnicityCertificates},
 			ProtocolUnicityCertificates, &certificationFrames{cr: testCertResponse(t, nil)})
 		cancel()
+		if err != nil {
+			t.Logf("#1004 diagnostic (kind %d): the send failed with %v\nSENDER\n%s\nRECEIVER\n%s", kind, err, cm.dump(), rm.streamsDump())
+		}
 		require.NoError(t, err)
 		recv(t, nw)
 		requireNoMore(t, nw)
@@ -336,6 +463,29 @@ func Test_SendCertificationResponse_DeliveredWithLatencyWithinTimeout(t *testing
 		require.True(t, st[0].firstWriteHeader)
 		require.Zero(t, st[0].repliesBeforeLastWrite, "no negotiation exchange before the payload")
 	}
+}
+
+// Control for the test above (#950): the receiver's stream deadline is the whole life of the stream up to the sender's Close, not per frame. With the
+// injected latency above the deadline the certificate is DELIVERED (the handler had it before the deadline) and the sender is told "stream reset" while it
+// waits for the handshake reply: the signature of the CI failure. This pins the mechanism, so the test above cannot go back to depending on it unseen.
+func Test_SendCertificationResponse_ReceiverStreamDeadlineSpansTheSendersClose(t *testing.T) {
+	const latency, deadline = 300 * time.Millisecond, 100 * time.Millisecond
+	cm := &countingMuxer{delay: latency}
+	conf, err := NewPeerConfiguration(randomTestAddressStr, nil, generateKeyPair(t), nil, nil)
+	require.NoError(t, err)
+	senderPeer, err := newPeer(context.Background(), conf, logger.New(t), nil, libp2p.Muxer("/yamux/1.0.0", cm))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = senderPeer.Close() })
+	senderNw, err := NewLibP2PRootChainNetwork(senderPeer, 10, 30*time.Second, observability.Default(t))
+	require.NoError(t, err)
+	p, nw := newCertReceiver(t, senderPeer, recvBoth)
+	nw.streamReadTimeout = deadline
+	require.NoError(t, senderPeer.host.Connect(context.Background(), peer.AddrInfo{ID: p.ID()}))
+	err = senderNw.sendCertificationFrame(context.Background(), p.ID(), []string{ProtocolUnicityCertificatesV2, ProtocolUnicityCertificates},
+		ProtocolUnicityCertificates, &certificationFrames{cr: testCertResponse(t, nil)})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "stream reset")
+	recv(t, nw) // delivered all the same
 }
 
 // A receiver which is connected and identified but no longer services new streams: the send is
@@ -367,4 +517,24 @@ func Test_SendCertificationResponse_StalledReceiverIsBounded(t *testing.T) {
 	}
 	requireNoMore(t, nw)
 	require.Len(t, cm.stats(), 1, "one stream, nothing resent")
+}
+
+// The failure diagnostic of the latency test (#1004) is only useful if it works when it is needed: after a send it names the certificate stream with its
+// timed events, and it carries the goroutine dump.
+func Test_CountingMuxerDumpNamesTheStreamsAndGoroutines(t *testing.T) {
+	senderPeer, senderNw, cm := newCountingCertSender(t)
+	p, nw := newCertReceiver(t, senderPeer, recvBoth)
+	require.NoError(t, senderNw.SendCertificationResponse(context.Background(), testCertResponse(t, nil), p.ID()))
+	recv(t, nw)
+	// the receiver's handler returns before the sender's lazy handshake read has completed (the reply is read by a goroutine of its own), so the read
+	// is awaited as a condition, never assumed to be there (bound: a lost reply only)
+	var out string
+	require.Eventually(t, func() bool {
+		out = cm.dump()
+		return strings.Contains(out, "read ")
+	}, recvBound, 10*time.Millisecond)
+	require.Contains(t, out, "cert=true")
+	require.Contains(t, out, "write ")
+	require.Contains(t, out, "first write by: goroutine")
+	require.Contains(t, out, "goroutine ")
 }

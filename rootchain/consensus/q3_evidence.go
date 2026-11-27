@@ -1,6 +1,7 @@
 package consensus
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -29,7 +30,7 @@ func (x *ConsensusManager) Q3ActivationEvidence(epoch uint64) (q3format.Link, *a
 	if x.q3 == nil || x.params.NetworkProfileVersion != storage.ProfileHandoff || epoch < 2 {
 		return q3format.Link{}, nil, nil, fmt.Errorf("%w: epoch %d", ErrNoQ3Evidence, epoch)
 	}
-	return q3ActivationEvidence(x.blockStore, epoch)
+	return q3ActivationEvidence(x.blockStore(), epoch)
 }
 
 // q3EvidenceSource is what the evidence is assembled from: the committed checkpoint of the handoff and the artifacts retained when the
@@ -38,7 +39,8 @@ type q3EvidenceSource interface {
 	HandoffCheckpoint() (*abdrc.CommittedBlock, *basetypes.UnicityTreeCertificate, evmroot.OrderedHandoffRecord, error)
 	HandoffBody(id []byte) ([]byte, error)
 	HandoffReceipts(id []byte) ([]byte, error)
-	HandoffCandidate(id []byte) ([]byte, error)
+	// HandoffCommittedPreimage is the committed candidate the body binds: a VR handoff's candidate v6, never its retained v5 view.
+	HandoffCommittedPreimage(id []byte) ([]byte, error)
 }
 
 func q3ActivationEvidence(src q3EvidenceSource, epoch uint64) (q3format.Link, *abdrc.CommittedBlock, []byte, error) {
@@ -62,7 +64,7 @@ func q3ActivationEvidence(src q3EvidenceSource, epoch uint64) (q3format.Link, *a
 	if err != nil {
 		return none, nil, nil, fmt.Errorf("%w: no retained readiness receipts", ErrNoQ3Evidence)
 	}
-	candidate, err := src.HandoffCandidate(record.NextBodyID)
+	candidate, err := src.HandoffCommittedPreimage(record.NextBodyID)
 	if err != nil {
 		return none, nil, nil, errors.Join(ErrNoQ3Evidence, err)
 	}
@@ -86,6 +88,11 @@ func q3ActivationEvidence(src q3EvidenceSource, epoch uint64) (q3format.Link, *a
 			return none, nil, nil, errors.Join(ErrNoQ3Evidence, err)
 		}
 		digest = operator[:]
+	}
+	// The exported preimage and its digest are the ones the committed body binds: never a view of them (a VR handoff's retained v5 view
+	// hashes to another digest), so nothing is served that the receiver's history must refuse.
+	if !bytes.Equal(body.ChangeRecordHash, evmroot.D4CandidateContextHash(record.Network, record.PredecessorBodyID, record.Attempt, digest, body.EarliestActivation)) {
+		return none, nil, nil, fmt.Errorf("%w: the retained candidate is not the one the committed body binds", ErrNoQ3Evidence)
 	}
 	proof, err := basetypes.Cbor.Marshal(handoff.OldCommitProof{Profile: evmroot.D4Profile, Record: record, Control: *head.Control, ControlPath: path, CommitQC: head.CommitQc})
 	if err != nil {

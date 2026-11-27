@@ -39,8 +39,9 @@ address is in `--operator-allowed-sources` (also `UBFT_OPERATOR_ALLOWED_SOURCES`
 
 Root (`cli/ubft/cmd/root_node.go`). "Loopback peer" = the endpoint refuses a request whose TCP peer is not in the operator sources (loopback by default,
 see above) and needs
-`Content-Type: application/json` without an `Origin` header (blocks browser CSRF); it is a safeguard against a *network* caller, not
-authentication.
+`Content-Type: application/json` without an `Origin` header (blocks browser CSRF), and a `Host` that is an IP literal, `localhost` or a name
+listed in `--operator-allowed-hosts` (a DNS-rebound name is refused: a same-origin GET after rebinding need not carry `Origin`, so the Origin
+check alone is not rebinding protection). It is a safeguard against a *network* caller, not authentication.
 
 | Endpoint | Guard | Effect if exposed (and the guard does not hold) |
 |---|---|---|
@@ -52,7 +53,7 @@ authentication.
 | `POST /api/v1/handoff/q3-candidate` | loopback peer | Returns the V3 candidate this validator derives from its committed state. Registers nothing. |
 | `POST /api/v1/handoff/q3-stage` | loopback peer | Stages a candidate that is consistent with the root's own state (**no signatures are checked at staging**). Staging sets the grant of the records feed for the staged successor: a caller can give feed read access to any peer id, or replace a real joiner's grant until it is staged again (#527). The feed serves certified, non-secret data. An abandoned candidate keeps its grant until the next stage or install. |
 | `POST /api/v1/handoff/abort`, `/abort/status` | loopback peer | `SubmitHandoffAbort` makes **this validator sign an abort approval** for the pending handoff with its own key (`handoff_operator.go`) and feed it to the approval handler. A caller that gets past the guard on enough validators to reach the abort quorum **aborts the attempt** (not only delays it); it cannot make a handoff commit. |
-| `POST /api/v1/q3/status`, `/activation`, `/bundle`, `/history`, `/signers`, `/shard-conf` | loopback peer | Read-only views of the verified Q3 history, the latest certificate signers, and (`/shard-conf`) the shard configuration the root's index holds for a partition's shard epoch (genesis and those derived from committed handoffs; a shard configuration holds no secret). |
+| `POST /api/v1/q3/status`, `/activation`, `/bundle`, `/history`, `/signers`, `/shard-conf` | loopback peer | Read-only views of the verified Q3 history, the latest certificate signers, and (`/shard-conf`, request `{partition, shard (optional, the ShardID in hex text, at most 128 characters; empty is the unsplit shard), epoch}`) the shard configuration the root's index holds for one epoch of that shard (genesis and those derived from committed handoffs; a shard configuration holds no secret). The packaged aggregator reads its shard's successor configuration here, over the root's loopback RPC (`BFT_RPC_ADDRESS`, the same network namespace), to follow a validator-registry kind 6 or 8 change; the answer earns no trust until it hashes to the configuration hash the root seal committed to. There is deliberately no public variant of this read. |
 | `POST /api/v1/pos/control` (only with `--proof-of-stake`) | loopback peer | Offers a Retirement or RejectResult control for ordering; the root checks it against its own state like any other control. The normal exit needs no submission: a root with `--pos-evm-rpc` builds the Retirement itself ([retirement-proposer](../pos/retirement-proposer.md)). |
 
 Shard node (`--rpc-server-address`): `GET /api/v1/health` and `/api/v1/metrics` are read-only; `GET /api/v1/operator/status` is the archive/operator

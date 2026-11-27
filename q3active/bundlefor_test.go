@@ -69,7 +69,8 @@ func TestBundleForRefusesWhatTheHistoryDoesNotAuthenticate(t *testing.T) {
 	}
 }
 
-func TestBundleForChainsTheLineageOfEarlierActivations(t *testing.T) {
+// The second activation's bundle carries its own link only (#1035): its lineage is the receiver's verified history, which holds the first.
+func TestBundleForCarriesOnlyTheActivatingLink(t *testing.T) {
 	first := q3fixture.New(t, q3fixture.Options{})
 	second := q3fixture.New(t, q3fixture.Options{After: first})
 	p := q3process.New(t, first)
@@ -85,9 +86,20 @@ func TestBundleForChainsTheLineageOfEarlierActivations(t *testing.T) {
 	require.NoError(t, err)
 	_, env, err := q3active.DecodeBundle(mustEncode(t, b2))
 	require.NoError(t, err)
-	require.Len(t, env.Links, 2, "the second activation's envelope retains the first")
-	require.EqualValues(t, 2, env.Links[0].Body.Epoch)
-	require.EqualValues(t, 3, env.Links[1].Body.Epoch)
+	require.Len(t, env.Links, 1, "the envelope carries no earlier activation")
+	require.EqualValues(t, 3, env.Links[0].Body.Epoch)
+	require.Equal(t, second.Claim, env.Links[0].Claim)
+
+	// a receiver that holds the first activation installs it; one that does not is told what it lacks, and stages nothing
+	behind := q3process.New(t, first).Start()
+	require.NoError(t, behind.Recover(context.Background()))
+	require.ErrorIs(t, behind.Activate(context.Background(), b2), q3format.ErrMissingHistory)
+	_, ok, err := behind.StagedBundle(3)
+	require.NoError(t, err)
+	require.False(t, ok)
+	require.NoError(t, behind.Activate(context.Background(), b1))
+	require.NoError(t, behind.Activate(context.Background(), b2))
+	require.NoError(t, behind.Admit(3))
 }
 
 func mustEncode(t *testing.T, b q3active.Bundle) []byte {

@@ -70,12 +70,34 @@ docker compose up -d $SERVICES && docker compose ps
 ```
 The roots and shard nodes serve the Q3/handoff operator endpoints, which accept only the configured operator sources (`--operator-allowed-sources`, default **loopback only**: 127.0.0.0/8 and ::1; the generated testnet leaves it at the default, see `docs/operations/root-rpc-exposure.md`), and their operator listeners **bind to the `--rpc-bind` loopback address, 127.0.0.1 by default** (8002 root, 9101 shard; the examples below and the wrapper use that default, the wrapper and the metrics relay read the value from the generated Compose file): nothing on the shared Docker network can reach them, including their unguarded write endpoints. Each validator entity's root and shard node share one network namespace, owned by a small holder container `pod<i>` (it carries the DNS names `root<i>` and `shard<i>`; a `metrics<i>` relay in it serves only `/root/metrics` and `/shard/metrics` to Prometheus). Reach the operator endpoints with `docker compose exec root<i>` / `shard<i>` (either one: both see the same loopback), as the examples below do. **Lifecycle:** never restart `pod<i>` alone (the containers in its namespace would be left with a dead one): `docker compose up -d --force-recreate pod<i> root<i> shard<i> metrics<i>`. Recreating only `root<i>` (the install restart) or restarting only `shard<i>` is safe, and the install override of `handoff.py install-override` replaces only the root's entrypoint, so the recreated root stays in the entity's namespace. **After a host reboot or a Docker daemon restart** a container that joins another's namespace can fail to start before its holder is up: recover with the same `--force-recreate pod<i> root<i> shard<i> metrics<i>` (never the authorities), and include it in the rehearsal checks beside the root recreation. The holder runs under `init: true`, so stopping it does not wait out the grace period. Authorities stay outside (unix sockets) and are never recreated.
 The generator makes fresh root/shard/authority keys per validator, the trust base, a B1 genesis (registry layout 3 from one `b1-profile`, checked by `b1genesis --verify`) that funds
-**only** a new random faucet account (1000 test UCT), Engine JWTs and `manifest.json`. Success: it prints the
+**only** a new random faucet account (the signer's alone) and a new random funder account (`funder-secrets/`, the tools' transfers), Engine JWTs and `manifest.json`. Success: it prints the
 block-zero hash, the manifest and `Authorities are live and enrolled. Do NOT restart them.`; `docker compose ps`
 shows nothing restarting. On failure: `docker compose down`, delete the directory, retry under a new name.
 Configure nginx from [nginx.conf.example](../../../deploy/testnet/nginx.conf.example) and
 [faucet/nginx.conf.example](../../../deploy/testnet/faucet/nginx.conf.example) (real names, TLS, `nginx -t`, reload).
 **No container step of this guide has yet run on a live server** ([evidence](../../../deploy/testnet/evidence/README.md)).
+
+**EVM block interval** ([#1167](https://github.com/ristik/bft-core/issues/1167)). `--block-interval-ms 10000` paces the EVM shard to about one block
+every 10 s, the testnet cadence (it becomes each shard node's `shard-node run --target-block-interval` and is recorded as `evm_block` in `manifest.json`).
+The default is still 0 (unpaced): the pinned ubft has no such flag, and the generator refuses a nonzero interval with it rather than drop the
+interval. The default becomes 10000 together with the pin and image bump that carries the flag ([#1169](https://github.com/ristik/bft-core/issues/1169)). It is best effort and per node: the leader waits until the interval has passed since its previous block, a follower waits that much
+longer for it, and nothing checks it, so blocks stay valid whatever the interval. The shard conf's T2 is derived from it (10 s gives 20 s:
+`shard-node run` refuses an interval its T2 cannot cover, and `shard-node doctor --target-block-interval` reports the same rule). A larger T2 also means a
+silent leader's round times out after 20 s instead of 5 s, and a transaction waits up to one interval plus a round trip for its block when it reaches
+every validator (the gateway and the faucet relay send to all; the execution clients do not gossip): a transaction sent to one validator's client waits
+for that validator to lead, up to the committee size times the interval (measured 6 to 69 s at four validators), so give tools that take one
+`--eth-rpc` the comma-separated list of every validator. `--block-interval-ms 0` is the unpaced cadence of the CI lanes (one block per certification
+round trip, about 2 s, T2 5 s).
+
+Two thresholds move with the interval. **Peer fetch:** a shard node that has received no certificate for `--uc-relay-after` (1 s) asks two shard peers
+for theirs; with an interval the wait is `--uc-relay-after` plus the interval, so the node does not poll its peers through every expected paced gap. The
+cost is that a certificate that really is missing (the roots' push lost to this node only) is fetched from peers after about 11 s at a 10 s interval
+instead of about 1 s. The block stays valid; that node only votes later. **Inactivity:** a node that has adopted no certificate for
+`--inactivity-timeout` (30 s) re-handshakes with the roots. A healthy paced gap is up to the interval plus the follower wait and one root round (about
+16 s at 10 s); a silent leader's round ends with the repeat certificate after T2 (about 21 s at T2 20 s). The margin is therefore about 14 s, or about
+9 s with a silent leader. Crossing it costs a re-handshake, not a rejected block. `shard-node doctor --target-block-interval` warns when the interval
+plus the follower wait and one root round leaves less than 10 s below `--inactivity-timeout` (from an interval of about 14 s at the defaults); the remedy
+is a larger `--inactivity-timeout` on the shard nodes.
 
 ## 5. Verify before opening to the public
 **The gateway refuses a request that did not come through the trusted proxy:** a direct `eth_*` call to `127.0.0.1:8545` answers `400 {"error": "invalid proxy address"}` (`/healthz` is exempt), and so does `tester-check.py` (exit 2). Until nginx is in front, send the header the proxy would set: `-H 'X-Forwarded-For: 203.0.113.9'`; `observe.py` and `loadgen.py` do.
@@ -154,10 +176,11 @@ N=$G/network; /srv/src/bft-pinned/build/ubft pos-relayer verify-genesis --plan $
 no identity could top up, exit, withdraw or claim a reward. The package's ceremony instead generates, per identity, three fresh secp256k1 keys (`tn-keygen owners`) and puts
 their addresses in `pos-plan.json` (public: the assignment id does not depend on them, `verify-genesis` recomputes from that plan). The keys are in
 `$G/pos-owner-keys/identity-<stakingId>/{owner,withdrawal,payee}.key` (0x-prefixed hex, mode 0600, directory 0700), generated at ceremony time, never in `network/`, never mounted into a
-container and never committed. Handling is that of `faucet-secrets/`: private host material; `backup.py` archives the whole generation (mode-0600 archive), so keep the archive
+container and never committed. Handling is that of `faucet-secrets/` and `funder-secrets/`: private host material; `backup.py` archives the whole generation (mode-0600 archive), so keep the archive
 as private as the directory; the section 4 `chown -R 10001` makes them readable only by that uid, so `sudo chown -R "$USER" $G/pos-owner-keys` before use. The owners hold
-no balance at genesis (a genesis balance would change the supply the bond accounting is audited against): fund the owner of an identity from the faucet account for gas and
-bonds when rehearsing, e.g. `cast send OWNER --value 1ether --keystore ... --rpc-url $R`. Which custody calls each key makes is the contracts' interface, not this package's.
+no balance at genesis (a genesis balance would change the supply the bond accounting is audited against): fund the owner of an identity from the funder account for gas and
+bonds when rehearsing, e.g. `cast send OWNER --value 1ether --keystore $G/funder-secrets/keystore.json --password-file $G/funder-secrets/password --rpc-url $R`.
+Never from the faucet key: the faucet signer counts its nonce locally, and a transaction sent past it makes claims fail until the signer resyncs (bft-core#1287). Which custody calls each key makes is the contracts' interface, not this package's.
 Without `--pos` nothing of this exists.
 
 **Status: the PoS smoke below has not yet been executed on containers** (no Linux images/host yet; the CI probe starts native roots only). Treat everything it lists as untested on a package until its evidence is recorded.
@@ -284,6 +307,20 @@ block-zero hash and faucet address. The old pin must get 409 (checked before the
 | `400 invalid proxy address` from the gateway, `tester-check.py` exit 2 | The request did not come from the trusted proxy; see the note at the start of §5. |
 | `FileNotFoundError: ... 'go'` although the images were built in a container | The host needs `go` too (`generate.py` runs `go version -m`): install the Go 1.27.1 tarball and link it into `/usr/local/bin`. |
 | `observe.py` alerts every minute `signer has no container` and `the faucet /healthz answered 503` | The rehearsal never starts the faucet signer (no hCaptcha key); start `observe.py` with `--no-faucet` for a package without it. |
+
+### 8a. A shard's request is lost at every root, or certification does not progress (bft-core#976)
+
+Nothing at the roots replays a shard request after every root that held it (the per-validator buffer, the retained aggregated request, the leader's buffer: all in memory) has restarted or been replaced, and nothing detects the loss. What recovers the shard, when the **premises** hold, is the roots' own T2 timer, which does not depend on a request: a repeat of the shard's last input record is certified from `u + floor(T2 / (block rate / 2)) + 1` root rounds after the shard's last certificate `u`, and the shard then builds and sends a **new** request. The original signed request is not delivered: a repeat supersedes its authorization. The shard's unchanged re-send (on a duplicate of the certificate it holds, for example after the 30 s inactivity handshake) is a second path (T2 is 20 s on a package paced to 10 s blocks, 5 s unpaced: see §4) with its own limits: at most 10 re-sends, at least 5 s apart, to the same two ingress roots; 30 s is an inactivity threshold polled every 5 s, not a delivery deadline.
+
+**Premises:** a responsive root quorum, a live shard leader and shard quorum, a working executor and subscription, and reachable ingress roots. No finite bound holds when they do not (a root timeout can take 10 s, quorum loss halts advancement, a pending change or configuration switch suppresses T2 proposals, and the first proposal of a recovery run carries no repeat). Account for the recovery as `time to an eligible repeat proposal + its commit + shard delivery, application and fresh-request acceptance (R) + the fresh request's certification`; R was measured on the package at about 1 s only on successful cycles, and #886 records cycles with a paused next shard leader where no fresh request came.
+
+**What the shard reports** (in memory, reset by a restart; thresholds are operational, not a T2 deadline; set `PendingWarnAfter` negative to silence the warning):
+- `shardnode.request.outstanding_age` (s): time since the first submission of the pending request on the certificate the shard still holds; zero when none is pending. A re-send does not restart it; a certificate that advances the round, or a repeat, retires it.
+- `shardnode.uc.consecutive_repeats`: repeats accepted since the last non-repeat certificate.
+- `shardnode.certification.no_progress_age` (s): time since the last non-repeat certificate while work remains. Rebuilt attempts do not reset it.
+- A warning `certification work has not progressed` (once per minute) when either age passes 60 s or 3 repeats follow each other.
+
+A rising `no_progress_age` with repeats is a shard that is rebuilding without being certified: check the roots' quorum and the shard leader first, not the request.
 
 ## 9. Rehearsal evidence to record
 - Operator name, date, this guide's commit, host specs, Docker/Compose versions, `images.json`, `manifest.json`.

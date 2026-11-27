@@ -12,7 +12,7 @@ mkdir -p "$work" "$out"; work=$(cd "$work" && pwd); out=$(cd "$out" && pwd)
 source scripts/lib/portable.sh
 log() { printf '%s run-lane: %s\n' "$(date -u +%FT%TZ)" "$*" | tee -a "$out/run-lane.log"; }
 die() { log "HARNESS FAILURE: $*"; rc=1; finalize; exit 1; }
-pins=scripts/ci/lane-pins.json
+pins=$(scripts/ci/lane-product.sh manifest) || { echo "run-lane: no manifest for LANE_PRODUCT=${LANE_PRODUCT:-checkout}" >&2; exit 1; }
 inject=${CI_INJECT_FAILURE:-none}; deadline=${LANE_DEADLINE_MIN:-75}
 # CI_LANE_KIND: x4rewards (the shadow chain with a small reward allocation: the PoS campaign's reward steps, X4_REWARDS=1), x4shadow (P85_SHADOW=1 scripts/p85-lane.sh with the declared 90-minute campaign, scripts/shadow/campaign.json), combined (utb-lane.sh), overbound (P85_MODE=overbound scripts/p85-lane.sh) or abort (scripts/h6/abort-rehearsal-lane.sh); each from its own fresh genesis
 kind=${CI_LANE_KIND:-combined}
@@ -59,13 +59,22 @@ export M2_URETH_BIN=$prov/unicity-reth M2_URETH_COMMIT=$ureth_commit M2_URETH_AT
 
 mkdir -p build "$AGRE_ROOT/builds/tools"
 cp "$art/tools/ubft" build/ubft; chmod +x build/ubft; cp -R "$art/tools/tools/." "$AGRE_ROOT/builds/tools/"; chmod +x "$AGRE_ROOT/builds/tools/"*
-export LANE_TOOLS_DIR=$AGRE_ROOT/builds/tools DNB_TOOL=$AGRE_ROOT/builds/tools/dnb-tool UTB_EVIDENCE=$AGRE_ROOT/builds/tools/utb-evidence
+export LANE_TOOLS_DIR=$AGRE_ROOT/builds/tools UTB_VERIFIER=$AGRE_ROOT/builds/tools/utb-evidence
 if [ "$kind" = combined ]; then
   agg_commit=$(jq -er '.components["aggregator-go"].commit' "$pins")
   cp -R "$art/tools/aggregator-${agg_commit:0:8}" "$AGRE_ROOT/builds/"
   export AGG_COMMIT=$agg_commit AGG_BIN=$AGRE_ROOT/builds/aggregator-${agg_commit:0:8}/aggregator; chmod +x "$AGG_BIN"
 fi
 ( cd "$art/tools" && p_sha256 -c sha256.txt >/dev/null ) || die "the tools artifact does not match its sha256.txt"
+# the product the binaries were built from (build-tools.sh): the commit under test, or in a pinned run (product=pinned) exactly the bft-core pin of the manifest
+product=$(tr -d '[:space:]' <"$art/tools/product-commit.txt" 2>/dev/null) || die "the tools artifact has no product-commit.txt"
+# the dependency set this job read (LANE_PRODUCT) must be the product's: the frozen product never runs with the checkout's ureth, nor the reverse (bft-core#1139)
+if [ "$product" != "$head" ]; then [ "${LANE_PRODUCT:-checkout}" = pinned ] || die "the binaries are the pinned product $product, but this job read the checkout's dependency set (LANE_PRODUCT=${LANE_PRODUCT:-checkout})"
+elif [ "${LANE_PRODUCT:-checkout}" != checkout ]; then die "the binaries are the commit under test, but this job read the pinned product's dependency set"; fi
+if [ "$product" != "$head" ]; then
+  scripts/ci/check-pins.sh component bft-core "$product" | tee -a "$out/run-lane.log" | grep -q '^ok' || die "the product commit $product is neither the commit under test nor the bft-core pin"
+  export LANE_PRODUCT_COMMIT=$product; log "pinned product run: binaries built from bft-core $product, harness $head"
+fi
 export LANE_SELFTEST_LOG=$art/tools/selftest/utb-lane-selftest.log
 
 unpack() { # NAME DEST
@@ -73,20 +82,18 @@ unpack() { # NAME DEST
   mkdir -p "$2"; zstd -q -dc "$art/sources/$1.tar.zst" | tar -xf - -C "$2"
 }
 unpack contracts "$AGRE_ROOT"
-[ "$kind" != combined ] || { unpack native-bridge-plugins "$AGRE_ROOT"; unpack state-transition-sdk-js "$AGRE_ROOT"; }
-export P85_CONTRACTS=$AGRE_ROOT/contracts NBP_DIR=$AGRE_ROOT/native-bridge-plugins UTB_SDK_JS=$AGRE_ROOT/state-transition-sdk-js
+[ "$kind" != combined ] || unpack state-transition-sdk-js "$AGRE_ROOT"
+export P85_CONTRACTS=$AGRE_ROOT/contracts UTB_SDK_JS=$AGRE_ROOT/state-transition-sdk-js
 [ ! -d "$P85_CONTRACTS/.ci-svm" ] || { mkdir -p "$HOME/.svm"; cp -R "$P85_CONTRACTS/.ci-svm/." "$HOME/.svm/" 2>/dev/null || true; }
 
-# Foundry at the pinned release, verified by the digest of the downloaded archive
-scripts/ci/install-foundry.sh "$work/dl" >>"$out/run-lane.log" 2>&1 || die "cannot install the pinned Foundry"
+# Foundry at the pinned release, verified by the digest of the archive (cached by digest in ~/.cache/unicity-foundry, bounded retries)
+scripts/ci/install-foundry.sh >>"$out/run-lane.log" 2>&1 || die "cannot install the pinned Foundry"
 export PATH="$HOME/.foundry/bin:$repo/scripts/ci/shim:$PATH"
 export DNB_AGG_SHARDS=$(jq -r '.lane.aggShards // 1' "$pins")
 # the EVM shard's T2 (setup-evm-nodes.sh reads EVM_T2_MS; unset = 5000): scripts/ci/lane-pins.json lane.evmT2Ms, see its note and bft-core#728
 if [ -n "$(jq -r '.lane.evmT2Ms // empty' "$pins")" ]; then export EVM_T2_MS=$(jq -r '.lane.evmT2Ms' "$pins"); log "EVM_T2_MS=$EVM_T2_MS (lane-pins)"; fi
 # ureth with transaction-only gossip (ristik/ureth#34): the lane submits each transaction to ONE validator and proves that the others received it (scripts/lib/gossip-lib.sh)
 if [ "$(jq -r '.lane.txGossip // false' "$pins")" = true ]; then export GOSSIP_LANE=1 LANE_TX_FANOUT=one; fi
-# B7 PR 3: the long-history redemption step (scripts/lib/anyage-lib.sh anyage_step_long_history), when lane-pins says .lane.longHistory
-if [ "$(jq -r '.lane.longHistory // false' "$pins")" = true ]; then export B7_LONG_HISTORY=1; fi
 # T8: the lane includes the funded operator reward pool step (scripts/lib/rewards-lib.sh): the genesis payees hold keys, the pool is settled across the real
 # acknowledged history, recomputed from scratch, claimed. Off by default on the Mac (REWARD_LANE unset); on in CI.
 export REWARD_LANE=1

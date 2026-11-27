@@ -88,17 +88,31 @@ the provided Compose deployment cannot publish that mode through its container I
 
 ## Limits, failure and monitoring
 
-Each claim is 0.01 UCT (18 decimals), one reservation per normalized address and
-IP per rolling 24 hours, with at most 100 reservations (1 UCT) in any 24 hours.
-The signer additionally enforces upstream's address/IP limits and verifies
-hCaptcha. Gateway reservations survive process/container restarts and are committed
-**before** submitting to the signer. Failed CAPTCHA tokens, backend failures and
-ambiguous timeouts consume a reservation, intentionally. A client can receive
+Each claim pays `payout` UCT (network.json; the signer's `FAUCET_PAYOUT`, the same
+value: the guard's health check refuses a signer that reports another). The package
+default is 200 UCT (`generate.py --faucet-payout`), enough for a demo wallet's 100 UCT
+bond plus gas, with at most `daily_claims` (default 50) reservations in any 24 hours and
+one per normalized address per rolling 24 hours. There is no per-IP limit by default
+(owner decision 2026-11-12: an audience behind one office NAT would share one claim);
+`limit_per_ip: true` (`generate.py --faucet-per-ip-limit`) restores one claim per address
+and per IP. The signer's own upstream limiter keys on the address and on the client
+named in `X-Forwarded-For`; without the per-IP limit the guard sends the address there,
+so both of the signer's keys are the address. The signer verifies hCaptcha. Gateway reservations survive process/container restarts and are committed
+**before** submitting to the signer. Backend failures and ambiguous timeouts
+consume a reservation, intentionally. A signer 429 (failed CAPTCHA or its own rate
+limit, both answered before any transfer) releases the reservation. So does a transfer
+the chain definitely refused (the signer's 500 carries the execution client's JSON-RPC
+error: nonce too low, insufficient funds, underpriced, decode or sender errors): nothing
+was sent, the client gets 502 and may retry. The validators' execution guard and
+relay.py pass such an error on only when every validator answered and none holds the
+transaction; a missing, timed-out or failed answer stays a 503 (bft-core#1287). A client can receive
 503 after a transaction was accepted; inspect the wallet/chain before intervening.
-Never automatically replay a request. Shared NAT users share the IP cap.
+Never automatically replay a request. With `limit_per_ip`, shared NAT users share the IP cap.
 
 400 means malformed address/body or missing CAPTCHA; 409 means the client network
-pin differs; 429 means address/IP/global reservation limits; 503 means unavailable,
+pin differs; 429 means address (and, with `limit_per_ip`, IP) or global reservation limits, or a failed CAPTCHA
+(retry allowed); 502 means the chain refused the transfer and nothing was sent (retry allowed);
+503 means unavailable,
 exhausted, mismatched backend/network or uncertain submission. A 200 response
 contains the broadcast transaction hash, not a finality guarantee. Check its
 successful receipt and certified/finalized state before relying on the funds.
@@ -106,8 +120,10 @@ Only simple EOA wallets are supported (upstream uses a fixed 21,000 transfer gas
 
 `GET /healthz` is the monitoring endpoint: 200 includes remaining claims and the
 faucet balance in wei; 503 is fail-closed. It checks chain/genesis, signer address,
-payout, CAPTCHA site key, minimum balance and the rolling budget. Default minimum
-balance is 0.02 UCT; this is an operational reserve, not a guaranteed gas quote.
+payout, CAPTCHA site key, minimum balance and the rolling budget. generate.py sets the
+minimum balance to two payouts (400 UCT at the default); this is an operational reserve,
+not a guaranteed gas quote. The faucet account's genesis balance is
+`generate.py --faucet-balance` (default 50,000 UCT, 250 claims at 200 UCT).
 Insufficient gas funds or a stuck nonce also cause the signer to refuse transfers.
 Alert on Docker unhealthy status, 503s, low balance and signer broadcast errors;
 inspect `docker compose logs --tail=100 signer gateway relay`. No transaction is
@@ -119,8 +135,10 @@ refill account; wait for a successful receipt/certified state and healthy status
 No restart is needed. If a broadcast outcome is uncertain or the signer nonce is
 stuck, stop public claims, inspect all validator mempools/receipts, and reconcile
 the dedicated account's pending nonce before restarting the signer. Upstream only
-refreshes its cached nonce automatically on nonce errors; never run two signers
-for one key. The global budget remains in place even after refill/restart.
+refreshes its cached nonce automatically on nonce errors (the guard now relays reth's
+`nonce too low`, so after a transaction sent past the signer one claim gets 502 and the
+next is signed with the refreshed nonce); never run two signers for one key and never
+send from the faucet key elsewhere: tools use the generation's funder account. The global budget remains in place even after refill/restart.
 
 ## Arbitrary reset / reconfiguration
 
@@ -159,7 +177,9 @@ then use the shared devnet lock (from the repository root):
 
 `devnet_probe.py` funds a new random faucet account from the lane's disposable
 genesis account, verifies a zero-balance fresh wallet, claims and pays gas, checks
-duplicate/IP/restart/invalid/network/reset/exhaustion cases, and writes only public
+duplicate/IP/restart/invalid/network/reset/exhaustion cases and a transaction sent from
+the faucet key past the signer (the next claim pays or gets 502, the one after it pays:
+bft-core#1287), and writes only public
 evidence to test-nodes/faucet-evidence.json. Temporary keys are discarded. Faucet
 mode stops before unrelated handoff/continuous-execution tests. Local
 native tests disable CAPTCHA and do not establish public TLS, DNS, real hCaptcha

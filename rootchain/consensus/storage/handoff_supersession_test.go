@@ -105,6 +105,15 @@ func (p pendingAssignment) supersedeWith(t *testing.T, binding *evmassign.Supers
 	return supersession{p: p, built: built, preimage: built.preimage}
 }
 
+// supersedeWithPlan rebuilds the recovery with a given (possibly tampered) plan on the same pending chain.
+func (p pendingAssignment) supersedeWithPlan(t *testing.T, plan *recoveryPlan) supersession {
+	t.Helper()
+	f := p.f
+	f.recovery = plan
+	built := f.build(t, f.candidate(t))
+	return supersession{p: p, built: built, preimage: built.preimage}
+}
+
 func (s *supersession) addEpoch2(t *testing.T, store *BlockStore, round uint64, records ...[]byte) (*ExecutedBlock, error) {
 	t.Helper()
 	parent := mustBlock(t, store, round-1)
@@ -151,7 +160,7 @@ func TestSupersessionReplacesAnUnacknowledgedAssignmentOnTheSameParent(t *testin
 	require.NoError(t, err)
 	suffix, err := sup.addEpoch2(t, p.store, 11)
 	require.NoError(t, err)
-	_, err = p.store.blockTree.Commit(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 11, ParentRoundNumber: 10, Epoch: 2},
+	_, err = p.store.tree().Commit(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 11, ParentRoundNumber: 10, Epoch: 2},
 		LedgerCommitInfo: &types.UnicitySeal{Version: 1, RootChainRoundNumber: 10, Epoch: 2, Hash: mustBlock(t, p.store, 10).RootHash}})
 	require.NoError(t, err)
 	head := &abdrc.CommittedBlock{Block: suffix.BlockData, Control: suffix.ShardState.Control,

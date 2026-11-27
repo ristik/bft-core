@@ -38,6 +38,7 @@ func (s *TrustBaseStore) EnableUTBProfile() {
 	s.mu.Lock()
 	s.signing.utb = true
 	s.mu.Unlock()
+	s.bumpVerifyGeneration()
 }
 
 // SigningAuthority is the verified history that decides each epoch's protocol configuration: its signing configuration and its
@@ -68,7 +69,10 @@ func (s *TrustBaseStore) BindSigningAuthority(a SigningAuthority) error {
 	if s.signing.authority != nil && !sameAuthority(s.signing.authority, a) {
 		return fmt.Errorf("%w: another authority is bound", ErrSigningHistory)
 	}
-	s.signing.authority = a
+	if s.signing.authority == nil { // binding the authority already bound changes nothing
+		s.signing.authority = a
+		s.bumpVerifyGeneration()
+	}
 	return nil
 }
 
@@ -112,6 +116,7 @@ func (s *TrustBaseStore) ActivateSigning(epoch uint64, cfg votesig.Config) error
 		}
 	}
 	s.signing.byEpoch[epoch] = cfg
+	s.bumpVerifyGeneration()
 	return nil
 }
 

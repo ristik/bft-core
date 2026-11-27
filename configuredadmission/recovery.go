@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -78,7 +79,12 @@ type ExecutionRecovery struct {
 	FetchArchive func(context.Context, shardnode.BlockRef, []byte) ([]shardnode.JournalFetchEntry, error)
 	// ArchiveCatchUp, when set, closes a gap that one recovery cannot (longer than its bounds, or with its newest blocks not archived
 	// yet) from the archive, one page per call (#769, catchup.go).
-	ArchiveCatchUp  ArchiveCatchUp
+	ArchiveCatchUp ArchiveCatchUp
+	// Prefetch, when set, is told the entries a fetched suffix is about to admit before the first is verified, so that what their
+	// verification will read from the network (the root-record cut of each block's origin, bft-core#1071) is fetched ahead, several at a
+	// time, instead of a round trip per block. It must return at once and decides nothing: every entry is verified as before. The function
+	// it returns ends the batch (called when the suffix is admitted, refused or abandoned): what it fetched and nothing used is dropped.
+	Prefetch        func(context.Context, []shardnode.JournalFetchEntry) func()
 	catchUpSeen     []byte                // the last distinct target a catch-up call was asked for,
 	catchUpPrev     []byte                // and the one before it
 	catchUpRefused  map[peer.ID]time.Time // providers whose tail's top failed the walk at its first record, and when (rev2 B2)
@@ -275,6 +281,9 @@ func (r *ExecutionRecovery) status(ctx context.Context, label string, fn func() 
 			return fmt.Errorf("%w: %s returned INVALID: %v", ErrRecoveryConflict, label, err)
 		}
 		if attempt == r.limits().Retries {
+			if err != nil && r.Log != nil {
+				r.Log.WarnContext(ctx, "execution recovery deferred after retries", "operation", label, "error", err)
+			}
 			return fmt.Errorf("%w: %s remains %s after %d retries: %v", ErrRecoveryUnavailable, label, s, attempt, err)
 		}
 		select {
@@ -388,13 +397,21 @@ func (r *ExecutionRecovery) recoverChain(ctx context.Context, c recoveryChain, c
 	if common == len(c.blocks) && head.Number > c.anchor.Number {
 		return r.move(ctx, c.anchor, f, false)
 	}
-	// Try retained payloads first. Commit is legal only when it cannot rewind
-	// finality, as established above. A lost reply is settled by exact reread.
-	if err = r.commit(ctx, c.anchor); err == nil {
-		return c.anchor, nil
-	}
-	if !errors.Is(err, ErrRecoveryUnavailable) {
-		return head, err
+	// A locally built payload can be present in the engine with an unwitnessed
+	// companion. Forkchoice alone would make that companion canonical, even
+	// when the local build is an ancestor of the target. Replay the certified
+	// suffix in that case so Verify imports each witnessed companion first.
+	if !slices.ContainsFunc(c.blocks[common:], func(e configuredprogress.JournalEntry) bool {
+		return e.Candidate.LocallyBuilt
+	}) {
+		// Try retained payloads first when a local build cannot be promoted.
+		// Commit cannot rewind finality, and an exact reread resolves a lost reply.
+		if err = r.commit(ctx, c.anchor); err == nil {
+			return c.anchor, nil
+		}
+		if !errors.Is(err, ErrRecoveryUnavailable) {
+			return head, err
+		}
 	}
 	if err = r.admitHead(ctx, head); err != nil {
 		return head, err
@@ -706,6 +723,9 @@ func (r *ExecutionRecovery) admitFetched(ctx context.Context, after shardnode.Bl
 		return fmt.Errorf("%w: peer suffix ends at %x, requested %x", ErrRecoveryConflict, entries[len(entries)-1].Block.Hash, target)
 	}
 	parent := after
+	if r.Prefetch != nil {
+		defer r.Prefetch(ctx, entries)()
+	}
 	f, err := r.Executor.Finalized(ctx)
 	if err != nil {
 		return fmt.Errorf("%w: finalized identity: %w", ErrRecoveryUnavailable, err)
@@ -826,8 +846,14 @@ func (r *ExecutionRecovery) verifyFetched(ctx context.Context, parent shardnode.
 	}); ok {
 		bindingCtx = historical.HistoricalContext(ctx)
 	}
-	if err := r.Executor.CheckBlockBinding(bindingCtx, b, p); err != nil {
+	err = shardnode.RetryBlockBinding(bindingCtx, func(ctx context.Context) error {
+		return r.Executor.CheckBlockBinding(ctx, b, p)
+	})
+	if err != nil {
 		if errors.Is(err, shardnode.ErrBlockBindingUnavailable) {
+			if r.Log != nil {
+				r.Log.WarnContext(ctx, "execution recovery deferred while local block binding is unavailable", "block", fmt.Sprintf("%x", b.Hash), "error", err)
+			}
 			return none(fmt.Errorf("%w: fetched block binding for %x: %w", ErrRecoveryUnavailable, b.Hash, err))
 		}
 		return none(fmt.Errorf("%w: fetched block binding for %x: %w", ErrRecoveryInvalid, b.Hash, err))

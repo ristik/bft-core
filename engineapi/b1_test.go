@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"testing"
 
@@ -15,6 +16,9 @@ import (
 	"github.com/unicitynetwork/bft-core/b1paired"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/internal/testutils/b1fixture"
+	"github.com/unicitynetwork/bft-core/recordsfeed"
+	"github.com/unicitynetwork/bft-core/rootinput"
+	"github.com/unicitynetwork/bft-core/rootrecords"
 	"github.com/unicitynetwork/bft-core/shardnode"
 )
 
@@ -147,6 +151,31 @@ func TestB1BuildSealsTheLocallyDerivedUpdate(t *testing.T) {
 			require.Equal(t, 2, imported)
 		})
 	}
+	// bft-core#1067: with the root log withheld (no cursor: a non-active follower whose mirrors do not hold it yet) the block is unjudged,
+	// not invalid, and nothing is imported; once the log is available again the same block verifies, in both contexts.
+	available := f.Pair.Records
+	f.Pair.Records = withheldRecords{available}
+	for _, replay := range []bool{false, true} {
+		verifyCtx := context.Background()
+		if replay {
+			verifyCtx = a.HistoricalContext(verifyCtx)
+		}
+		status, err := a.Verify(verifyCtx, block, p)
+		require.Equal(t, shardnode.StatusSyncing, status, "historical %t", replay)
+		require.ErrorIs(t, err, recordsfeed.ErrUnavailable)
+	}
+	require.Equal(t, 2, imported, "an unjudged block imports no payload")
+	f.Pair.Records = available
+	for _, replay := range []bool{false, true} {
+		verifyCtx := context.Background()
+		if replay {
+			verifyCtx = a.HistoricalContext(verifyCtx)
+		}
+		status, err := a.Verify(verifyCtx, block, p)
+		require.NoError(t, err)
+		require.Equal(t, shardnode.StatusValid, status, "historical %t", replay)
+	}
+	require.Equal(t, 4, imported, "the same block verifies once the log is available")
 	bad = true
 	build, err = a.Build(context.Background(), p)
 	require.NoError(t, err)
@@ -187,4 +216,11 @@ func TestB1ActualCompanionReservation(t *testing.T) {
 	a := NewAdapter(Config{Verifier: v}, nil)
 	_, err := a.deriveV2(context.Background(), p, f.UC, f.TR)
 	require.ErrorIs(t, err, b1paired.ErrAdmission)
+}
+
+// withheldRecords is a records source whose root log is not available (every cursor withheld), as a mirror that does not hold it yet.
+type withheldRecords struct{ rootinput.RecordsSource }
+
+func (withheldRecords) Cursor(context.Context, evmroot.RootOriginV2) (rootrecords.Cursor, error) {
+	return rootrecords.Cursor{}, fmt.Errorf("mirror: %w", recordsfeed.ErrUnavailable)
 }

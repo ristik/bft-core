@@ -499,3 +499,46 @@ func TestValidSignature(t *testing.T) {
 	require.False(t, validSignature(b.Members[1].ConsensusKey, msg, sig))
 	require.False(t, validSignature([]byte{1}, msg, sig), "a malformed key verifies nothing")
 }
+
+// §49: a body carries up to 256 members (a native bound; the B1 registry's 16 is a separate admission guard). The largest encodings -
+// 256 members with 64-byte text fields - still fit the 64 KiB body bound, and the receipts of all 256 round-trip.
+func TestTheLargestBodyAndReceiptSetFit(t *testing.T) {
+	require.Equal(t, 256, MaxMembers)
+	b := vectorBody(t)
+	b.Members = nil
+	for i := 0; i < MaxMembers; i++ {
+		s, err := abcrypto.NewInMemorySecp256K1Signer()
+		require.NoError(t, err)
+		v, err := s.Verifier()
+		require.NoError(t, err)
+		key, err := v.MarshalPublicKey()
+		require.NoError(t, err)
+		// 64-byte staking and node ids (maxText), strictly ordered by node id
+		b.Members = append(b.Members, evmroot.Member{StakingID: fmt.Sprintf("%064d", i), NodeID: fmt.Sprintf("%064d", i), ConsensusKey: key, Weight: 1})
+	}
+	b.RootThreshold = 2*uint64(MaxMembers)/3 + 1
+	require.NoError(t, b.Validate())
+	raw := b.Encode()
+	require.Less(t, len(raw), maxBodyLen, "the largest body fits the 64 KiB bound")
+	require.Greater(t, len(raw), 40<<10)
+	back, err := DecodeBody(raw)
+	require.NoError(t, err)
+	require.Equal(t, b.Identity(), back.Identity())
+
+	// 257 members are refused whatever else is right
+	b.Members = append(b.Members, evmroot.Member{StakingID: fmt.Sprintf("%064d", MaxMembers), NodeID: fmt.Sprintf("%064d", MaxMembers), ConsensusKey: b.Members[0].ConsensusKey, Weight: 1})
+	require.ErrorIs(t, b.Validate(), ErrTooLarge)
+
+	// all-member receipts: 256 round-trip, 257 are refused
+	rs := make([]Receipt, MaxMembers)
+	for i := range rs {
+		rs[i] = Receipt{NodeID: fmt.Sprintf("%064d", i), Signature: make([]byte, maxSignature)}
+	}
+	enc256, err := EncodeReceipts(rs)
+	require.NoError(t, err)
+	got, err := DecodeReceipts(enc256)
+	require.NoError(t, err)
+	require.Len(t, got, MaxMembers)
+	_, err = EncodeReceipts(append(rs, Receipt{NodeID: fmt.Sprintf("%064d", MaxMembers), Signature: make([]byte, maxSignature)}))
+	require.ErrorIs(t, err, ErrFormat)
+}

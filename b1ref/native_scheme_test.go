@@ -94,5 +94,5 @@ func TestNativeSigningSchemes(t *testing.T) {
 	v, err := cert(nativeClaim(t, &forged))
 	require.NoError(t, err)
 	require.False(t, v.Valid)
-	require.True(t, errors.Is(v.Why, b1ref.ErrSigInvalid), "%v", v.Why)
+	require.True(t, errors.Is(v.Why, b1ref.ErrQuorum), "%v", v.Why)
 }

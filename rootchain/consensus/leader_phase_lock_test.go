@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,16 +16,19 @@ import (
 
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/internal/testutils/q3fixture"
+	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/leader"
+	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 )
 
 // #886's phase lock: on four equal members with one down, the request of the shard reaches the live ingress root in the last round
 // before the dead slot, at every repeat UC, because T2 (12 root rounds) is a multiple of the four-round leader cycle.
 const (
 	phaseLockT2Rounds  = 12
-	phaseLockRoundsMax = 8 // additional root rounds after live ingress acceptance
-	phaseLockPeriods   = 4 // T2 periods a lost request is resubmitted for, at the same phase, before the run counts as locked
+	phaseLockRoundsMax = 8                // additional root rounds after live ingress acceptance
+	phaseLockPeriods   = 4                // T2 periods a lost request is resubmitted for, at the same phase, before the run counts as locked
+	phaseLockBudget    = 50 * time.Second // the design's wall-clock budget for those 8 rounds at production T = 10 s and rho <= 1 s
 )
 
 // phaseLockRotation replaces the selector with the plain rotation of the committee, the design's isolated retention regression: the phase
@@ -48,7 +54,7 @@ func phaseLockProof(t *testing.T, c *q4bLive, r *q3Replica, hash []byte) *IRChan
 	tr := view.ExpectedTR()
 	prev, err := view.PreviousUC()
 	require.NoError(t, err)
-	out := &IRChangeRequest{Partition: q3fixture.PartitionID, Shard: types.ShardID{}, Reason: Quorum}
+	out := &IRChangeRequest{RootEpoch: r.manager.InstalledRootEpoch(), Partition: q3fixture.PartitionID, Shard: types.ShardID{}, Reason: Quorum}
 	for _, id := range view.Context().NodeIDs() {
 		bcr := &certification.BlockCertificationRequest{PartitionID: q3fixture.PartitionID, ShardID: types.ShardID{}, NodeID: id, InputRecord: &types.InputRecord{
 			Version: 1, Epoch: tr.Epoch, RoundNumber: tr.Round, PreviousHash: view.PreviousStateHash(), Hash: hash, BlockHash: bytes.Repeat([]byte{0x82}, 32),
@@ -60,7 +66,7 @@ func phaseLockProof(t *testing.T, c *q4bLive, r *q3Replica, hash []byte) *IRChan
 }
 
 func (c *q4bLive) certifiedHash(name string, hash []byte) bool {
-	si := c.nodes[c.idx(name)].r.manager.blockStore.ShardInfo(q3fixture.PartitionID, types.ShardID{})
+	si := c.nodes[c.idx(name)].r.manager.blockStore().ShardInfo(q3fixture.PartitionID, types.ShardID{})
 	return si != nil && si.LastCR != nil && bytes.Equal(si.LastCR.UC.InputRecord.Hash, hash)
 }
 
@@ -75,8 +81,8 @@ func healthyPhase(next, afterNext, dead peer.ID, leaderBefore peer.ID) bool {
 
 // phaseLockRun submits at the given phase. A request not certified is submitted again at the same phase each
 // T2 period, as the shard's resubmission on a repeat UC does. It returns the rounds from the first acceptance to the certificate, or
-// false if the run locked.
-func phaseLockRun(t *testing.T, c *q4bLive, dead string, phase func(round uint64, leaderOf func(uint64) peer.ID, dead peer.ID) bool) (uint64, bool) {
+// false if the run locked, and the wall time from the first acceptance to the certificate.
+func phaseLockRun(t *testing.T, c *q4bLive, dead string, phase func(round uint64, leaderOf func(uint64) peer.ID, dead peer.ID) bool) (uint64, time.Duration, bool) {
 	t.Helper()
 	live := c.except(dead)
 	c.start(live...)
@@ -90,13 +96,14 @@ func phaseLockRun(t *testing.T, c *q4bLive, dead string, phase func(round uint64
 	hash := bytes.Repeat([]byte{0x81}, 32)
 	var ingress string
 	first, lastSent := uint64(0), uint64(0)
-	deadline := time.Now().Add(q4bDeadline * 3)
+	var acceptedAt time.Time
+	deadline := time.Now().Add(q4bDeadline * 3 * max(1, m(live[0]).params.LocalTimeout/(2*time.Second)))
 	for time.Now().Before(deadline) {
 		if ingress != "" && c.certifiedHash(ingress, hash) {
-			return c.state(ingress).Round - first, true
+			return c.state(ingress).Round - first, time.Since(acceptedAt), true
 		}
 		if first != 0 && c.state(live[0]).Round > first+phaseLockT2Rounds*phaseLockPeriods {
-			return 0, false
+			return 0, 0, false
 		}
 		for _, name := range live {
 			round := c.state(name).Round
@@ -115,7 +122,7 @@ func phaseLockRun(t *testing.T, c *q4bLive, dead string, phase func(round uint64
 				continue
 			}
 			if first == 0 {
-				first, ingress = round, name
+				first, ingress, acceptedAt = round, name, time.Now()
 			}
 			lastSent = round
 			t.Logf("request accepted by %s at round %d, next leader %s, dead %s", name, round, next.ShortString(), c.id(dead).ShortString())
@@ -124,27 +131,50 @@ func phaseLockRun(t *testing.T, c *q4bLive, dead string, phase func(round uint64
 		time.Sleep(5 * time.Millisecond)
 	}
 	require.Fail(t, "the phase of the request never came")
-	return 0, false
+	return 0, 0, false
+}
+
+// phaseAt is the request's phase k of the four-round cycle: the dead member leads the k-th round after the next one (k = 0: the next leader is
+// the dead member; k = 1: the logged lock, the next leader is the last live one before the dead slot; k = 3: the dead member led this round).
+func phaseAt(k uint64) func(round uint64, leaderOf func(uint64) peer.ID, dead peer.ID) bool {
+	return func(round uint64, leaderOf func(uint64) peer.ID, dead peer.ID) bool {
+		return leaderOf(round+1+k) == dead
+	}
 }
 
 func TestPhaseLockedRequestCertifies(t *testing.T) {
-	// neither correctness nor the round bound may depend on the timer's relation to the phase: every dead placement at T = 2 s, as in the
-	// failing experiment, and production T once
-	for _, row := range []struct {
+	// neither correctness nor the round bound may depend on the timer's relation to the phase: every dead placement at the logged lock phase at
+	// T = 2 s, as in the failing experiment, and production T once. BFT_GATE5_ALL=1 runs the design's whole gate: every dead placement at every
+	// phase of the cycle, at both T (32 runs, about an hour), with the 50 s budget asserted at T = 10 s.
+	type row struct {
 		dead    string
+		phase   uint64
 		timeout time.Duration
-	}{{"H", 2 * time.Second}, {"a", 2 * time.Second}, {"b", 2 * time.Second}, {"c", 2 * time.Second}, {"c", 10 * time.Second}} {
-		t.Run(fmt.Sprintf("dead %s, T=%s", row.dead, row.timeout), func(t *testing.T) {
+	}
+	rows := []row{{"H", 1, 2 * time.Second}, {"a", 1, 2 * time.Second}, {"b", 1, 2 * time.Second}, {"c", 1, 2 * time.Second}, {"c", 1, 10 * time.Second}}
+	if os.Getenv("BFT_GATE5_ALL") != "" {
+		rows = rows[:0]
+		for _, timeout := range []time.Duration{2 * time.Second, 10 * time.Second} {
+			for _, dead := range []string{"H", "a", "b", "c"} {
+				for k := range uint64(4) {
+					rows = append(rows, row{dead, k, timeout})
+				}
+			}
+		}
+	}
+	for _, row := range rows {
+		t.Run(fmt.Sprintf("dead %s, phase %d, T=%s", row.dead, row.phase, row.timeout), func(t *testing.T) {
 			t.Parallel()
 			q4Slot(t)
 			c := newPhaseLockLive(t, row.timeout)
 			phaseLockRotation(t, c)
-			rounds, certified := phaseLockRun(t, c, row.dead, func(round uint64, leaderOf func(uint64) peer.ID, dead peer.ID) bool {
-				return lockedPhase(leaderOf(round+1), leaderOf(round+2), dead)
-			})
-			require.True(t, certified, "the request locked to the phase before the dead slot: not certified in %d T2 periods of %d root rounds", phaseLockPeriods, phaseLockT2Rounds)
+			rounds, elapsed, certified := phaseLockRun(t, c, row.dead, phaseAt(row.phase))
+			require.True(t, certified, "the request locked to its phase: not certified in %d T2 periods of %d root rounds", phaseLockPeriods, phaseLockT2Rounds)
 			require.LessOrEqual(t, rounds, uint64(phaseLockRoundsMax), fmt.Sprintf("certified %d rounds after acceptance", rounds))
-			t.Logf("certified %d rounds after acceptance", rounds)
+			if row.timeout >= 10*time.Second {
+				require.LessOrEqual(t, elapsed, phaseLockBudget, "the production budget for the retained request")
+			}
+			t.Logf("certified %d rounds and %s after acceptance", rounds, elapsed.Round(time.Millisecond))
 		})
 	}
 }
@@ -156,7 +186,7 @@ func TestPhaseLockControlHealthyPhaseCertifies(t *testing.T) {
 	q4Slot(t)
 	c := newPhaseLockLive(t, 2*time.Second)
 	phaseLockRotation(t, c)
-	rounds, certified := phaseLockRun(t, c, "c", func(round uint64, leaderOf func(uint64) peer.ID, dead peer.ID) bool {
+	rounds, _, certified := phaseLockRun(t, c, "c", func(round uint64, leaderOf func(uint64) peer.ID, dead peer.ID) bool {
 		return healthyPhase(leaderOf(round+1), leaderOf(round+2), dead, leaderOf(round))
 	})
 	require.True(t, certified)
@@ -223,7 +253,7 @@ func TestRollingRestartCertifiesRetainedRequest(t *testing.T) {
 			}
 		}
 		lastUC := func() uint64 {
-			si := m(judge).blockStore.ShardInfo(q3fixture.PartitionID, types.ShardID{})
+			si := m(judge).blockStore().ShardInfo(q3fixture.PartitionID, types.ShardID{})
 			if si == nil || si.LastCR == nil {
 				return 0
 			}
@@ -241,6 +271,135 @@ func TestRollingRestartCertifiesRetainedRequest(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	require.Fail(t, "no verdict within 25 minutes")
+}
+
+// #886 gate 7, the design's two-stage exception, in part: a T2 repeat is in the certified branch when the shard's request reaches the ingress, the
+// first live run commits the repeat, the held proof is stale, and the shard's fresh request certifies after a delay R of its own.
+// This shape has no second covered stretch, at any R: between the stop and the first live run the stale schedule still has two live leaders in a
+// row, so it keeps certifying blocks with X voting, the run commits them, and their records name the live set. Cutoffs right after the commit
+// already select it (rev's probe, #919). So this does not reach the design's "about 480 s" accounting: that needs exactly one certified block
+// after the stop. The limit of stage two below is that accounting's, and here it is far from binding.
+func TestRollingRestartRepeatConsumesTheFirstLiveRun(t *testing.T) {
+	t.Parallel()
+	q4Slot(t)
+	const hold = 8 // R, in root rounds after the commit: explicit, not an instant resubmission
+	c := newPhaseLockLive(t, 2*time.Second)
+	var armed atomic.Bool
+	var repeatMu sync.Mutex
+	repeats := map[uint64]bool{} // every round the filter saw a T2 repeat proposed in
+	base := c.net.filter
+	c.net.filter = func(from, to peer.ID, msg any) bool {
+		if p, ok := msg.(*abdrc.ProposalMsg); ok && armed.Load() && p.Block.Payload != nil {
+			for _, req := range p.Block.Payload.Requests {
+				if req.CertReason == drctypes.T2Timeout {
+					repeatMu.Lock()
+					repeats[p.Block.Round] = true
+					repeatMu.Unlock()
+				}
+			}
+		}
+		return base(from, to, msg)
+	}
+	x, d := "c", "b"
+	first := c.except(x)
+	c.start(first...)
+	n := uint64(len(c.nodes))
+	d0 := 4*n + 4
+	c.warm(d0+2, first...)
+	survivors := c.except(x, d)
+	m := func(name string) *ConsensusManager { return c.nodes[c.idx(name)].r.manager }
+	lastUC := func(name string) uint64 {
+		si := m(name).blockStore().ShardInfo(q3fixture.PartitionID, types.ShardID{})
+		if si == nil || si.LastCR == nil {
+			return 0
+		}
+		return si.LastCR.UC.UnicitySeal.RootChainRoundNumber
+	}
+	c.stop(d)
+	c.start(x)
+	armed.Store(true)
+	ingress := survivors[0]
+	start, startUC := c.state(ingress).Round, lastUC(ingress)
+	hash := bytes.Repeat([]byte{0x81}, 32)
+
+	// the shape: a repeat, uncommitted, and the QC on that very block. Only then does the request arrive, so no retained request can have gone first.
+	isRepeat := func(round uint64) bool {
+		repeatMu.Lock()
+		defer repeatMu.Unlock()
+		return repeats[round]
+	}
+	require.Eventually(t, func() bool { return isRepeat(c.state(ingress).HighQC) && lastUC(ingress) == startUC }, q4bDeadline, 5*time.Millisecond, "a T2 repeat certified, not yet committed")
+	highQC := c.state(ingress).HighQC
+	held := phaseLockProof(t, c, c.nodes[c.idx(ingress)].r, hash)
+	require.NotNil(t, held)
+	require.NoError(t, m(ingress).RequestCertification(context.Background(), *held))
+	accepted := c.state(ingress).Round
+	t.Logf("high QC %d when the request was held from round %d, %d rounds after the stop", highQC, accepted, accepted-start)
+
+	// stage one: the first live run commits the repeat, and the same request cannot certify
+	stage1 := start + rollingRestartRounds(n)
+	for lastUC(ingress) == startUC { // plain loops: a failure inside Eventually's goroutine would not stop the test
+		require.LessOrEqual(t, c.state(ingress).Round, stage1, "stage one: no commit of the repeat within the bound")
+		time.Sleep(5 * time.Millisecond)
+	}
+	committed := c.state(ingress).Round
+	require.False(t, c.certifiedHash(ingress, hash), "the first certificate is the repeat, not the held request")
+	// the repeat that consumed the run was in the branch before the request came: a QC at or above a round says nothing about another branch
+	inChain := func() (uint64, bool) {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		repeatMu.Lock()
+		defer repeatMu.Unlock()
+		for round := range c.chains[c.idx(ingress)] {
+			if repeats[round] && round <= highQC && round > start {
+				return round, true
+			}
+		}
+		return 0, false
+	}
+	require.Eventually(t, func() bool { _, ok := inChain(); return ok }, 10*time.Second, 5*time.Millisecond, "a recorded T2 repeat at or below the high QC %d is in the committed chain", highQC)
+	repeat, _ := inChain()
+	t.Logf("repeat of round %d in the committed chain", repeat)
+	view, enabled, err := m(ingress).RequestView(q3fixture.PartitionID, types.ShardID{})
+	require.NoError(t, err)
+	require.True(t, enabled)
+	require.NotEqual(t, held.Requests[0].InputRecord.RoundNumber, view.ExpectedTR().Round, "the repeat moved the expected shard round: the held proof is stale")
+	t.Logf("repeat committed by round %d, %d rounds after the stop, limit %d", committed, committed-start, stage1-start)
+
+	// stage two: only the shard can certify it, so nothing does until it answers after R, and again if a further repeat made that proof stale too
+	committedAt := time.Now()
+	for c.state(ingress).Round < committed+hold {
+		require.False(t, c.certifiedHash(ingress, hash), "certified with no fresh request: the held proof was not stale")
+		require.LessOrEqual(t, c.state(ingress).Round, committed+rollingRestartRounds(n), "stage two: the rounds stopped")
+		time.Sleep(5 * time.Millisecond)
+	}
+	resubmitDelay := time.Since(committedAt)
+	freshDeadline := committed + hold + rollingRestartRounds(n)
+	sends, sentUnder, freshAt := 0, uint64(0), uint64(0)
+	stage2 := uint64(0)
+	for !c.certifiedHash(ingress, hash) {
+		if under := lastUC(ingress); sends == 0 || under != sentUnder {
+			proof := phaseLockProof(t, c, c.nodes[c.idx(ingress)].r, hash)
+			if proof != nil && m(ingress).RequestCertification(context.Background(), *proof) == nil {
+				if sends == 0 {
+					freshAt = c.state(ingress).Round
+					stage2 = freshAt + d0 + 1 + leader.RecoveryRun // the design's accounting
+				}
+				sends++
+				sentUnder = under
+			}
+		}
+		if stage2 != 0 {
+			require.LessOrEqual(t, c.state(ingress).Round, stage2, "stage two: not certified within the design's covered stretch and a live run")
+		}
+		require.LessOrEqual(t, c.state(ingress).Round, freshDeadline, "stage two: the fresh request was never accepted")
+		time.Sleep(5 * time.Millisecond)
+	}
+	end := c.state(ingress).Round
+	t.Logf("fresh request accepted at round %d after R=%s (%d rounds), certified by round %d: %d rounds and %s, limit %d, %d sends; %d rounds after the stop in all", freshAt, resubmitDelay.Round(time.Millisecond), hold, end, end-freshAt, (time.Since(committedAt) - resubmitDelay).Round(time.Millisecond), stage2-freshAt, sends, end-start)
+	for _, name := range survivors {
+		require.False(t, m(name).recovery.InRecovery(), "%s entered state recovery with no missing certified state", name)
+	}
 }
 
 // On the production branch, the view-aware verifier: a request it refuses is neither sent nor held, and a valid one afterwards takes the slot.

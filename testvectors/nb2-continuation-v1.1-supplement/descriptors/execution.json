@@ -1,0 +1,10 @@
+{
+  "evm": "Cancun",
+  "rules": {
+    "Cargo.lock": "531f634b796749d43bc7a5906f67e563c97e1919b6b5192d68736388b4cdce92",
+    "crates/unicity/b1/src/lib.rs": "f16def6a5f84e9939a228d36c73aca19784760785d1eb0308eac2c9cf6cc70c3",
+    "crates/unicity/execution/src/evm_factory.rs": "22cc2c2a9b00390c9baf5978d419831a8a1f238361878ee3e100daadff2e8b27"
+  },
+  "standardSHA256": "0x0002",
+  "ureth": "47cf38736c9f09def5c8fc4dee8a7798ae3988dd"
+}

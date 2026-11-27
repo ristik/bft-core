@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/unicitynetwork/bft-core/evmroot"
 	rcnet "github.com/unicitynetwork/bft-core/network/protocol/abdrc"
@@ -33,8 +34,9 @@ type (
 		roundToNode map[uint64]*node
 		highQc      *abdrc.QuorumCert
 		blocksDB    PersistentStore
-		cuts        cutRing      // control cuts of recent commits, for the shards' authenticated record feed
-		log         *slog.Logger // optional: set by the BlockStore that owns the tree
+		cuts        cutRing                                     // control cuts of recent commits, for the shards' authenticated record feed
+		log         *slog.Logger                                // optional: set by the BlockStore that owns the tree
+		observed    *atomic.Pointer[basetypes.PartitionShardID] // the BlockStore's observed EVM shard: its certified blocks are queued at every commit (nil: none)
 		m           sync.RWMutex
 	}
 )
@@ -73,7 +75,19 @@ NewBlockTreeWithRootBlock creates BlockTree with given block as root node.
 Intended use-case is for recovery - acquire latest committed block and build on that state.
 */
 func NewBlockTreeWithRootBlock(block *ExecutedBlock, bDB PersistentStore) (*BlockTree, error) {
-	if err := bDB.WriteBlock(block, true); err != nil {
+	return newBlockTreeWithRootBlock(block, bDB, nil)
+}
+
+func newBlockTreeWithRootBlock(block *ExecutedBlock, bDB PersistentStore, obs []ObservationInput) (*BlockTree, error) {
+	var err error
+	if len(obs) == 0 {
+		err = bDB.WriteBlock(block, true)
+	} else if committer, ok := bDB.(BlockCommitter); ok {
+		err = committer.CommitBlock(block, nil, nil, obs)
+	} else {
+		return nil, refusedBeforeWrite{ErrNoAtomicObservationCommit}
+	}
+	if err != nil {
 		return nil, fmt.Errorf("block write failed: %w", err)
 	}
 	rootNode := newNode(block)
@@ -131,7 +145,7 @@ func NewBlockTree(bDB PersistentStore, orchestration Orchestration, networkProfi
 	}
 	if len(blocks) == 0 {
 		// must be system bootstrap - init tree with genesis block
-		genesisBlock, err := NewGenesisBlock(orchestration.NetworkID(), crypto.SHA256, profile)
+		genesisBlock, err := NewGenesisBlockOf(orchestration, crypto.SHA256, profile)
 		if err != nil {
 			return nil, fmt.Errorf("creating genesis block for empty DB: %w", err)
 		}
@@ -266,6 +280,19 @@ func (bt *BlockTree) Add(block *ExecutedBlock) error {
 // returns nil in case of failure, when a node is not found
 // otherwise it will return list of data stored in the path nodes, excluding the root data itself, so if
 // the root node is previous node then the list is empty
+// CommitPath is the blocks a commit QC commits, oldest first: every uncommitted block between the root and the block the QC commits,
+// that block last. Empty when nothing new would be committed.
+func (bt *BlockTree) CommitPath(commitQc *abdrc.QuorumCert) []*ExecutedBlock {
+	bt.m.RLock()
+	defer bt.m.RUnlock()
+	path := bt.findPathToRoot(commitQc.GetParentRound())
+	out := make([]*ExecutedBlock, 0, len(path))
+	for i := len(path) - 1; i >= 0; i-- {
+		out = append(out, path[i])
+	}
+	return out
+}
+
 func (bt *BlockTree) findPathToRoot(round uint64) []*ExecutedBlock {
 	n, f := bt.roundToNode[round]
 	if !f {
@@ -303,6 +330,24 @@ func (bt *BlockTree) Branch(round uint64) []*ExecutedBlock {
 	defer bt.m.Unlock()
 
 	return bt.findPathToRoot(round)
+}
+
+/*
+ChangeInProgress returns the input record of the pending change of shard key in the uncommitted blocks of the branch which ends
+with the block of the "round", or nil when none of them has one. The change sets are read under the tree lock: Commit merges the
+change sets of the committed path into the committing block's set in place, so a walk of Branch that reads them after the lock is
+released races with a commit (#1191).
+*/
+func (bt *BlockTree) ChangeInProgress(round uint64, key basetypes.PartitionShardID) *basetypes.InputRecord {
+	bt.m.RLock()
+	defer bt.m.RUnlock()
+
+	for _, b := range bt.findPathToRoot(round) {
+		if _, ok := b.ShardState.Changed[key]; ok {
+			return b.ShardState.States[key].IR
+		}
+	}
+	return nil
 }
 
 func (bt *BlockTree) allUncommittedNodes() []*ExecutedBlock {
@@ -440,7 +485,11 @@ func (bt *BlockTree) Commit(commitQc *abdrc.QuorumCert, logs ...*slog.Logger) ([
 	// before the block becomes the root and before any certificate it generated is visible: a crash leaves the prior state or the
 	// complete new one, and a repeat is idempotent. A block whose cut cannot be retained is not committed (persistence uncertain), so a
 	// certificate is never visible without the cut a shard needs to replay its origin.
-	if err := bt.persistCommit(commitNode.data, committedRecords(path)); err != nil {
+	var observed *basetypes.PartitionShardID
+	if bt.observed != nil {
+		observed = bt.observed.Load()
+	}
+	if err := bt.persistCommit(commitNode.data, committedRecords(path), observationsOf(path, observed)); err != nil {
 		return nil, persistenceUncertain(err)
 	}
 
@@ -451,7 +500,7 @@ func (bt *BlockTree) Commit(commitQc *abdrc.QuorumCert, logs ...*slog.Logger) ([
 
 // persistCommit stores the committed block with its records and cut. A store that can commit atomically does; one that cannot gets the
 // same three writes in the order that a crash repeats idempotently (records, cut, then the block that makes the commit visible).
-func (bt *BlockTree) persistCommit(block *ExecutedBlock, recs []rootrecords.Record) error {
+func (bt *BlockTree) persistCommit(block *ExecutedBlock, recs []rootrecords.Record, obs []ObservationInput) error {
 	cut, err := cutEntryOf(block)
 	if err != nil {
 		return err
@@ -467,10 +516,13 @@ func (bt *BlockTree) persistCommit(block *ExecutedBlock, recs []rootrecords.Reco
 		}
 	}
 	if committer, ok := bt.blocksDB.(BlockCommitter); ok {
-		if err := committer.CommitBlock(block, recs, cut); err != nil {
+		if err := committer.CommitBlock(block, recs, cut, obs); err != nil {
 			return err
 		}
 	} else {
+		if len(obs) > 0 {
+			return ErrNoAtomicObservationCommit
+		}
 		if len(recs) > 0 {
 			if err := bt.blocksDB.(RecordStore).AppendRecords(recs); err != nil {
 				return err
@@ -693,6 +745,16 @@ func checkpointOf(root *ExecutedBlock) (*rcnet.CommittedBlock, *basetypes.Unicit
 // the carrier, which is pruned everywhere) REFUSES with ErrHandoffRecord rather than serve the current root: a non-canonical copy served
 // once is retained by the bundle archive and served for good, and replicas then refuse the canonical one. The follower asks every root,
 // so another one, which did capture it, serves it. Only a store without checkpoint retention (tests) serves the current root.
+// CommittedHandoff is the handoff record the committed root holds in its committed phase, with the root's round; ok is false while the
+// root holds no committed record. It reads only the root's own control state, never the retained checkpoint: it is what tells the
+// manager that its own committed chain has ended its epoch (#1086), not the evidence of the activation.
+func (bt *BlockTree) CommittedHandoff() (record evmroot.OrderedHandoffRecord, round uint64, ok bool) {
+	bt.m.Lock()
+	defer bt.m.Unlock()
+	record, ok = committedRecord(bt.root.data)
+	return record, bt.root.data.GetRound(), ok
+}
+
 func (bt *BlockTree) HandoffCheckpoint() (*rcnet.CommittedBlock, *basetypes.UnicityTreeCertificate, evmroot.OrderedHandoffRecord, error) {
 	bt.m.Lock()
 	defer bt.m.Unlock()

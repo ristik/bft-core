@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"path/filepath"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
 
+	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
@@ -27,14 +29,15 @@ import (
 // the parent) so that the state messages it produces have the relationships between the block, the QCs, the shard
 // states and the committed root which a recovering node has to check.
 type testChain struct {
-	t       testing.TB
-	orch    *partitions.Orchestration
-	store   *BlockStore
-	nodes   map[types.PartitionID]*chainNode
-	highQc  *rctypes.QuorumCert
-	round   uint64
-	log     *slog.Logger
-	counter uint64
+	t            testing.TB
+	orch         *partitions.Orchestration
+	store        *BlockStore
+	nodes        map[types.PartitionID]*chainNode
+	highQc       *rctypes.QuorumCert
+	round        uint64
+	log          *slog.Logger
+	counter      uint64
+	certifiedEVM bool
 }
 
 // chainNode is the single validator of a test shard.
@@ -49,6 +52,8 @@ type chainShard struct {
 	key string
 	// epochs lists the root rounds at which the epochs 0, 1, ... of the shard start
 	epochStarts []uint64
+	// params are the partition parameters of every epoch's configuration (the proof configuration among them)
+	params map[string]string
 }
 
 func newTestChain(t testing.TB, shards ...chainShard) *testChain {
@@ -95,7 +100,7 @@ func newTestChainOn(t testing.TB, dir string, db PersistentStore, shards ...chai
 			require.NoError(t, orch.AddShardConfig(&types.PartitionDescriptionRecord{
 				Version: 1, NetworkID: 5, PartitionID: s.partition, PartitionTypeID: 1, ShardID: types.ShardID{},
 				UnitIDLen: 256, TypeIDLen: 32, T2Timeout: 2500 * time.Millisecond,
-				Validators: []*types.NodeInfo{node.info}, Epoch: uint64(epoch), EpochStart: start,
+				Validators: []*types.NodeInfo{node.info}, Epoch: uint64(epoch), EpochStart: start, PartitionParams: maps.Clone(s.params),
 			}))
 		}
 	}
@@ -166,6 +171,10 @@ func (c *testChain) propose(changed, timedOut []types.PartitionID) *rctypes.Quor
 			Hash: []byte{byte(c.counter), byte(p), 1}, BlockHash: []byte{byte(c.counter), 2}, SummaryValue: []byte{},
 			Timestamp: si.LastCR.UC.UnicitySeal.Timestamp, SumOfEarnedFees: 3,
 		}
+		if c.certifiedEVM {
+			ir.Hash = append(ir.Hash, make([]byte, 32-len(ir.Hash))...)
+			ir.BlockHash = append(ir.BlockHash, make([]byte, 32-len(ir.BlockHash))...)
+		}
 		bcr := &certification.BlockCertificationRequest{PartitionID: p, ShardID: types.ShardID{}, NodeID: c.nodes[p].info.NodeID, InputRecord: ir, BlockSize: 5, StateSize: 7}
 		require.NoError(c.t, bcr.Sign(c.nodes[p].signer))
 		payload.Requests = append(payload.Requests, &rctypes.IRChangeReq{Partition: p, CertReason: rctypes.Quorum, Requests: []*certification.BlockCertificationRequest{bcr}})
@@ -227,7 +236,27 @@ func Test_Chain_NormalRecoveryRoundTrip(t *testing.T) {
 	sm := received(t, c.state())
 	bs, _, err := c.recoverInto(sm)
 	require.NoError(t, err)
-	require.Equal(t, c.store.blockTree.root.data.RootHash, bs.blockTree.root.data.RootHash)
+	require.Equal(t, c.store.tree().root.data.RootHash, bs.tree().root.data.RootHash)
+}
+
+func TestRecoverFromStateKeepsTheRecordFetcher(t *testing.T) {
+	c := newTestChain(t, chainShard{partition: 1, epochStarts: []uint64{1}})
+	c.next()
+	c.next()
+	head := received(t, c.state()).CommittedHead
+	recs := chainOf(4)
+	fetcher := &sliceFetcher{recs: recs}
+	c.store.SetRecordFetcher(fetcher)
+	db := c.store.GetDB().(RecordStore)
+	require.NoError(t, db.AppendRecords(recs[:3]))
+
+	replacement, err := c.store.RecoverFromState(head)
+	require.NoError(t, err)
+	require.NoError(t, replacement.ensureRetainedPrefix(&evmroot.ControlState{Pos: stateOver(recs).Bytes()}))
+	require.Equal(t, 1, fetcher.calls)
+	retained, err := db.Records(0, len(recs))
+	require.NoError(t, err)
+	require.Equal(t, recs, retained)
 }
 
 // consistentHeadQCs returns the QC of the block and the commit QC which commits it, with the relationships the

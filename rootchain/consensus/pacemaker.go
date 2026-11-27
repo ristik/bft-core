@@ -46,6 +46,10 @@ type Pacemaker struct {
 	statusChan     chan paceMakerStatus
 	stopRoundClock context.CancelFunc
 
+	// roundEnded, when set, is told at the start of every round after the first which round just ended and whether this node sent a vote for
+	// a proposal and a timeout vote in it (VT-12: votes missed)
+	roundEnded func(round uint64, voted, timeoutVoted bool)
+
 	tracer   trace.Tracer
 	roundDur metric.Float64Histogram
 	roundCnt metric.Int64Counter
@@ -128,6 +132,26 @@ func (x *Pacemaker) Stop() {
 	x.stopRoundClock()
 }
 
+// Quiesce stops the round clock and returns the pacemaker to the state NewPacemaker leaves it in: no round, no QC or TC, no vote sent
+// and no vote collected, and no event pending. The in-process epoch switch (#1086) calls it on a stopped consensus loop, so that the
+// successor is started by Reset exactly as at a process start; nothing of the old epoch's round survives in it.
+func (x *Pacemaker) Quiesce() {
+	x.stopRoundClock()
+	x.stopRoundClock = func() { /* NOP until the next round starts */ }
+	select {
+	case <-x.statusChan:
+	default:
+	}
+	x.status.Store(uint32(pmsRoundNone))
+	x.lastQcToCommitRound = 0
+	x.lastRoundTC = nil
+	x.currentQC = nil
+	x.voteSent = nil
+	x.timeoutVote = nil
+	x.pendingVotes.Reset()
+	x.currentRound.Store(0)
+}
+
 func (x *Pacemaker) LastRoundTC() *types.TimeoutCert {
 	return x.lastRoundTC
 }
@@ -149,7 +173,12 @@ func (x *Pacemaker) GetVoted() *abdrc.VoteMsg {
 }
 
 // SetTimeoutVote - remember timeout vote sent in this view
+//
+// The vote is this node's own message: it is kept, sent again and looped back to this node as the same object. A vote read back from
+// storage (a restart, a recorded decision) was decoded, so its wire digest is dropped here, before the vote is shared: a receiver
+// taking it would write to an object other receivers and the network read (#1191).
 func (x *Pacemaker) SetTimeoutVote(vote *abdrc.TimeoutMsg) {
+	vote.TakeWireDigest()
 	if vote.Timeout.Round == x.currentRound.Load() {
 		x.timeoutVote = vote
 	}
@@ -190,8 +219,8 @@ func (x *Pacemaker) RegisterVote(vote *abdrc.VoteMsg, quorum QuorumInfo) (*types
 RegisterTimeoutVote registers time-out vote from root node (including vote from self) and tries to assemble
 a timeout quorum certificate for the round.
 */
-func (x *Pacemaker) RegisterTimeoutVote(ctx context.Context, vote *abdrc.TimeoutMsg, quorum QuorumInfo) (*types.TimeoutCert, error) {
-	tc, voteCnt, err := x.pendingVotes.InsertTimeoutVote(vote, quorum)
+func (x *Pacemaker) RegisterTimeoutVote(ctx context.Context, vote *abdrc.TimeoutMsg, quorum QuorumInfo, remember ...timeoutMemo) (*types.TimeoutCert, error) {
+	tc, voteCnt, err := x.pendingVotes.InsertTimeoutVote(vote, quorum, remember...)
 	if err != nil {
 		return nil, fmt.Errorf("inserting to pending votes: %w", err)
 	}
@@ -200,6 +229,11 @@ func (x *Pacemaker) RegisterTimeoutVote(ctx context.Context, vote *abdrc.Timeout
 		x.setState(ctx, pmsRoundTimeout)
 	}
 	return tc, nil
+}
+
+// VerifiedTimeoutHit: this exact timeout message was already verified and counted in the current round.
+func (x *Pacemaker) VerifiedTimeoutHit(author string, round, epoch uint64, digest [32]byte, ctx verifyContext) bool {
+	return x.pendingVotes.VerifiedTimeoutHit(author, round, epoch, digest, ctx)
 }
 
 // AdvanceRoundQC - trigger next round/view on quorum certificate
@@ -248,6 +282,9 @@ func (x *Pacemaker) startNewRound(ctx context.Context, round uint64) {
 
 	x.stopRoundClock()
 	start := time.Now()
+	if prev := x.currentRound.Load(); x.roundEnded != nil && prev != 0 && round > prev {
+		x.roundEnded(prev, x.voteSent != nil, x.timeoutVote != nil)
+	}
 	x.currentQC = nil
 	x.voteSent = nil
 	x.timeoutVote = nil

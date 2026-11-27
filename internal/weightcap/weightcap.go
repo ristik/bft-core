@@ -10,6 +10,9 @@ package weightcap
 // (it cannot exceed the total).
 const B uint64 = 1 << 16
 
-// MaxMembers is the largest committee the selector supports (the Q4 envelope). The coupled root/EVM format keeps its own, smaller limit
-// of 64 members; this one is the selector's own bound and is not a reason to widen that format.
-const MaxMembers = 100
+// MaxMembers is the largest committee the selector supports: 256 (owner §49), the native resource ceiling of the trust base entry. The
+// table of winner indices is a uint8, which holds the indices 0..255 exactly; more members would need another representation. The weight
+// bound B is unchanged, so the table stays at most B = 65,536 bytes and its construction at most MaxMembers*B comparisons (benchmarked in
+// rootchain/consensus/leader at 128 and 256 members, unit weights and the worst total). This bound is the selector's own: the B1 registry's
+// 16 members is a separate admission guard of a B1-enabled deployment.
+const MaxMembers = 256

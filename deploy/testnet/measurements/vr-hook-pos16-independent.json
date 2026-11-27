@@ -1,0 +1,46 @@
+{
+  "boundary": 19926739,
+  "caps": {
+    "adopt": 1000000,
+    "attach": 3000000,
+    "detach": 500000,
+    "elect": 7000000,
+    "gov": 1000000,
+    "output": 1500000,
+    "record": 2500000,
+    "resolved": 500000
+  },
+  "ceilings": {
+    "activations": 64,
+    "boundChanges": 16,
+    "boundPayload": 65536,
+    "changePayload": 16384,
+    "committee": 16,
+    "pendingChanges": 32
+  },
+  "combined": [
+    {
+      "name": "mixed-first",
+      "records": 16,
+      "reservation": 59903778
+    },
+    {
+      "name": "mixed-middle",
+      "records": 16,
+      "reservation": 59334934
+    },
+    {
+      "name": "mixed-last",
+      "records": 16,
+      "reservation": 58816704
+    }
+  ],
+  "elect": 11660689,
+  "h": 16,
+  "invariant": "vr-v1-single-live-output",
+  "moduleCodeHash": "0xeca125295d3ede3ceeab0e0de70f2372c6edd96f8487ec7f5d3500b9fedcb16f",
+  "records": 43607048,
+  "registry": "0xff00000000000000000000000000000000000003",
+  "registryCodeHash": "0xe1a8cc6bae5801ef7b2d9f87154fbe65094a428961cf1e082134dd12ec78f39a",
+  "source": "ureth tests/vr_hook.rs over testdata/vr-hook-pos.json sha256 0xa7b8d74e39eaefd20ee3076de567ab359ce018bb7287c1b068c154cfdf145759 (#1215 PoS compact, H = 16, cap-bounded hook fixture); module code hash 0xeca125295d3ede3ceeab0e0de70f2372c6edd96f8487ec7f5d3500b9fedcb16f supplied by VR_HOOK_MODULE_CODE_HASH (cap-bounded module paths)"
+}

@@ -6,9 +6,9 @@ import (
 	"crypto"
 	"encoding/json"
 	"fmt"
-	"github.com/unicitynetwork/bft-core/bridgeprofile"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -581,9 +581,12 @@ func TestTheUrethFlagsPinEveryHookTheProfileHashCommits(t *testing.T) {
 	plain := urethFlags(d.profile, plainHash)
 	require.NotContains(t, plain, "records-custody")
 	require.NotContains(t, plain, "election")
-	// the pool admits one transaction of the whole ordinary capacity carrying a maximal bridge envelope
+	// the pool admits one transaction of the whole ordinary capacity and a 4 MiB encoding (above the bridge's L_max)
 	require.Contains(t, plain, fmt.Sprintf("--txpool.max-tx-gas=%d", d.profile.OrdinaryCapacity))
-	require.Contains(t, plain, fmt.Sprintf("--txpool.max-tx-input-bytes=%d", 2*bridgeprofile.MaxEnvelopeBytes))
+	require.Contains(t, plain, fmt.Sprintf("--txpool.max-tx-input-bytes=%d", 4<<20))
+	// #1124: an explicit pool limit, at or above native bridge v2's L_max, set once
+	require.GreaterOrEqual(t, urethTxInputBytes, nb2LMaxBytes)
+	require.Equal(t, 1, strings.Count(plain, "--txpool.max-tx-input-bytes="))
 	// the records hook alone prints no election flags
 	records := p
 	records.ElectionContract, records.ElectGas = [20]byte{}, 0
@@ -628,7 +631,7 @@ func TestB1Genesis_AManifestCompilesIntoTheFreshB1Genesis(t *testing.T) {
 // (hooks included), so a change of the writer's format fails here before it can break the genesis verifier.
 func TestB1ProfileFileMatchesTheGenesisToolsGolden(t *testing.T) {
 	h := func(b byte, tail byte) (out [32]byte) { out[0], out[1], out[31] = b, b, tail; return }
-	p := b1state.Profile{Network: 3, RootGenesisID: h(0x29, 0x01), ExecutionChainID: 31337, RuntimeHash: h(0x28, 0x02), CompilerHash: h(0x2f, 0x03),
+	p := b1state.Profile{ExecutionRevision: b1state.CurrentExecutionRevision, Network: 3, RootGenesisID: h(0x29, 0x01), ExecutionChainID: 31337, RuntimeHash: h(0x28, 0x02), CompilerHash: h(0x2f, 0x03),
 		MaxEpochsPerUpdate: 2, DeltaEV: 16, DeltaHold: 17, SystemGas: 269547540, ForcedGas: 5, MaxGas: 276547540, OrdinaryCapacity: 7000000, RestGas: 1650000,
 		CompanionBytes: 1048576, OtherCompanionBytes: 65536, GenesisUCTime: 1700000000,
 		RecordsCustody: common.HexToAddress("0x0c0571"), HRecords: 8, HookRecordGas: 120000, ElectionContract: common.HexToAddress("0xe1ec7"), ElectGas: 4200000}

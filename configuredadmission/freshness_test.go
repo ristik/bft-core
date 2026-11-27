@@ -565,3 +565,20 @@ func TestFreshnessIsUnavailableWhenTheSigningConfigurationIsUnknown(t *testing.T
 	startFreshAdmission(t, context.Background(), *factory, id, f)
 	require.ErrorIs(t, f.Require(), ErrFreshnessUnavailable)
 }
+
+// #1050: a root-free follower's admission starts without ever asking a root quorum (its role gater would refuse every root), reports the
+// freshness unavailable until authenticated ordinary progress, and is ready from then on.
+func TestARootFreeFollowerNeverAsksARootQuorumAndIsReadyOnOrdinaryProgress(t *testing.T) {
+	chain, _, id, factory := newFreshnessFixture(t)
+	opener := &deadOpener{}
+	f := freshnessFor(chain, opener)
+	f.RootFree = func() bool { return true }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	startFreshAdmission(t, ctx, *factory, id, f)
+	time.Sleep(200 * time.Millisecond)
+	require.Zero(t, opener.calls.Load(), "no root is dialled")
+	require.ErrorIs(t, f.Require(), ErrFreshnessUnavailable)
+	f.noteOrdinary()
+	require.NoError(t, f.Require(), "authenticated ordinary progress makes it ready")
+}

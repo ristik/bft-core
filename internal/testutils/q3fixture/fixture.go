@@ -29,6 +29,7 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	"github.com/unicitynetwork/bft-core/rootchain/testutils"
 	"github.com/unicitynetwork/bft-core/utb"
+	"github.com/unicitynetwork/bft-core/vrschema"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
@@ -43,9 +44,11 @@ const (
 
 // Options shape the fixture. The zero value is the 6,1,1,1 activation at A*=7 with the old commit sealed at round 4.
 type Options struct {
+	// EVMT2 is the EVM shard's T2 timeout; zero keeps the fixture's 2.5 s. A test that needs a recovery path to finish well before a T2 repeat is eligible widens it.
+	EVMT2 time.Duration
 	// UTB makes the activation's protocol tuple the envelope-version-3 one (q3format.Q3ConfigUTB).
 	UTB             bool
-	Weights         []uint64 // successor weights in member order; four members
+	Weights         []uint64 // successor weights in member order; four members or more
 	CommitSealRound uint64   // the old committee's commit round (>= the ordered round 4)
 	SignedBy        int      // how many of the four old members sign the commit; default 3 (the unit threshold); fewer is a forgery
 	// After appends an activation to the given fixture's chain: its weighted committee commits this fixture's successor body
@@ -82,6 +85,43 @@ type Options struct {
 	WithRecoveryReceipts bool
 	// Params are extra partition parameters of the genesis configuration (the continuity budget, say).
 	Params map[string]string
+	// ExtraShards adds other shards to the certified state, each with its own validators. They take no part in the handoff: they are the
+	// load of a root that serves more than the EVM shard.
+	ExtraShards []ExtraShard
+	// LastLinkOnly keeps only this fixture's own link in its envelope (a chain longer than an envelope may carry, extended link by link
+	// through Runtime.BundleFor).
+	LastLinkOnly bool
+	// SourceState is the P85 source state (rootrecords.State bytes) the old checkpoint's control commits, so that installing the checkpoint
+	// needs the record log it names (storage.BlockStore.SetRecordFetcher); default none.
+	SourceState []byte
+	// ControlVR is the VR root state the old checkpoint's control commits (evmroot.ControlState.VR): a chain in VR mode, whose activation
+	// schedule a startup fence reads from the checkpoint; default none.
+	ControlVR []byte
+	// PeerEVM gives every EVM validator of the successor a real peer identity, as the production ingress subscribes a request's sender by its
+	// node id; otherwise a replaced member is named evm-N, which only a harness calling the manager directly can use.
+	PeerEVM bool
+	// NoJoiner keeps every old member in the successor and adds none: a re-weighting of the same committee (bft-core#1086: the default
+	// in-process switch, which a successor with a joiner does not take).
+	NoJoiner bool
+	// Registry makes a coupled handoff a validator-registry one (VT-06d/e): the committed candidate is the candidate v6 of the same
+	// fields with these RegistryChanges (verdicts as given) and a VR result id, and its digest is what the body binds. It is called with
+	// the fixture's extra shard configurations, so a change can name them. The link then carries no preimage (the history's readiness
+	// check decodes the evmassign candidate only); the bundle carries the v6 bytes.
+	Registry func(extra []*types.PartitionDescriptionRecord) []vrschema.RegistryChange
+	// V6 commits the coupled primary as a validator-registry candidate v6 (vrschema), the bytes a VR chain's body binds: the same fields,
+	// a SourceRef and no registry changes. Its digest, not its v5 view's, is the one every reader must hash (VT-05b, #1159).
+	V6 bool
+}
+
+// ExtraShard is a shard besides the EVM shard. A zero T2Timeout takes the EVM shard's.
+type ExtraShard struct {
+	Partition  types.PartitionID
+	Shard      types.ShardID
+	Validators int
+	T2Timeout  time.Duration
+	Params     map[string]string
+	// TypeID is the shard's partition type; zero keeps 8.
+	TypeID types.PartitionTypeID
 }
 
 // Fixture is one activation and everything that authenticates it.
@@ -103,6 +143,9 @@ type Fixture struct {
 	EnvelopeBytes   []byte
 	Snapshot        *abdrc.CommittedBlock
 	ShardConf       *types.PartitionDescriptionRecord
+	ExtraConfs      []*types.PartitionDescriptionRecord
+	ExtraSigners    map[string]abcrypto.Signer     // the validators of ExtraConfs by node id
+	ShardNodes      map[string]*testutils.TestNode // the shard validators with a real peer identity by node id, for a harness on a real transport
 	Claim           q3format.Claim
 	Candidate       []byte                            // the committed candidate preimage, with Options.Assignment
 	Successor       *types.PartitionDescriptionRecord // the EVM assignment it activates (before the activation round is set)
@@ -114,6 +157,7 @@ type Fixture struct {
 	BaseAssignment  [32]byte                 // its assignment hash
 	Authorization   *evmassign.Authorization // the recovery authorization the candidate carries
 	Prev            *Fixture                 // the first activation this one follows, with Options.After
+	History         *q3format.History        // the verified history through this activation, when it is a valid one
 	GenesisEVM      []*testutils.TestNode    // the EVM validators of the genesis configuration (K's EVM members, which the primary keeps three of)
 }
 
@@ -158,7 +202,7 @@ func New(t *testing.T, o Options) *Fixture {
 	if o.Frozen == nil {
 		o.Frozen = bytes.Repeat([]byte{5}, 32)
 	}
-	require.Len(t, o.Weights, 4)
+	require.GreaterOrEqual(t, len(o.Weights), 4)
 	f := &Fixture{FrozenParent: bytes.Clone(o.Frozen), CommitSealRound: o.CommitSealRound}
 	f.UTB = o.UTB || (o.After != nil && o.After.UTB) || (o.Chain != nil && o.Chain.UTB)
 	o.UTB = f.UTB
@@ -184,8 +228,11 @@ func New(t *testing.T, o Options) *Fixture {
 	bodyEpoch, aMin, activate, ordered := uint64(2), uint64(7), uint64(7), uint64(4)
 	hOld := f.NewHistory(t) // the verified history up to the committee that commits this handoff
 	if o.After != nil {
-		h, err := hOld.VerifyEnvelope(o.After.Envelope)
-		require.NoError(t, err, "the preceding activations must be valid")
+		h := o.After.History
+		if h == nil || !o.LastLinkOnly {
+			h, err = hOld.VerifyEnvelope(o.After.Envelope)
+			require.NoError(t, err, "the preceding activations must be valid")
+		}
 		hOld = h
 		tip := h.Tip()
 		oldCfg, err = h.Signing(tip.Epoch())
@@ -196,8 +243,17 @@ func New(t *testing.T, o Options) *Fixture {
 		f.Prev = o.After
 	}
 
-	f.NewNodes = append([]*testutils.TestNode(nil), f.OldNodes[:3]...)
-	f.NewNodes = append(f.NewNodes, testutils.NewTestNode(t))
+	stay := 3 // a primary of four replaces one member; a larger committee keeps all four and adds, as a joiner does (continuity needs more than 2/3 unchanged)
+	if len(o.Weights) > 4 {
+		stay = 4
+	}
+	if o.NoJoiner {
+		stay = min(len(f.OldNodes), len(o.Weights))
+	}
+	f.NewNodes = append([]*testutils.TestNode(nil), f.OldNodes[:stay]...)
+	for len(f.NewNodes) < len(o.Weights) {
+		f.NewNodes = append(f.NewNodes, testutils.NewTestNode(t))
+	}
 	if o.Recovery {
 		require.NotNil(t, o.After, "a recovery follows the primary it replaces")
 		require.NotNil(t, o.Installed, "a recovery replaces the primary's installed configuration")
@@ -237,8 +293,12 @@ func New(t *testing.T, o Options) *Fixture {
 	genesisEVM, validators := testutils.CreateTestNodes(t, 4)
 	// The fixture's primary replaces one of four members while the weights move from unit to the heavy member; the distance budget is
 	// widened so that these tests exercise installation and replay, not the budget (continuity has its own tests).
+	t2 := 2500 * time.Millisecond
+	if o.EVMT2 > 0 {
+		t2 = o.EVMT2
+	}
 	shardConf = &types.PartitionDescriptionRecord{Version: 1, NetworkID: Network, PartitionID: PartitionID, ShardID: types.ShardID{},
-		PartitionTypeID: 8, TypeIDLen: 8, UnitIDLen: 256, T2Timeout: 2500 * time.Millisecond, Validators: validators, Epoch: 0, EpochStart: 1,
+		PartitionTypeID: 8, TypeIDLen: 8, UnitIDLen: 256, T2Timeout: t2, Validators: validators, Epoch: 0, EpochStart: 1,
 		PartitionParams: map[string]string{storage.ParamContinuityMaxDist: "2/1"}}
 	maps.Copy(shardConf.PartitionParams, o.Params)
 	f.GenesisEVM = genesisEVM
@@ -250,6 +310,28 @@ func New(t *testing.T, o Options) *Fixture {
 		shardConf = o.Installed
 	}
 	f.ShardConf = shardConf
+	f.ExtraSigners = make(map[string]abcrypto.Signer)
+	if f.ShardNodes == nil {
+		f.ShardNodes = make(map[string]*testutils.TestNode)
+	}
+	for _, e := range o.ExtraShards {
+		nodes, infos := testutils.CreateTestNodes(t, e.Validators)
+		for _, n := range nodes {
+			f.ExtraSigners[n.PeerConf.ID.String()] = n.Signer
+			f.ShardNodes[n.PeerConf.ID.String()] = n
+		}
+		t2 := e.T2Timeout
+		if t2 == 0 {
+			t2 = shardConf.T2Timeout
+		}
+		typeID := e.TypeID
+		if typeID == 0 {
+			typeID = 8
+		}
+		conf := &types.PartitionDescriptionRecord{Version: 1, NetworkID: Network, PartitionID: e.Partition, ShardID: e.Shard,
+			PartitionTypeID: typeID, TypeIDLen: 8, UnitIDLen: 256, T2Timeout: t2, Validators: infos, Epoch: 0, EpochStart: 1, PartitionParams: e.Params}
+		f.ExtraConfs = append(f.ExtraConfs, conf)
+	}
 	if o.Assignment {
 		operator = f.assignment(t, o, oldID)
 	}
@@ -286,9 +368,16 @@ func New(t *testing.T, o Options) *Fixture {
 		PredecessorBodyID: oldID, NextBodyID: bodyID[:], SuccessorTRHash: trHash, Kind: "commit",
 		FrozenID: evmroot.D4FrozenID(bodyID[:], f.Evidence.Summary, f.Evidence.FrozenParent, f.Evidence.CandidateDigest, attempt, oldID)}
 	control := evmroot.ControlState{Network: Network, Epoch: oldEpoch, Attempt: attempt, OrderedRound: ordered, PredecessorBodyID: oldID, Phase: "committed",
-		RecordBytes: record.Bytes(), PreviousDigest: bytes.Repeat([]byte{4}, 32), FrozenParent: bytes.Clone(o.Frozen)}
+		RecordBytes: record.Bytes(), PreviousDigest: bytes.Repeat([]byte{4}, 32), FrozenParent: bytes.Clone(o.Frozen), Pos: bytes.Clone(o.SourceState), VR: bytes.Clone(o.ControlVR)}
 	key := types.PartitionShardID{PartitionID: PartitionID, ShardID: types.ShardID{}.Key()}
 	states := storage.ShardStates{States: map[types.PartitionShardID]*storage.ShardInfo{key: state}, Changed: storage.ShardSet{key: {}}, Control: &control}
+	for _, conf := range f.ExtraConfs {
+		extra, err := storage.NewShardInfo(conf, crypto.SHA256)
+		require.NoError(t, err)
+		extraKey := types.PartitionShardID{PartitionID: conf.PartitionID, ShardID: conf.ShardID.Key()}
+		states.States[extraKey] = extra
+		states.Changed[extraKey] = struct{}{}
+	}
 	tree, _, err := states.UnicityTree(crypto.SHA256)
 	require.NoError(t, err)
 	path, err := tree.Certificate(evmroot.D4ControlPartition)
@@ -346,12 +435,18 @@ func New(t *testing.T, o Options) *Fixture {
 	oldBlock := &storage.ExecutedBlock{HashAlgo: crypto.SHA256, RootHash: tree.RootHash(), ShardState: states}
 	certificates, err := oldBlock.GenerateCertificates(qc, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.NoError(t, err)
-	require.Len(t, certificates, 1)
+	require.Len(t, certificates, 1+len(o.ExtraShards))
 	shardInfo := abdrc.ShardInfo{Partition: PartitionID, Shard: types.ShardID{}, T2Timeout: state.T2Timeout, RootHash: state.RootHash,
 		PrevEpochStat: state.PrevEpochStat, Stat: state.Stat, PrevEpochFees: state.PrevEpochFees, Fees: state.Fees, IR: state.IR, IRTR: state.TR,
 		ShardConfHash: state.ShardConfHash, UC: &state.LastCR.UC, TR: &state.LastCR.Technical}
 	f.Snapshot = &abdrc.CommittedBlock{Block: &rctypes.BlockData{Version: rctypes.VersionHandoff, Epoch: oldEpoch, Round: o.CommitSealRound, Payload: &rctypes.Payload{Version: rctypes.VersionHandoff}},
 		ShardInfo: []abdrc.ShardInfo{shardInfo}, Control: &control, CommitQc: qc}
+	for _, conf := range f.ExtraConfs {
+		si := states.States[types.PartitionShardID{PartitionID: conf.PartitionID, ShardID: conf.ShardID.Key()}]
+		f.Snapshot.ShardInfo = append(f.Snapshot.ShardInfo, abdrc.ShardInfo{Partition: conf.PartitionID, Shard: conf.ShardID, T2Timeout: si.T2Timeout, RootHash: si.RootHash,
+			PrevEpochStat: si.PrevEpochStat, Stat: si.Stat, PrevEpochFees: si.PrevEpochFees, Fees: si.Fees, IR: si.IR, IRTR: si.TR,
+			ShardConfHash: si.ShardConfHash, UC: &si.LastCR.UC, TR: &si.LastCR.Technical})
+	}
 
 	ctx := q3format.ContextFor(body, attempt, [32]byte(f.Evidence.CandidateDigest))
 	for i, m := range f.Members {
@@ -364,6 +459,9 @@ func New(t *testing.T, o Options) *Fixture {
 	}
 	sort.Slice(f.Receipts, func(a, b int) bool { return f.Receipts[a].NodeID < f.Receipts[b].NodeID }) // the envelope orders them by node id
 	f.Link = q3format.Link{Body: body, Evidence: f.Evidence, Preimage: bytes.Clone(f.Candidate), Proof: f.ProofBytes, Receipts: f.Receipts}
+	if o.Registry != nil {
+		f.Link.Preimage = nil // a primary's link needs no preimage; the history's readiness check decodes the evmassign candidate only
+	}
 	threshold := oldTB.QuorumThreshold
 	var signed uint64
 	for _, n := range f.OldNodes[:o.SignedBy] {
@@ -382,10 +480,11 @@ func New(t *testing.T, o Options) *Fixture {
 		next, err := hOld.WithV3(f.Link)
 		require.NoError(t, err, "the fixture must be a valid activation")
 		f.Claim = next.Tip().Claim()
+		f.History = next
 	}
 	f.Link.Claim = f.Claim
 	f.Envelope = q3format.Envelope{RootInput: []byte{0xAB}, TargetParent: bytes.Clone(o.Frozen), Links: []q3format.Link{f.Link}}
-	if o.After != nil { // retain the whole lineage so the history rebuilds from the genesis alone
+	if o.After != nil && !o.LastLinkOnly { // retain the whole lineage so the history rebuilds from the genesis alone
 		f.Envelope.Links = append(append([]q3format.Link(nil), o.After.Envelope.Links...), f.Link)
 	}
 	f.EnvelopeBytes, err = f.Envelope.Encode()
@@ -423,14 +522,31 @@ func (f *Fixture) assignment(t *testing.T, o Options, oldID []byte) [32]byte {
 		}
 		if o.After == nil {
 			// a root member that stays keeps its EVM validator, so the primary differs from K by one replaced member only
-			if j := slices.IndexFunc(f.OldNodes[:3], func(n *testutils.TestNode) bool { return n.PeerConf.ID.String() == m.NodeID }); j >= 0 {
+			if j := slices.IndexFunc(f.OldNodes[:min(max(3, len(f.Members)-1), len(f.OldNodes))], func(n *testutils.TestNode) bool { return n.PeerConf.ID.String() == m.NodeID }); j >= 0 {
 				v := f.ShardConf.Validators[j]
 				kept := &types.NodeInfo{NodeID: v.NodeID, SigKey: bytes.Clone(v.SigKey), Stake: weight}
 				keys[i] = evmKey{f.GenesisEVM[j].Signer, kept}
 				validators[i] = keys[i].info
 				f.EVMSigners[kept.NodeID] = keys[i].signer
+				if f.ShardNodes == nil {
+					f.ShardNodes = make(map[string]*testutils.TestNode)
+				}
+				f.ShardNodes[kept.NodeID] = f.GenesisEVM[j]
 				continue
 			}
+		}
+		if o.PeerEVM {
+			node := testutils.NewTestNode(t)
+			info := node.NodeInfo(t)
+			info.Stake = weight
+			keys[i] = evmKey{node.Signer, info}
+			validators[i] = info
+			f.EVMSigners[info.NodeID] = node.Signer
+			if f.ShardNodes == nil {
+				f.ShardNodes = make(map[string]*testutils.TestNode)
+			}
+			f.ShardNodes[info.NodeID] = node
+			continue
 		}
 		signer, err := abcrypto.NewInMemorySecp256K1Signer()
 		require.NoError(t, err)
@@ -493,6 +609,28 @@ func (f *Fixture) assignment(t *testing.T, o Options, oldID []byte) [32]byte {
 		OldShardEpoch: f.ShardConf.Epoch, OldActiveHash: old[:], Assignment: raw, PoPs: pops, Bindings: bindings, Identities: f.Identities, Authorization: f.Authorization}
 	if o.MutateCandidate != nil {
 		o.MutateCandidate(&c)
+	}
+	if o.Registry != nil {
+		result := sha256.Sum256([]byte("q3fixture VR result"))
+		v6 := vrschema.CandidateV6{Version: vrschema.CandidateV6Version, Kind: c.Kind, Network: c.Network, Predecessor: c.Predecessor, Attempt: c.Attempt,
+			RootMembers: c.RootMembers, OldShardEpoch: c.OldShardEpoch, OldActiveHash: c.OldActiveHash, Assignment: c.Assignment, PoPs: c.PoPs,
+			Supersedes: c.Supersedes, Bindings: c.Bindings, Identities: c.Identities, Authorization: c.Authorization, ReplacedAssignment: c.ReplacedAssignment,
+			SourceRef: result[:], RegistryChanges: o.Registry(f.ExtraConfs)}
+		f.Candidate, err = v6.Encode()
+		require.NoError(t, err)
+		return sha256.Sum256(f.Candidate)
+	}
+	if o.V6 {
+		ref := bytes.Repeat([]byte{0x6e}, 32)
+		if c.Authorization != nil && len(c.Authorization.ResultID) == 32 {
+			ref = bytes.Clone(c.Authorization.ResultID)
+		}
+		f.Candidate, err = vrschema.CandidateV6{Version: vrschema.CandidateV6Version, Kind: c.Kind, Network: c.Network, Predecessor: c.Predecessor,
+			Attempt: c.Attempt, RootMembers: c.RootMembers, OldShardEpoch: c.OldShardEpoch, OldActiveHash: c.OldActiveHash, Assignment: c.Assignment,
+			PoPs: c.PoPs, Supersedes: c.Supersedes, Bindings: c.Bindings, Identities: c.Identities, Authorization: c.Authorization,
+			ReplacedAssignment: c.ReplacedAssignment, SourceRef: ref}.Encode()
+		require.NoError(t, err)
+		return sha256.Sum256(f.Candidate)
 	}
 	f.Candidate, err = c.Encode()
 	require.NoError(t, err)

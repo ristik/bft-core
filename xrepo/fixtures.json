@@ -2,7 +2,7 @@
   "format": "UNICITY_XREPO_FIXTURES/v1",
   "contracts": {
     "repo": "https://github.com/ristik/unicity-pos-contracts",
-    "commit": "be6e86fb2cbba828b3331822850f8af34bd0d0fd"
+    "commit": "9b02951640877d6b4054df2ab6fce307629d6e61"
   },
   "fixtures": [
     {"producer": "contracts", "contracts": "test/p85/fixtures/publication.json", "bftCore": ["evmassign/testdata/publication.json", "rootchain/evmstate/testdata/publication.json"],
@@ -27,6 +27,8 @@
      "pair": "pos-relayer genesis --out-contracts (genesis assignment id of the FULL configuration, identities) -> script/P85Genesis.s.sol (XRepoGenesis.t.sol)"},
     {"producer": "bft-core", "contracts": "test/p85/fixtures/evidence-digest-corpus-go-v1.json", "bftCore": ["s1ref/testdata/evidence-digest-corpus-v1.json"],
      "pair": "root vote/timeout evidence digests (VI, VH, PV, digest, signatures, seal data) -> RootVoteCbor, Evidence.submitEvidence (EvidenceDigest.t.sol reads the forge-shaped conversion script/evidence-corpus-convert.py writes, regenerated and diffed in CI)"},
+    {"producer": "bft-core", "contracts": "test/p85/fixtures/post-term-corpus-go-v1.json", "bftCore": ["s1ref/s1gen/testdata/post-term-corpus-go-v1.json"],
+     "pair": "native post-term seals (opaque PreviousHash, open-tip acceptance, A*/A*-1 boundary, frozen-root exemption), quorum subsets and strict signature verdicts -> Evidence.submitPostTermEvidence (PostTermCorpus.t.sol reads the forge-shaped conversion post-term-corpus-v1.json)"},
     {"producer": "bft-core", "contracts": "test/p85/fixtures/root-records-vectors.json", "bftCore": ["rootrecords/testdata/records-vectors.json"],
      "pair": "record envelope, ids, payload shapes, closure repeat/conflict cases -> AuthenticatedRecords.t.sol (digest words replaced there)"},
     {"producer": "bft-core", "contracts": "test/p85/fixtures/root-records-import-vectors.json", "bftCore": ["rootrecords/testdata/import-vectors.json"],
@@ -34,6 +36,14 @@
     {"producer": "bft-core", "contracts": "test/p85/fixtures/continuity-vectors.json", "bftCore": ["continuity/testdata/continuity-vectors.json"],
      "pair": "continuity checks -> Continuity.sol port"},
     {"producer": "bft-core", "contracts": "test/p85/fixtures/selection-vectors.json", "bftCore": ["continuity/testdata/selection-vectors.json"],
-     "pair": "committee selection -> Selection.sol port"}
+     "pair": "committee selection -> Selection.sol port"},
+    {"producer": "bft-core", "contracts": "test/vr/fixtures/encoding.json", "bftCore": ["testvectors/validator-registry/encoding.json"],
+     "pair": "validator registry schema v1 encodings (domains, digests, registration PoPs, change payloads, record words) -> VRSchemaVectors.t.sol"},
+    {"producer": "bft-core", "contracts": "test/vr/fixtures/MANIFEST.sha256", "bftCore": ["testvectors/validator-registry/MANIFEST.sha256"],
+     "pair": "the schema v1 vector manifest -> VRSchemaVectors.t.sol test_manifestPinsTheFixtures"},
+    {"producer": "bft-core", "contracts": "test/vr/fixtures/storage-flat.json", "bftCore": ["testvectors/validator-registry/storage-flat.json"],
+     "pair": "schema v1 VR and liability-holder slots and words (vrschema) -> VRSchemaStorage.t.sol typed ERC-7201 structs"},
+    {"producer": "contracts", "contracts": "test/vr/fixtures/storage-forge.json", "bftCore": ["testvectors/validator-registry/storage-forge.json"],
+     "pair": "the same storage written by the Solidity compiler (VRSchemaStorage.t.sol) -> vrschema TestForgeStorageIsTheGoLayout"}
   ]
 }

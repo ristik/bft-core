@@ -18,8 +18,9 @@ const (
 	// MaxTrustBaseUpdates bounds the signed trust-base entries attached to one response: the current UC signer epoch's successor, or the two entries a
 	// folded transition needs. Several missed epochs are fetched (GetTrustBase), never attached; the whole chain is never sent.
 	MaxTrustBaseUpdates = 2
-	// MaxTrustBaseUpdateBytes bounds one attached entry (the 16-member profile fits with room to spare).
-	MaxTrustBaseUpdateBytes = 64 << 10
+	// MaxTrustBaseUpdateBytes bounds one attached entry: 128 KiB (owner §49), the per-entry cap everywhere (the largest valid entry, 256 members with 128-byte
+	// ids and all 256 predecessor signatures, is 95,365 bytes). The frame limit below is derived from it.
+	MaxTrustBaseUpdateBytes = 128 << 10
 
 	// MaxCertificationResponseV3Frame is the limit for the CBOR payload (excluding the varint length prefix) of a V3 frame: the V2 limit plus the entries.
 	// Entries and signatures are never truncated to fit; the partition view is the only optional part and is omitted on its own size.
@@ -112,7 +113,16 @@ func (v3 CertificationResponseV3) MarshalCBOR() ([]byte, error) {
 		return nil, err
 	}
 	type wire CertificationResponseV3
-	return types.Cbor.Marshal(wire(v3))
+	data, err := types.Cbor.Marshal(wire(v3))
+	if err != nil {
+		return nil, err
+	}
+	// the send side of the frame limit the shards enforce on receive (#952): a payload above MaxCertificationResponseV3Frame (1 MiB + 2 x 128 KiB) would
+	// be refused by every receiver, so it is never produced
+	if len(data) > MaxCertificationResponseV3Frame {
+		return nil, fmt.Errorf("%w: payload of %d bytes exceeds the frame limit %d", ErrResponseV3, len(data), MaxCertificationResponseV3Frame)
+	}
+	return data, nil
 }
 
 // UnmarshalCBOR is strict where the format has meaning: exactly the four-element array, version 3, a view that is a definite-length byte string

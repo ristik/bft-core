@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
@@ -25,8 +24,9 @@ const (
 	BodyVersion = 3
 	bodyDomain  = "UNICITY_TRUSTBASE_V3"
 	toV3Domain  = "UNICITY_TRUSTBASE_TO_V3"
-	// MaxMembers bounds a body's member list at the existing assignment limit, so a coupled root/EVM set always fits.
-	MaxMembers = evmassign.MaxValidators
+	// MaxMembers bounds a body's member list: a native resource bound (owner §49), the trust base entry's 256. It is not the B1 registry's
+	// 16, which a B1-enabled deployment enforces separately at admission (evmassign.B1MaxValidators).
+	MaxMembers = 256
 	maxBodyLen = 64 << 10
 	maxText    = 64
 	maxField   = 64

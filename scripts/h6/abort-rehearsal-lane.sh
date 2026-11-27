@@ -7,14 +7,14 @@
 #   scripts/h6/abort-rehearsal-lane.sh --prep-only   # the whole preflight (tools, pins, the attested Ureth, a clean checkout, build/ubft) and --selftest; takes no lock
 #   H6_URETH_ATTESTED=<binary> H6_URETH_ATTESTED_SHA256=<digest> H6_URETH_ATTESTED_PROVENANCE=<briefs/builds/ureth-<commit> dir> scripts/h6/abort-rehearsal-lane.sh
 #
-# Evidence-grade only with the ATTESTED Ureth of the pin (H6_URETH_COMMIT, default d41d5310) and a clean checkout whose build/ubft is built from its HEAD.
+# Evidence-grade only with the ATTESTED Ureth of the pin (H6_URETH_COMMIT, default b8a50547) and a clean checkout whose build/ubft is built from its HEAD.
 set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
 source "$REPO_ROOT/scripts/lib/portable.sh"
 AGRE_ROOT=$(lane_agre_root)
 LOCK_SCRIPT=$(lane_lock_script)
-H6_URETH_COMMIT=${H6_URETH_COMMIT:-d41d5310329fb56ae288134a0261b234c16effc1}
+H6_URETH_COMMIT=${H6_URETH_COMMIT:-b8a50547b732b5ddaaf18c7aaef00b1e8ff77338}
 EVIDENCE_DIR=${H6_EVIDENCE_DIR:-$AGRE_ROOT/briefs/devnet-runs/h6-abort-$(date -u +%Y%m%dT%H%M%SZ)}
 pass() { printf 'PASS: %s\n' "$1"; }
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
@@ -49,6 +49,7 @@ selftest() {
   rm -rf "$tmp"
   pass "selftest: the steps file starts only with H6_LANE_LOCKED=1 and H6_ABORT_LANE=1 (five other flag combinations start nothing and define nothing)"
   grep -q 'H6_ABORT_LANE' scripts/reth-paired-devnet.sh && grep -q 'abort-rehearsal-steps.sh' scripts/reth-paired-devnet.sh || fail "selftest: the paired devnet does not select the rehearsal steps"
+  bash scripts/h6/test-h6-plan.sh || fail "selftest: H6 plan status and logging checks fail"
   python3 -m unittest discover -s scripts/h6 -p test_prepare_handoff.py >/dev/null 2>&1 || fail "selftest: the helper's checks fail (scripts/h6/test_prepare_handoff.py)"
   rm -rf scripts/h6/__pycache__
   pass "selftest: the helper's in-process checks pass"
@@ -70,7 +71,7 @@ selftest() {
     receipts+="${receipts:+,}$tmp/receipt-$i.json"
   done
   python3 scripts/h6/prepare-handoff.py --dry-run --old-trust-base "$tmp/trust-base-epoch1.json" --next-trust-base "$tmp/trust-base-epoch2.json" --receipts "$receipts" \
-    --root-rpc http://127.0.0.1:25866,http://127.0.0.1:25867,http://127.0.0.1:25868,http://127.0.0.1:25869 --out "$tmp/evidence" >"$tmp/dry.out" || { cat "$tmp/dry.out" >&2; rm -rf "$tmp"; fail "selftest: the helper dry run on real trust bases failed"; }
+    --root-rpc http://127.0.0.1:$((25866+${LANE_PORT_OFFSET:-0})),http://127.0.0.1:$((25867+${LANE_PORT_OFFSET:-0})),http://127.0.0.1:$((25868+${LANE_PORT_OFFSET:-0})),http://127.0.0.1:$((25869+${LANE_PORT_OFFSET:-0})) --out "$tmp/evidence" >"$tmp/dry.out" || { cat "$tmp/dry.out" >&2; rm -rf "$tmp"; fail "selftest: the helper dry run on real trust bases failed"; }
   [ ! -e "$tmp/evidence" ] || fail "selftest: the dry run created evidence"
   rm -rf "$tmp"
   pass "selftest: the helper dry run accepts real V3 trust bases and receipt files, and contacts no root"
@@ -97,11 +98,11 @@ preflight() {
   [ -z "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=no)" ] || missing+=("a clean checkout (uncommitted changes)")
   [ -x "$REPO_ROOT/build/ubft" ] || missing+=("build/ubft (make build)")
   if [ -x "$REPO_ROOT/build/ubft" ]; then
-    go version -m "$REPO_ROOT/build/ubft" | grep -q "vcs.revision=$(git -C "$REPO_ROOT" rev-parse HEAD)" || missing+=("build/ubft is not built from HEAD (make build)")
+    go version -m "$REPO_ROOT/build/ubft" | grep -q "vcs.revision=${LANE_PRODUCT_COMMIT:-$(git -C "$REPO_ROOT" rev-parse HEAD)}" || missing+=("build/ubft is not built from HEAD (make build)")
     go version -m "$REPO_ROOT/build/ubft" | grep -q 'vcs.modified=true' && missing+=("build/ubft was built from a modified tree")
   fi
   [ "${#missing[@]}" -eq 0 ] || { echo "FAIL: preflight: ${missing[*]}" >&2; exit 1; }
-  pass "preflight: tools, lock helper, the attested Ureth ($H6_URETH_COMMIT, sha256 verified, provenance agrees), a clean checkout and build/ubft built from HEAD"
+  pass "preflight: tools, lock helper, the attested Ureth ($H6_URETH_COMMIT, sha256 verified, provenance agrees), a clean checkout and build/ubft built from $([ -n "${LANE_PRODUCT_COMMIT:-}" ] && echo "the pinned product ${LANE_PRODUCT_COMMIT:0:10} (harness HEAD)" || echo HEAD)"
 }
 
 case "${1:-}" in
@@ -125,7 +126,7 @@ preflight
 cp -R "$H6_URETH_ATTESTED_PROVENANCE" "$EVIDENCE_DIR/ureth-provenance"
 printf 'RUN MODE: attested prebuilt Ureth %s sha256=%s commit=%s (provenance %s); everything else from this clean checkout (evidence run)\n' \
   "$H6_URETH_ATTESTED" "$H6_URETH_ATTESTED_SHA256" "$H6_URETH_COMMIT" "$H6_URETH_ATTESTED_PROVENANCE" | tee "$EVIDENCE_DIR/run-mode.txt"
-echo "bft-core head=$(git rev-parse HEAD) branch=$(git rev-parse --abbrev-ref HEAD) ureth=$H6_URETH_COMMIT ubft sha256=$(sha256 build/ubft)" | tee "$EVIDENCE_DIR/heads.txt"
+echo "bft-core head=${LANE_PRODUCT_COMMIT:-$(git rev-parse HEAD)}${LANE_PRODUCT_COMMIT:+ harness=$(git rev-parse HEAD)} branch=$(git rev-parse --abbrev-ref HEAD) ureth=$H6_URETH_COMMIT ubft sha256=$(sha256 build/ubft)" | tee "$EVIDENCE_DIR/heads.txt"
 
 # A signal to the lane stops the scenario child and waits for its own teardown, by the child's pid alone (an orphaned child keeps restarting nodes here).
 DEVNET_PIDFILE=

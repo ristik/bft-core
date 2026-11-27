@@ -7,19 +7,19 @@ func (g *gen) resources(seed string) {
 	const fam = "Gas/resources"
 	f := newFixture(seed, 4)
 	pre := f.pre()
-	cs := f.build("a", f.round, f.vals, false) // all four sign
+	cs := f.build("a", f.round, f.vals, true) // all four sign
 	u := cs.get(1, "")
 	g.ok("gas.4sigs.valid", fam, "four valid signatures: the reference charge", req(claimOf(u)), pre, "", &u.seal, nil)
 	last := u
 	last.seal.sigs = append([]entry{}, u.seal.sigs...)
 	n := len(last.seal.sigs) - 1
-	last.seal.sigs[n] = entry{last.seal.sigs[n].key, f.vals[0].sign([]byte("other"), false)}
-	g.ok("gas.4sigs.last-invalid", fam, "invalid last signature charges the same as the valid call", req(claimOf(last)), pre, "ErrSigInvalid", nil, nil)
+	last.seal.sigs[n] = entry{last.seal.sigs[n].key, f.vals[0].sign([]byte("other"), true)}
+	g.ok("gas.4sigs.last-invalid", fam, "invalid last signature (a zero-weight extra beside a 3-of-4 quorum): valid, charged the same as the all-valid call", req(claimOf(last)), pre, "", nil, nil)
 
 	// the per-epoch term is the 16-member ceiling whatever the entry's size: the same request shape against 1, 4 and 16 members
 	for _, members := range []int{1, 4, 16} {
 		fx := newFixture(fmt.Sprintf("%s/ceiling-%d", seed, members), members)
-		x := fx.build("a", fx.round, fx.vals, false).get(1, "")
+		x := fx.build("a", fx.round, fx.vals, true).get(1, "")
 		g.ok(fmt.Sprintf("price.epoch-ceiling.%d-members", members), fam, fmt.Sprintf("an epoch of %d members is charged at the 16-member ceiling", members),
 			req(claimOf(x)), fx.pre(), "", nil, nil)
 	}

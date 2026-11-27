@@ -2,10 +2,7 @@ package archive
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -125,45 +122,27 @@ func (s *Store) indexRecord(q Request, rec *Record) {
 	}
 }
 
+// buildRoundIndex reads every base record once, in either layout. A record held in both (a migration interrupted between its two steps) is
+// indexed once: the index is keyed by request.
 func (s *Store) buildRoundIndex() error {
-	entries, err := os.ReadDir(s.dir)
+	rounds := make(map[string]map[uint64][]Request)
+	receiptRounds := make(map[string]map[uint64][]Request)
+	s.rounds, s.receiptRounds = rounds, receiptRounds
+	err := StoredNames(s.dir, 1024, func(names []string) error {
+		for _, name := range names {
+			q, v2, err := StoredRequest(s.dir, name)
+			if err != nil {
+				continue
+			}
+			rec, err := s.getVersion(q, v2)
+			if err == nil {
+				s.indexRecord(q, rec)
+			}
+		}
+		return nil
+	})
 	if err != nil {
-		return err
+		s.rounds, s.receiptRounds = nil, nil
 	}
-	s.rounds = make(map[string]map[uint64][]Request)
-	s.receiptRounds = make(map[string]map[uint64][]Request)
-	for _, entry := range entries {
-		name := entry.Name()
-		v2 := strings.HasPrefix(name, "v2-")
-		if !entry.IsDir() || (!v2 && len(name) != 64) || (v2 && len(name) != 67) {
-			continue
-		}
-		manifest, err := readBounded(filepath.Join(s.dir, entry.Name(), "manifest"), 16<<10)
-		magic := archiveMagic(v2)
-		if err != nil || len(manifest) < 45 || !bytes.Equal(manifest[:8], []byte(magic)) {
-			continue
-		}
-		digest := sha256.Sum256(manifest[:len(manifest)-32])
-		if !bytes.Equal(digest[:], manifest[len(manifest)-32:]) {
-			continue
-		}
-		reader := bytes.NewReader(bytes.TrimPrefix(manifest[:len(manifest)-sha256.Size], []byte(magic)))
-		raw, err := readBytes(reader, MaxRequestBytes)
-		if err != nil {
-			continue
-		}
-		q, err := DecodeRequest(raw)
-		if err != nil {
-			continue
-		}
-		location, err := location(q, v2)
-		if err != nil || location != entry.Name() {
-			continue
-		}
-		rec, err := s.getVersion(q, v2)
-		if err == nil {
-			s.indexRecord(q, rec)
-		}
-	}
-	return nil
+	return err
 }

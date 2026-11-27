@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	libp2pnetwork "github.com/libp2p/go-libp2p/core/network"
 	libp2ppeer "github.com/libp2p/go-libp2p/core/peer"
 	"os"
 	"sort"
@@ -25,7 +26,6 @@ import (
 	"github.com/unicitynetwork/bft-core/b1paired"
 	"github.com/unicitynetwork/bft-core/b1registry"
 	"github.com/unicitynetwork/bft-core/b1state"
-	"github.com/unicitynetwork/bft-core/bridgeprofile"
 	"github.com/unicitynetwork/bft-core/q3active"
 	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/recordsfeed"
@@ -48,9 +48,12 @@ var (
 
 // b1ProfileFile is the JSON form of b1state.Profile: hashes are 0x-prefixed hex, never arrays of numbers.
 type b1ProfileFile struct {
-	Network             uint16      `json:"network"`
-	RootGenesisID       common.Hash `json:"rootGenesisId"`
-	ExecutionChainID    uint64      `json:"executionChainId"`
+	Network          uint16      `json:"network"`
+	RootGenesisID    common.Hash `json:"rootGenesisId"`
+	ExecutionChainID uint64      `json:"executionChainId"`
+	// ExecutionRevision is the execution revision (bft-core#1199): required, never omitted or defaulted. An absent field decodes to zero and is
+	// refused; an old binary's strict decoder refuses the unknown field, so a revision-carrying profile cannot be read by a pre-#1199 binary.
+	ExecutionRevision   uint64      `json:"executionRevision"`
 	RuntimeHash         common.Hash `json:"runtimeHash"`
 	CompilerHash        common.Hash `json:"compilerHash"`
 	MaxEpochsPerUpdate  uint64      `json:"maxEpochsPerUpdate"`
@@ -79,11 +82,15 @@ type b1ProfileFile struct {
 	HookMeasurement *b1state.HookMeasurement `json:"hookMeasurement,omitempty"`
 	// HookCaps are the deployed contracts' ceilings the hook measurement is taken at (the same values as ElectCaps when the election is pinned too).
 	HookCaps *b1state.ElectCaps `json:"hookCaps,omitempty"`
+	// VRHookMeasurement replaces the four P85 fields on a validator-registry generation (VT-14): the complete-path measurement both hooks
+	// on VR are pinned from (b1state.CheckVRHookGas). HookRecordGas is then the amortized encoding of the fixed H-record batch allowance,
+	// ceil(ceil(5 M_H/4)/H), and ElectGas ceil(5 E/4), both exactly; readB1Profile refuses anything else.
+	VRHookMeasurement *b1state.VRHookMeasurement `json:"vrHookMeasurement,omitempty"`
 }
 
 func (f b1ProfileFile) profile() b1state.Profile {
 	return b1state.Profile{
-		Network: f.Network, RootGenesisID: [32]byte(f.RootGenesisID), ExecutionChainID: f.ExecutionChainID,
+		Network: f.Network, RootGenesisID: [32]byte(f.RootGenesisID), ExecutionChainID: f.ExecutionChainID, ExecutionRevision: f.ExecutionRevision,
 		RuntimeHash: [32]byte(f.RuntimeHash), CompilerHash: [32]byte(f.CompilerHash),
 		MaxEpochsPerUpdate: f.MaxEpochsPerUpdate, DeltaEV: f.DeltaEV, DeltaHold: f.DeltaHold,
 		SystemGas: f.SystemGas, ForcedGas: f.ForcedGas, MaxGas: f.MaxGas, OrdinaryCapacity: f.OrdinaryCapacity,
@@ -112,7 +119,7 @@ func b1ProfileFileOf(p b1state.Profile) b1ProfileFile {
 	return b1ProfileFile{
 		RecordsCustody: addressPtr(p.RecordsCustody), HRecords: p.HRecords, HookRecordGas: p.HookRecordGas,
 		ElectionContract: addressPtr(p.ElectionContract), ElectGas: p.ElectGas,
-		Network: p.Network, RootGenesisID: common.Hash(p.RootGenesisID), ExecutionChainID: p.ExecutionChainID,
+		Network: p.Network, RootGenesisID: common.Hash(p.RootGenesisID), ExecutionChainID: p.ExecutionChainID, ExecutionRevision: p.ExecutionRevision,
 		RuntimeHash: common.Hash(p.RuntimeHash), CompilerHash: common.Hash(p.CompilerHash),
 		MaxEpochsPerUpdate: p.MaxEpochsPerUpdate, DeltaEV: p.DeltaEV, DeltaHold: p.DeltaHold,
 		SystemGas: p.SystemGas, ForcedGas: p.ForcedGas, MaxGas: p.MaxGas, OrdinaryCapacity: p.OrdinaryCapacity,
@@ -142,11 +149,21 @@ func readB1ProfileFile(path string) (b1state.Profile, b1ProfileFile, error) {
 		return b1state.Profile{}, b1ProfileFile{}, fmt.Errorf("decoding the b1 profile %q: trailing data", path)
 	}
 	p := f.profile()
-	if err := checkRecordedElectGas(f); err != nil {
+	// First, before any other check: a legacy or absent execution revision is a different network generation, not a malformed field.
+	if err := b1state.CheckExecutionRevision(p.ExecutionRevision); err != nil {
 		return b1state.Profile{}, b1ProfileFile{}, fmt.Errorf("%w: %v", ErrB1Profile, err)
 	}
-	if err := checkRecordedHookGas(f, p); err != nil {
-		return b1state.Profile{}, b1ProfileFile{}, fmt.Errorf("%w: %v", ErrB1Profile, err)
+	if f.VRHookMeasurement != nil {
+		if err := checkRecordedVRHookGas(f, p); err != nil {
+			return b1state.Profile{}, b1ProfileFile{}, fmt.Errorf("%w: %v", ErrB1Profile, err)
+		}
+	} else {
+		if err := checkRecordedElectGas(f); err != nil {
+			return b1state.Profile{}, b1ProfileFile{}, fmt.Errorf("%w: %v", ErrB1Profile, err)
+		}
+		if err := checkRecordedHookGas(f, p); err != nil {
+			return b1state.Profile{}, b1ProfileFile{}, fmt.Errorf("%w: %v", ErrB1Profile, err)
+		}
 	}
 	if err := b1registry.ValidateProfile(p); err != nil {
 		return b1state.Profile{}, b1ProfileFile{}, fmt.Errorf("%w: %v", ErrB1Profile, err)
@@ -156,6 +173,51 @@ func readB1ProfileFile(path string) (b1state.Profile, b1ProfileFile, error) {
 
 // checkRecordedElectGas refuses an election price that is not exactly the recorded measurement pinned with the margin, and a recorded
 // measurement without an election hook to price: the price is derived from a measurement, never a hand-typed constant.
+// checkRecordedVRHookGas is the profile-file rule of a VR generation: no P85 measurement beside the VR one, both hooks on the measured
+// registry, and the two prices exactly the ones the measurement pins (derived, never typed).
+func checkRecordedVRHookGas(f b1ProfileFile, p b1state.Profile) error {
+	m := *f.VRHookMeasurement
+	if f.HookMeasurement != nil || f.HookCaps != nil || f.ElectMeasurement != nil || f.ElectCaps != nil {
+		return errors.New("a VR hook measurement excludes the P85 hook and election measurements")
+	}
+	_, per, err := b1state.VRRecordsAllowance(m)
+	if err != nil {
+		return err
+	}
+	elect, err := b1state.PinElectGas(m.Elect)
+	if err != nil {
+		return err
+	}
+	if p.HookRecordGas != per || p.ElectGas != elect {
+		return fmt.Errorf("hookRecordGas %d and electGas %d are not the measurement's pins %d and %d", p.HookRecordGas, p.ElectGas, per, elect)
+	}
+	return b1state.CheckVRHookGas(p, m.RegistryCodeHash, m.ModuleCodeHash, m)
+}
+
+func readVRHookMeasurement(path string) (b1state.VRHookMeasurement, error) {
+	var m b1state.VRHookMeasurement
+	raw, err := os.ReadFile(path) // #nosec G304 -- operator-supplied measurement path
+	if err != nil {
+		return m, fmt.Errorf("reading the VR hook measurement %q: %w", path, err)
+	}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return m, fmt.Errorf("decoding the VR hook measurement %q: %w", path, err)
+	}
+	if err := m.Valid(); err != nil {
+		return m, fmt.Errorf("the VR hook measurement %q: %w", path, err)
+	}
+	return m, nil
+}
+
+// vrHooks are the hooks of a VR generation: both on VR, H the measured H, the prices the measurement pins.
+func vrHooks(m b1state.VRHookMeasurement) (b1Hooks, error) {
+	_, per, err := b1state.VRRecordsAllowance(m)
+	if err != nil {
+		return b1Hooks{}, err
+	}
+	return b1Hooks{RecordsCustody: m.Registry, HRecords: m.H, HookRecordGas: per, ElectionContract: m.Registry, VR: &m}, nil
+}
+
 func checkRecordedElectGas(f b1ProfileFile) error {
 	if f.ElectionContract == nil {
 		if f.ElectGas != 0 || f.ElectMeasurement != nil || f.ElectCaps != nil {
@@ -208,6 +270,10 @@ func checkRecordedHookGas(f b1ProfileFile, p b1state.Profile) error {
 // bindB1Profile checks that the profile is this deployment's: the root history, network and chain it names are the trust base's and the
 // shard configuration's. It returns the verified history the registry genesis and the Update admission are derived from.
 func bindB1Profile(p b1state.Profile, tb *types.RootTrustBaseV1, conf *types.PartitionDescriptionRecord) (*q3format.History, error) {
+	// The execution revision first (bft-core#1199): a profile of another generation is refused whatever else it binds.
+	if err := b1state.CheckExecutionRevision(p.ExecutionRevision); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrB1Profile, err)
+	}
 	h, err := q3format.NewHistory(tb)
 	if err != nil {
 		return nil, fmt.Errorf("%w: the root trust base has no verifiable history: %v", ErrB1Profile, err)
@@ -234,13 +300,23 @@ func deriveB1Profile(tb *types.RootTrustBaseV1, conf *types.PartitionDescription
 		return b1state.Profile{}, fmt.Errorf("shard conf has no chain_id partition param")
 	}
 	p := b1state.Profile{
-		Network: uint16(conf.NetworkID), RootGenesisID: h.Genesis(), ExecutionChainID: chainID,
+		Network: uint16(conf.NetworkID), RootGenesisID: h.Genesis(), ExecutionChainID: chainID, ExecutionRevision: b1state.CurrentExecutionRevision,
 		RuntimeHash: [32]byte(common.HexToHash(b1registry.CodeHashHex)), CompilerHash: b1registry.CompilerHash(),
 		MaxEpochsPerUpdate: maxEpochs, DeltaEV: deltaEV, DeltaHold: deltaHold,
 		RestGas: b1registry.MinRestGas(maxEpochs), CompanionBytes: 1 << 20, OtherCompanionBytes: 65536, OrdinaryCapacity: ordinaryCapacity, GenesisUCTime: genesisUCTime,
 	}
 	for _, h := range hooks {
 		p.RecordsCustody, p.HRecords, p.HookRecordGas = h.RecordsCustody, h.HRecords, h.HookRecordGas
+		if h.VR != nil {
+			p.ElectionContract = h.ElectionContract
+			if p.ElectGas, err = b1state.PinElectGas(h.VR.Elect); err != nil {
+				return b1state.Profile{}, err
+			}
+			if err := b1state.CheckVRHookGas(p, h.VR.RegistryCodeHash, h.VR.ModuleCodeHash, *h.VR); err != nil {
+				return b1state.Profile{}, err
+			}
+			continue
+		}
 		if p.HookEnabled() {
 			if h.HookMeasurement == nil || h.HookCaps == nil {
 				return b1state.Profile{}, errors.New("the records hook needs the cold measurement of its worst record (--hook-measurement) and the deployment caps (--elect-caps)")
@@ -264,7 +340,9 @@ func deriveB1Profile(tb *types.RootTrustBaseV1, conf *types.PartitionDescription
 	if p.SystemGas, err = p.RequiredSystemGas(); err != nil {
 		return b1state.Profile{}, err
 	}
-	p.MaxGas = p.SystemGas + p.OrdinaryCapacity
+	if p.MaxGas, err = b1state.MaxGasFor(p.SystemGas, p.ForcedGas, p.OrdinaryCapacity); err != nil {
+		return b1state.Profile{}, err
+	}
 	if err := b1registry.ValidateProfile(p); err != nil {
 		return b1state.Profile{}, err
 	}
@@ -281,6 +359,8 @@ type b1Hooks struct {
 	Caps             *b1state.ElectCaps
 	HookMeasurement  *b1state.HookMeasurement
 	HookCaps         *b1state.ElectCaps
+	// VR is the complete-path measurement of a VR generation (exclusive with the four P85 measurements).
+	VR *b1state.VRHookMeasurement
 }
 
 // readElectMeasurement reads a measurement file strictly.
@@ -507,7 +587,7 @@ other (V, L, C) is refused. Run it before genesis and whenever the contracts cha
 func engineAPIB1ProfileCmd(baseFlags *baseFlags) *cobra.Command {
 	var trustBasePath, out string
 	var maxEpochs, deltaEV, deltaHold, capacity, genesisUCTime uint64
-	var recordsCustody, electionContract, electMeasurementPath, electCapsFlag, hookMeasurementPath string
+	var recordsCustody, electionContract, electMeasurementPath, electCapsFlag, hookMeasurementPath, vrMeasurementPath string
 	var hRecords uint32
 	var hookRecordGas uint64
 	flags := &shardConfFlags{}
@@ -536,8 +616,19 @@ unicity-pos-contracts script/measure-elect.sh, and the profile file records the 
 			if err != nil {
 				return err
 			}
-			hooks, err := parseB1Hooks(recordsCustody, hRecords, hookRecordGas, electionContract, electMeasurementPath, electCapsFlag, hookMeasurementPath)
-			if err != nil {
+			var hooks b1Hooks
+			if vrMeasurementPath != "" {
+				if recordsCustody != "" || hRecords != 0 || hookRecordGas != 0 || electionContract != "" || electMeasurementPath != "" || electCapsFlag != "" || hookMeasurementPath != "" {
+					return errors.New("--vr-hook-measurement pins both hooks on VR by itself: it excludes the P85 hook and election flags")
+				}
+				m, err := readVRHookMeasurement(vrMeasurementPath)
+				if err != nil {
+					return err
+				}
+				if hooks, err = vrHooks(m); err != nil {
+					return err
+				}
+			} else if hooks, err = parseB1Hooks(recordsCustody, hRecords, hookRecordGas, electionContract, electMeasurementPath, electCapsFlag, hookMeasurementPath); err != nil {
 				return err
 			}
 			p, err := deriveB1Profile(tb, confs[0], maxEpochs, deltaEV, deltaHold, capacity, genesisUCTime, hooks)
@@ -547,6 +638,7 @@ unicity-pos-contracts script/measure-elect.sh, and the profile file records the 
 			file := b1ProfileFileOf(p)
 			file.ElectMeasurement, file.ElectCaps = hooks.Measurement, hooks.Caps
 			file.HookMeasurement, file.HookCaps = hooks.HookMeasurement, hooks.HookCaps
+			file.VRHookMeasurement = hooks.VR
 			enc, err := json.MarshalIndent(file, "", "  ")
 			if err != nil {
 				return err
@@ -576,6 +668,7 @@ unicity-pos-contracts script/measure-elect.sh, and the profile file records the 
 	cmd.Flags().StringVar(&electMeasurementPath, "elect-measurement", "", "the worst-case election measurement JSON from unicity-pos-contracts script/measure-elect.sh; pins ElectGas = ceil(gas x 1.25)")
 	cmd.Flags().StringVar(&hookMeasurementPath, "hook-measurement", "", "the cold measurement of the records hook's worst record: the JSON lines of unicity-pos-contracts script/measure-hook-gas.sh V L C at the deployment's caps (required with --records-custody); --hook-record-gas is refused below the largest figure x1.25")
 	cmd.Flags().StringVar(&electCapsFlag, "elect-caps", "", "vMax,lMax,nMax the contracts manifest is deployed with (limits.vMax, limits.lMax, election nMax); the measurement must be taken at exactly these caps. Devnet/testnet: 16,2,8")
+	cmd.Flags().StringVar(&vrMeasurementPath, "vr-hook-measurement", "", "a validator-registry generation (VT-14): the complete-path VR hook measurement (ureth tests/vr_hook.rs vr_hook_measurement); pins both hooks on VR with the fixed H-record batch allowance and ElectGas, and excludes the P85 hook flags")
 	cmd.Flags().Uint64Var(&genesisUCTime, "genesis-uc-time", 1000, "the pinned genesis UC time recorded in the registry (records.ucTime) before any import; a DEV value")
 	return cmd
 }
@@ -628,16 +721,45 @@ func newB1PairConfig(p b1state.Profile, rt *q3active.Runtime, ethURL string, tim
 	return &b1paired.Config{Profile: p, Authority: rt.B1Authority(), Proofs: b1ProofFetcher(registrywitness.NewHTTPCaller(ethURL, timeout))}, nil
 }
 
-// attachRecordsFeed gives the pair its authenticated route to the root's record log: one remote per root the node knows, asked in turn.
-// What a root serves is believed only after it verified against the unicity tree root of the certificate the pair holds, so the roots
-// are not trusted and any of them will do.
-func attachRecordsFeed(cfg *b1paired.Config, host recordsfeed.Libp2p, roots []libp2ppeer.AddrInfo) {
-	remotes := make([]recordsfeed.Remote, 0, len(roots))
+// attachRecordsFeed gives the pair its authenticated route to the root's record log: one remote per root the node knows, asked in turn,
+// then the mirrors (shard nodes serving the cuts and records they verified). A root-free follower that is not active asks the mirrors only.
+// What any source serves is believed only after it verified against the unicity tree root of the certificate the pair holds, so no source
+// is trusted and any of them will do.
+func attachRecordsFeed(cfg *b1paired.Config, host recordsfeed.Libp2p, roots []libp2ppeer.AddrInfo, role *rootFreeRole, cuts recordsfeed.CutStore, onPersistErr func(error)) error {
+	opener := recordsfeed.FromLibp2p(host)
+	remotes := make([]recordsfeed.Remote, 0, len(roots)+recordsMirrorSlots)
 	for _, r := range roots {
-		remotes = append(remotes, recordsfeed.P2PRemote{Opener: recordsfeed.FromLibp2p(host), Roots: []libp2ppeer.ID{r.ID}})
+		remotes = append(remotes, recordsfeed.RoleRemote{Opener: opener, Roots: []libp2ppeer.ID{r.ID}, NonActive: role.nonActive})
 	}
-	cfg.Records = recordsfeed.NewSource(remotes...)
+	for i := range recordsMirrorSlots {
+		remotes = append(remotes, recordsfeed.RoleRemote{Opener: opener, Mirrors: func() []libp2ppeer.ID {
+			if m := role.mirrorPeers(); i < len(m) {
+				return m[i : i+1]
+			}
+			return nil
+		}})
+	}
+	source := recordsfeed.NewSource(remotes...)
+	if cuts != nil {
+		// every verified cut and record is kept durably, for followers' historical recovery; a retained log that does not verify refuses
+		// startup, and a later retention failure is reported (the node then no longer promises historical availability)
+		if err := source.SetCutStore(cuts); err != nil {
+			return fmt.Errorf("restoring the retained root records: %w", err)
+		}
+		source.OnPersistError(onPersistErr)
+	}
+	cfg.Records = source
+	if host, ok := host.(interface {
+		RegisterProtocolHandler(string, libp2pnetwork.StreamHandler)
+	}); ok {
+		// this node mirrors what it verified to followers; the server bounds streams in total and per peer
+		host.RegisterProtocolHandler(recordsfeed.ProtocolID, recordsfeed.NewServer(source, func(libp2ppeer.ID) bool { return true }).Handler)
+	}
+	return nil
 }
+
+// recordsMirrorSlots is how many mirrors a records lookup tries, each as its own remote so that one serving a wrong chain is skipped.
+const recordsMirrorSlots = 6
 
 // b1IdentitiesFile is the genesis tool's identity document the vault deployment is checked against
 // (unicity-pos-contracts script/BridgeGenesisBinding.sol): every hash 0x-prefixed.
@@ -672,6 +794,25 @@ func newB1Identities(p b1state.Profile, evmGenesisHash common.Hash, words map[co
 		return nil, err
 	}
 	return append(enc, '\n'), nil
+}
+
+// checkB1FinalizedGenesis is the finalized-genesis rule of a B1 deployment over the genesis bytes themselves: registrygenesis.B1Origin
+// (the SealRegistry predeploy code and state, the chain id, the full PDR's seal_registry_genesis, the execution identity) and the
+// bootstrap snapshot of block 0. The VR genesis plan's verify uses it, so that the generator stays reachable only from the genesis and
+// B1 activation roles.
+func checkB1FinalizedGenesis(full *types.PartitionDescriptionRecord, p b1state.Profile, h *q3format.History, finalized []byte) error {
+	origin, err := registrygenesis.B1Origin(full, p, h, finalized, nil, registrygenesis.DefaultGenesisJSONLimits())
+	if err != nil {
+		return err
+	}
+	snap, err := registryproof.Verify(origin.ProofContext(), origin.BlockHash(), origin.Evidence())
+	if err != nil {
+		return err
+	}
+	if !snap.Valid() || !snap.Genesis() || snap.Number() != 0 || snap.StateRoot() != origin.StateRoot() {
+		return errors.New("the bootstrap snapshot is not block 0 of the finalized genesis")
+	}
+	return nil
 }
 
 // loadB1GenesisOrigin validates the finalized genesis of a B1 deployment against the full shard configuration, the profile and the trust
@@ -734,14 +875,21 @@ func validateB1RunFlags(flags *shardNodeRunFlags) error {
 	return nil
 }
 
-// urethTxInputBytes is the pool's per-transaction size bound for the paired ureth: twice the bridge's envelope bound
-// (bridgeprofile.MaxEnvelopeBytes), so a redemption at that bound with its Cfg and call framing is admitted. The stock 128 KiB
-// default would refuse it (owner section 36, briefs/b7-direct-uncapped-design.md section 1).
-const urethTxInputBytes = 2 * bridgeprofile.MaxEnvelopeBytes
+// urethTxInputBytes is the pool's per-transaction encoded-size bound for the paired ureth (--txpool.max-tx-input-bytes, 4 MiB), the
+// only place a generation sets it (bft-core#1124): ureth refuses a second --txpool.max-tx-input-bytes ("cannot be used multiple times"),
+// so a deployment must not add its own. It must stay at or above native bridge v2's L_max (nb2LMaxBytes, the wallets' pinned limit, which
+// the NB2 release manifest refuses a pool below); the stock 128 KiB default would not. The value is the one the protocol 6/7 bridge
+// derived from its envelope (twice 2 MiB), kept unchanged as an explicit limit when that bridge was removed (bft-core#1106); narrowing it
+// towards L_max, chosen together with the gateway's raw-transaction body bound, is a separate decision.
+const urethTxInputBytes = 4 << 20
+
+// nb2LMaxBytes is native bridge v2's L_max (524,288 encoded bytes, deploy/testnet/bridge/nb2/release_nb2.py L_MAX): the floor of
+// urethTxInputBytes.
+const nb2LMaxBytes = 512 << 10
 
 // urethFlags are the flags that pin the paired ureth to the profile: the B1 bindings, and every mandatory hook the profile (and so its
 // hash) commits to. A ureth started without a hook flag the hash commits to would run a different chain under the same hash. The
-// pool is aligned with the profile's capacity: a transaction may use the whole ordinary capacity and carry a maximal bridge envelope.
+// pool is aligned with the profile's capacity: a transaction may use the whole ordinary capacity and a 4 MiB encoding (urethTxInputBytes).
 func urethFlags(p b1state.Profile, hash [32]byte) string {
 	s := fmt.Sprintf("--unicity.network-id=%d --unicity.root-genesis-id=%s --unicity.chain-id=%d --unicity.profile-hash=%s --unicity.max-epochs-per-update=%d --unicity.max-gas=%d --unicity.system-gas=%d --txpool.max-tx-gas=%d --txpool.max-tx-input-bytes=%d",
 		p.Network, hexutil.Encode(p.RootGenesisID[:]), p.ExecutionChainID, hexutil.Encode(hash[:]), p.MaxEpochsPerUpdate, p.MaxGas, p.SystemGas, p.OrdinaryCapacity, urethTxInputBytes)

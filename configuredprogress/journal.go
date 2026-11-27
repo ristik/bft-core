@@ -356,6 +356,7 @@ func (s *Store) PutHistoricalCertifiedJournalCandidate(ctx context.Context, c Co
 
 func (s *Store) putJournalCandidate(ctx context.Context, c Context, limits JournalLimits, v JournalCandidate, historical bool,
 	resultUC *types.UnicityCertificate, resultTR *certification.TechnicalRecord) error {
+	fp := s.frontierP()
 	if !s.journal {
 		return fmt.Errorf("%w: journal not enabled", ErrSettings)
 	}
@@ -413,8 +414,8 @@ func (s *Store) putJournalCandidate(ctx context.Context, c Context, limits Journ
 		if err := readJournalMeta(b, state.i.descriptorDigest, limits); err != nil {
 			return err
 		}
-		if s.frontier != nil {
-			frontierImage, e := readFrontier(b, state.i.descriptorDigest, *s.frontier)
+		if fp != nil {
+			frontierImage, e := readFrontier(b, state.i.descriptorDigest, *fp)
 			if e != nil {
 				return e
 			}
@@ -441,7 +442,9 @@ func (s *Store) putJournalCandidate(ctx context.Context, c Context, limits Journ
 				if len(prior.ResultingUC) != 0 || len(prior.ResultingTR) != 0 {
 					return ErrUntrusted
 				}
-				if resultUC == nil {
+				// Local proposals become certified in the observation transaction.
+				// Recovery may fetch their result before that transaction can commit.
+				if resultUC == nil || prior.LocallyBuilt {
 					w.Status, w.ResultingUC, w.ResultingTR = prior.Status, nil, nil
 				}
 			case 1:
@@ -558,6 +561,20 @@ func (s *Store) putJournalCandidate(ctx context.Context, c Context, limits Journ
 				return e
 			}
 		}
+		var durableUC *types.UnicityCertificate
+		var durableTR *certification.TechnicalRecord
+		if state.i.observed != nil {
+			durableUC, durableTR = state.i.observed.observation.Certificate(), state.i.observed.observation.TechnicalRecord()
+		}
+		// A local proposal for a round the root has closed (below the durable TR round) and that is not the round of the durable certified input
+		// record can never be certified, and it may stand in for a dead local proposal that evictDeadCandidates removed for the same
+		// authorization: every evicted round r has IR.RoundNumber < r < TR.Round at eviction, and since the root accepts no request for r after
+		// that, no later durable certificate has IR.RoundNumber == r. Declining it keeps the one-local-proposal-per-authorization rule across
+		// eviction (bft-core#1019).
+		if v.LocallyBuilt && !historical && w.Status == 0 && durableUC != nil && durableUC.InputRecord != nil && v.Round < durableTR.Round && v.Round != durableUC.InputRecord.RoundNumber {
+			return fmt.Errorf("%w: %w: local proposal for round %d is in a round the durable certificate closed (certified round %d, next round %d); refusing publication",
+				ErrConflict, ErrLocalProposalConflict, v.Round, durableUC.InputRecord.RoundNumber, durableTR.Round)
+		}
 		raw, err := encodeCandidate(w)
 		if err != nil {
 			return err
@@ -565,6 +582,18 @@ func (s *Store) putJournalCandidate(ctx context.Context, c Context, limits Journ
 		count, observed, n, err := journalCount(b)
 		if err != nil {
 			return err
+		}
+		if (count >= limits.Candidates || n+int64(len(key)+len(raw)) > limits.Bytes) && durableUC != nil {
+			// At the bound, first free the uncertified candidates the durable certificate proves dead (bft-core#1019).
+			evicted, e := evictDeadCandidates(b, durableUC, durableTR)
+			if e != nil {
+				return e
+			}
+			if evicted > 0 {
+				if count, observed, n, err = journalCount(b); err != nil {
+					return err
+				}
+			}
 		}
 		if count >= limits.Candidates || observed > limits.Observations || n+int64(len(key)+len(raw)) > limits.Bytes {
 			return journalFull(limits, int64(len(key)+len(raw)))
@@ -668,6 +697,31 @@ func (s *Store) appendJournalObservation(tx *bolt.Tx, pair *verifiedPair, dd [32
 	count, observed, n, err := journalCount(b)
 	if err != nil {
 		return err
+	}
+	// Every committed certificate frees the uncertified candidates it proves dead (bft-core#1019, rule 1), not only at the bound: once a
+	// certificate of the stuck height is admitted no single certificate can prove them dead any more, so candidates left for later could
+	// only be freed by the frontier, which cannot pass the stuck height on a node that must first catch up to it. Their authorizing
+	// observations become evictable with them.
+	evicted, err := evictDeadCandidates(b, uc, tr)
+	if err != nil {
+		return err
+	}
+	superseded := 0
+	if observed >= limits.Observations || n+int64(len(key)+len(raw)) > limits.Bytes {
+		// At the observation bound, also free the earlier repeats of the same certified input record (rule 2). Their supersession does not
+		// depend on progress, so it can wait for the bound (or for EvictSuperseded, which a catch-up calls before it checks for room).
+		irBytes, e := canonicalIR(uc)
+		if e != nil {
+			return e
+		}
+		if superseded, e = evictSupersededObservations(b, key, uc.GetRootEpoch(), w.RootRound, !w.Unresolved, target, irBytes); e != nil {
+			return e
+		}
+	}
+	if evicted+superseded > 0 {
+		if count, observed, n, err = journalCount(b); err != nil {
+			return err
+		}
 	}
 	if count > limits.Candidates || observed >= limits.Observations || n+int64(len(key)+len(raw)) > limits.Bytes {
 		return journalFull(limits, int64(len(key)+len(raw)))
@@ -830,6 +884,7 @@ func (s *Store) loadJournalFull(ctx context.Context, c Context, limits JournalLi
 }
 
 func (s *Store) loadJournalOnce(ctx context.Context, c Context, limits JournalLimits, useMemo bool) (JournalSnapshot, ProgressToken, journalStamp, bool, error) {
+	fp := s.frontierP()
 	loadStart := time.Now()
 	state, token, err := s.load(ctx, c, useMemo)
 	if err == nil && useMemo {
@@ -855,8 +910,8 @@ func (s *Store) loadJournalOnce(ctx context.Context, c Context, limits JournalLi
 			return err
 		}
 		var anchorUC *types.UnicityCertificate
-		if s.frontier != nil {
-			frontierImage, e := readFrontier(b, state.i.descriptorDigest, *s.frontier)
+		if fp != nil {
+			frontierImage, e := readFrontier(b, state.i.descriptorDigest, *fp)
 			if e != nil {
 				return e
 			}
@@ -1019,12 +1074,15 @@ func (s *Store) loadJournalOnce(ctx context.Context, c Context, limits JournalLi
 			if anchorUC != nil && candidate.Candidate.AuthorizingUC.GetRootEpoch() == anchorUC.GetRootEpoch() && candidate.Candidate.AuthorizingUC.GetRootRoundNumber() == anchorUC.GetRootRoundNumber() && candidate.Candidate.AuthorizingUC.GetRoundNumber() == anchorUC.GetRoundNumber() {
 				foundAuthorization = true
 			}
-			if anchorUC != nil && candidate.Certified && candidate.ResultingUC.GetRootEpoch() == anchorUC.GetRootEpoch() && candidate.ResultingUC.GetRootRoundNumber() == anchorUC.GetRootRoundNumber() && candidate.ResultingUC.GetRoundNumber() == anchorUC.GetRoundNumber() && bytes.Equal(candidate.Candidate.Hash, anchorUC.InputRecord.BlockHash) {
+			// The pair a coverage is committed against is the one the ARCHIVE representation carries: the selected pair if a selection was made (bft-core#876, checkCoveredCandidate),
+			// else the association. Comparing the association alone makes a covered, selected block fail here once its observations are pruned (bft-core#991).
+			archiveUC, archiveTR := candidate.ArchiveResult()
+			if anchorUC != nil && candidate.Certified && archiveUC.GetRootEpoch() == anchorUC.GetRootEpoch() && archiveUC.GetRootRoundNumber() == anchorUC.GetRootRoundNumber() && archiveUC.GetRoundNumber() == anchorUC.GetRoundNumber() && bytes.Equal(candidate.Candidate.Hash, anchorUC.InputRecord.BlockHash) {
 				// Pruning removes the anchor body's authorizing observation while
 				// retaining the body itself. The frontier transaction checked the
 				// exact original and resulting pairs against this candidate.
 				originalUC, originalTR, originalErr := pairBytes(candidate.Candidate.AuthorizingUC, candidate.Candidate.AuthorizingTR)
-				resultUC, resultTR, resultErr := pairBytes(candidate.ResultingUC, candidate.ResultingTR)
+				resultUC, resultTR, resultErr := pairBytes(archiveUC, archiveTR)
 				if originalErr == nil && resultErr == nil &&
 					bytes.Equal(originalUC, out.Frontier.Record.OriginalUC) && bytes.Equal(originalTR, out.Frontier.Record.OriginalTR) &&
 					bytes.Equal(resultUC, out.Frontier.Record.ResultingUC) && bytes.Equal(resultTR, out.Frontier.Record.ResultingTR) {
@@ -1038,18 +1096,31 @@ func (s *Store) loadJournalOnce(ctx context.Context, c Context, limits JournalLi
 				// with the frontier after checking this exact candidate and both
 				// replica acknowledgments. Recheck every certified coordinate.
 				if raw := b.Get(coverageKey(candidate.Candidate.Number)); raw != nil {
-					covered, e := frontier.DecodeMigrating(raw, *s.frontier)
-					if e == nil && covered.Height == candidate.Candidate.Number && (covered.Epoch == candidate.ResultingUC.GetRootEpoch() || covered.Epoch == 0 && candidate.ResultingUC.GetRootEpoch() == c.Observation.RootEpoch) && covered.Round == candidate.ResultingUC.GetRootRoundNumber() &&
+					covered, e := frontier.DecodeMigrating(raw, *fp)
+					if e == nil && covered.Height == candidate.Candidate.Number && (covered.Epoch == archiveUC.GetRootEpoch() || covered.Epoch == 0 && archiveUC.GetRootEpoch() == c.Observation.RootEpoch) && covered.Round == archiveUC.GetRootRoundNumber() &&
 						covered.Sequence < out.Frontier.Anchor.Sequence && bytes.Equal(covered.Subject.BlockHash[:], candidate.Candidate.Hash) &&
 						bytes.Equal(covered.StateRoot[:], candidate.Candidate.StateRoot) {
 						foundResult = true
 					}
 				}
 			}
-			// A returning follower may retain a later proposal before it has
-			// fetched the authorizing certificate's own body/observation. The
-			// pair above was independently authenticated; only locally built
-			// proposals require it to have been observed here already.
+			// Historical recovery persists a peer body and its authenticated
+			// result before committing or backfilling the observation. A crash
+			// or handoff can interrupt that interval. The candidate's own
+			// result still certifies its body, but must not advance progress
+			// or synthesize an observation on load.
+			if !foundResult && !candidate.Candidate.LocallyBuilt {
+				auth, result := candidate.Candidate.AuthorizingUC, candidate.ResultingUC
+				if rootinput.CheckEpochCertificates(auth, result) != nil ||
+					!rootPositionLater(result.GetRootEpoch(), result.GetRootRoundNumber(), auth.GetRootEpoch(), auth.GetRootRoundNumber()) {
+					return fmt.Errorf("%w: detached result does not follow its authorization: height=%d round=%d",
+						ErrConflict, candidate.Candidate.Number, candidate.Candidate.Round)
+				}
+				foundResult = true
+			}
+			// A peer candidate can also arrive before the observation for its
+			// authenticated authorization. Local proposals still need their
+			// authorizing observation and a result observation or coverage.
 			if candidate.Candidate.LocallyBuilt && !foundAuthorization || !foundResult {
 				anchorHeight, anchorRound := uint64(0), uint64(0)
 				if out.Frontier != nil {

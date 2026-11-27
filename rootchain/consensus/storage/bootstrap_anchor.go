@@ -39,7 +39,7 @@ func (x *BlockStore) InstallEpochAnchor(head *abdrc.CommittedBlock, v evmroot.Ve
 	}
 	x.lock.Lock()
 	defer x.lock.Unlock()
-	current := x.blockTree.Root()
+	current := x.tree().Root()
 	if current.BlockData.Epoch >= a.Epoch {
 		if isEpochAnchorRoot(current) && bytes.Equal(current.BlockData.Anchor.GenesisID, a.GenesisID) {
 			return a, nil
@@ -79,25 +79,26 @@ func (x *BlockStore) InstallEpochAnchor(head *abdrc.CommittedBlock, v evmroot.Ve
 	}
 	root := newNode(oldRoot)
 	tree := &BlockTree{root: root, roundToNode: map[uint64]*node{a.Slot: root}, blocksDB: x.storage}
-	x.blockTree = tree
+	tree.observed = &x.observed
+	x.treeRef.Store(tree)
 	return a, nil
 }
 
 func (x *BlockStore) RootAnchor() *rctypes.EpochAnchor {
-	root := x.blockTree.Root()
+	root := x.tree().Root()
 	if isEpochAnchorRoot(root) {
 		return root.BlockData.Anchor
 	}
 	return nil
 }
 
-func (x *BlockStore) RootEpoch() uint64 { return x.blockTree.Root().BlockData.Epoch }
+func (x *BlockStore) RootEpoch() uint64 { return x.tree().Root().BlockData.Epoch }
 
 // anchoredCommit returns the installed anchor root's committed record and the
 // frozen EVM shard H names, with the retained candidate preimage when H changes the
 // assignment.
 func (x *BlockStore) anchoredCommit() (*ExecutedBlock, evmroot.OrderedHandoffRecord, *ShardInfo, []byte, error) {
-	root := x.blockTree.Root()
+	root := x.tree().Root()
 	if !isEpochAnchorRoot(root) || root.ShardState.Control == nil {
 		return nil, evmroot.OrderedHandoffRecord{}, nil, nil, rctypes.ErrEpochAnchor
 	}
@@ -129,7 +130,7 @@ func (x *BlockStore) anchoredCommit() (*ExecutedBlock, evmroot.OrderedHandoffRec
 func (x *BlockStore) AnchoredTechnicalRecord(hash []byte) (certification.TechnicalRecord, error) {
 	x.lock.RLock()
 	defer x.lock.RUnlock()
-	root := x.blockTree.Root()
+	root := x.tree().Root()
 	if !isEpochAnchorRoot(root) || len(hash) != 32 {
 		return certification.TechnicalRecord{}, rctypes.ErrEpochAnchor
 	}
@@ -202,7 +203,7 @@ func (x *BlockStore) AnchoredFrozenParent(trHash, parent []byte) error {
 	}
 	x.lock.RLock()
 	defer x.lock.RUnlock()
-	root := x.blockTree.Root()
+	root := x.tree().Root()
 	if !isEpochAnchorRoot(root) {
 		return rctypes.ErrEpochAnchor
 	}
@@ -243,7 +244,7 @@ func (x *BlockStore) VerifyRecoveryAnchor(head *abdrc.CommittedBlock) error {
 		!bytes.Equal(installed.GenesisID, head.Anchor.GenesisID) || !bytes.Equal(installed.StateRoot, head.Anchor.StateRoot) {
 		return rctypes.ErrEpochAnchor
 	}
-	root := x.blockTree.Root()
+	root := x.tree().Root()
 	// The peer cannot replace the locally installed checkpoint time floor.
 	if head.Block == nil || head.Block.Timestamp != root.BlockData.Timestamp {
 		return rctypes.ErrEpochAnchor
@@ -292,14 +293,15 @@ func (x *BlockStore) NewFromAnchorState(head *abdrc.CommittedBlock) (*BlockStore
 	if err != nil {
 		return nil, err
 	}
-	return &BlockStore{hash: x.hash, blockTree: tree, storage: x.storage,
-		orchestration: x.orchestration, profile: x.profile, log: x.log}, nil
+	return withTree(&BlockStore{hash: x.hash, storage: x.storage,
+		orchestration: x.orchestration, profile: x.profile, log: x.log, prefixSource: x.recordFetcher()}, tree), nil
 }
 
 // RetainHandoffArtifacts stores the successor body and, for an EVM assignment,
 // the candidate preimage a peer's handoff bundle carried, so a root that did not
 // order the freeze can derive the same configuration. Different bytes under the
-// same body id are refused.
+// same body id are refused. A VR handoff's candidate v6 is stored as its Freeze v5
+// retains it (the v5 view and the v6 bytes).
 func (x *BlockStore) RetainHandoffArtifacts(bodyID, body, preimage []byte) error {
 	if archive, ok := x.storage.(interface{ StoreHandoffBody([]byte, []byte) error }); ok && len(body) != 0 {
 		if err := archive.StoreHandoffBody(bodyID, body); err != nil {
@@ -313,7 +315,21 @@ func (x *BlockStore) RetainHandoffArtifacts(bodyID, body, preimage []byte) error
 	if !ok {
 		return ErrAssignmentHistory
 	}
-	return archive.StoreHandoffCandidate(bodyID, preimage)
+	cc, err := resolveCommittedCandidate(preimage)
+	if err != nil {
+		return err
+	}
+	if cc.vr {
+		// a VR handoff's candidate v6 is retained as a Freeze v5 retains it: its v5 view under the candidate key, the v6 bytes beside it
+		vr, ok := x.storage.(interface{ StoreHandoffVRCandidate([]byte, []byte) error })
+		if !ok {
+			return ErrAssignmentHistory
+		}
+		if err := vr.StoreHandoffVRCandidate(bodyID, preimage); err != nil {
+			return err
+		}
+	}
+	return archive.StoreHandoffCandidate(bodyID, cc.view)
 }
 
 // installCommittedAssignment is the BlockStore form of installCommittedAssignmentFrom.
@@ -359,7 +375,7 @@ func installCommittedAssignmentFrom(db PersistentStore, orchestration Orchestrat
 		return errors.Join(ErrAssignmentHistory, err)
 	}
 	si := oldRoot.ShardState.States[key]
-	preimage, err := readHandoffArtifact(db, "candidate", record.NextBodyID)
+	preimage, err := retainedCommittedPreimage(db, record.NextBodyID)
 	if err != nil {
 		return errors.Join(ErrAssignmentHistory, err)
 	}
@@ -406,7 +422,7 @@ func (x *BlockStore) ValidateCommittedAssignment(head *abdrc.CommittedBlock, rec
 	if err != nil {
 		return err
 	}
-	c, err := evmassign.DecodeCandidate(preimage)
+	c, err := decodeCommittedCandidate(preimage)
 	if err != nil {
 		return err
 	}
@@ -447,7 +463,8 @@ func (x *BlockStore) authenticateSupersessionChain(chain evmassign.Chain, key ba
 			return ErrAssignmentHistory
 		}
 		id := entry.BodyID()
-		preimage, err := x.HandoffCandidate(id[:])
+		// the activation checks the digest the body binds (a VR step's candidate v6); the chain index and its links read the v5 view
+		preimage, err := retainedCommittedPreimage(x.storage, id[:])
 		if err != nil {
 			return errors.Join(ErrAssignmentHistory, err)
 		}
@@ -455,11 +472,15 @@ func (x *BlockStore) authenticateSupersessionChain(chain evmassign.Chain, key ba
 		if err != nil {
 			return err
 		}
-		c, err := evmassign.DecodeCandidate(preimage)
+		cc, err := resolveCommittedCandidate(preimage)
 		if err != nil {
 			return err
 		}
-		digest := sha256.Sum256(preimage)
+		c, err := evmassign.DecodeCandidate(cc.view)
+		if err != nil {
+			return err
+		}
+		digest := sha256.Sum256(cc.view)
 		if act.pdr.PartitionID != key.PartitionID || act.pdr.ShardID.Key() != key.ShardID ||
 			act.pdr.Epoch != step.ShardEpoch || !bytes.Equal(act.confHash, step.ConfHash) ||
 			!bytes.Equal(digest[:], step.CandidateDigest) || c.OldShardEpoch != chain.BaseShardEpoch+uint64(i) ||
@@ -488,12 +509,12 @@ func validateCommittedAssignment(orchestration Orchestration, hashAlg crypto.Has
 	record evmroot.OrderedHandoffRecord, body retainedBody, preimage []byte,
 	configs map[basetypes.PartitionShardID]*basetypes.PartitionDescriptionRecord, key basetypes.PartitionShardID) ([]*basetypes.PartitionDescriptionRecord, []byte, error) {
 	si := oldRoot.ShardState.States[key]
-	confs, provenance, _, err := deriveActivatedConfigs(record, body, preimage)
+	confs, provenance, _, err := deriveActivatedConfigs(record, body, preimage, oldRoot.ShardState.States, configs)
 	if err != nil {
 		return nil, nil, err
 	}
 	pdr := confs[0]
-	c, err := evmassign.DecodeCandidate(preimage)
+	c, err := decodeCommittedCandidate(preimage)
 	if err != nil {
 		return nil, nil, errors.Join(ErrAssignmentHistory, err)
 	}

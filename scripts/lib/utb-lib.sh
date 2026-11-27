@@ -4,6 +4,7 @@
 #
 # The caller defines (before calling a function): info (optional), and runs from the repository root (test-nodes/, build/ubft). UBFT overrides build/ubft.
 
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lane-slot.sh"   # LANE_SLOT: ports below are shifted into the lane's slot
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/portable.sh"
 UBFT=${UBFT:-build/ubft}
 UTB_DIR=${UTB_DIR:-test-nodes/utb}
@@ -28,24 +29,29 @@ utb_pin() { tr -d '[:space:]' <test-nodes/utb-genesis.id; }
 utb_root_flags() { # node (unused: every root has the same profile)
   [ -s test-nodes/utb-genesis.cbor ] && [ -s test-nodes/utb-genesis.id ] || { echo "utb_root_flags: no UTB genesis (utb_prepare_genesis first)" >&2; return 1; }
   mkdir -p "test-nodes/utb-ucresp/root${1:-0}"
-  echo "--utb-genesis test-nodes/utb-genesis.cbor --utb-genesis-id $(utb_pin) --utb-capture-ucresp test-nodes/utb-ucresp/root${1:-0}"
+  local bundle=
+  # VT-11: a seed run gives each root its isolated read-only bundle listener (38600 + the lane's port offset + node - 1), never the operator RPC
+  if [ "${VR_SEED:-0}" = 1 ] || [ "${VR_SEED2:-0}" = 1 ]; then bundle=" --utb-bundle-address 127.0.0.1:$(lane_port "$((38600 + ${1:-1} - 1))")"; fi
+  echo "--utb-genesis test-nodes/utb-genesis.cbor --utb-genesis-id $(utb_pin) --utb-capture-ucresp test-nodes/utb-ucresp/root${1:-0}$bundle"
 }
 # a shard node takes the profile flags only (it sends no certification response, so it captures nothing)
 utb_shard_flags() { echo "--utb-genesis test-nodes/utb-genesis.cbor --utb-genesis-id $(utb_pin)"; }
 
 # The environment of the aggregator (ristik/aggregator-go integration/enshrined-evm at the pinned AGG_COMMIT, built by utb_agg_build): UTB mode is enabled by UTB_GENESIS_ID; the
 # genesis entry file is the fresh chain's history (UTB_BUNDLE_FILE would be a complete tagged history instead); UTB_ENTRIES_DB is its own append-only store. In UTB mode
-# the binary uses neither the V1 trust-base files nor root REST.
+# the binary uses neither the V1 trust-base files nor root REST for trust bases.
 utb_agg_env() { # K (1-based)
   local k=${1:-1}
   [ -s test-nodes/utb-genesis.cbor ] && [ -s test-nodes/utb-genesis.id ] || { echo "utb_agg_env: no UTB genesis (utb_prepare_genesis first)" >&2; return 1; }
-  # BFT_RPC_ADDRESS is a dead port: in UTB mode the aggregator builds no root REST client, and the lane shows root HTTP is not what it uses. JSON logs: the
-  # evidence reads the log lines by their exact messages (the markers of the aggregator's UTB history code: internal/bft/utb.go).
-  echo "UTB_GENESIS_FILE=$PWD/test-nodes/utb-genesis.cbor UTB_GENESIS_ID=$(utb_pin) UTB_ENTRIES_DB=$PWD/test-nodes/utb-agg$k.db BFT_RPC_ADDRESS=http://127.0.0.1:1 LOG_LEVEL=debug LOG_FORMAT=json LOG_ENABLE_JSON=true"
+  # BFT_RPC_ADDRESS stays the live root's operator RPC that start_agg sets (scripts/lib/agg-lib.sh): in UTB mode the aggregator takes its trust bases from the signed history, never from
+  # root REST, but it reads the successor shard configuration of a validator-registry kind 6 or 8 change from the root's guarded POST /api/v1/q3/shard-conf there (its checkpoint is per
+  # aggregator, in its own directory). JSON logs: the evidence reads the log lines by their exact messages (the markers of the aggregator's UTB history code: internal/bft/utb.go).
+  # one assignment per line: the launcher reads them into an array (a read loop), so a path with spaces is never split
+  printf '%s\n' "UTB_GENESIS_FILE=$PWD/test-nodes/utb-genesis.cbor" "UTB_GENESIS_ID=$(utb_pin)" "UTB_ENTRIES_DB=$PWD/test-nodes/utb-agg$k.db" LOG_LEVEL=debug LOG_FORMAT=json LOG_ENABLE_JSON=true
 }
 # The aggregator's read-only binary history range (design 11.3 item 4): GET /api/v1/trustbases?from=E[&to=E]..., the PR6 response codec. The same endpoint serves the
 # lane's reference client; port is the aggregator's (agg_port from scripts/lib/agg-lib.sh when it is loaded).
-utb_agg_history_url() { local k=${1:-1} port=${AGG_PORT:-3001}; echo "http://127.0.0.1:$((port + k - 1))/api/v1/trustbases"; }
+utb_agg_history_url() { local k=${1:-1} port=$((3001+LANE_PORT_OFFSET)); echo "http://127.0.0.1:$((port + k - 1))/api/v1/trustbases"; }
 
 # The aggregator is ristik/aggregator-go integration/enshrined-evm at a pinned commit (AGG_COMMIT, 40 hex), built from a clean clone by utb_agg_build, never from a local patch.
 # Its provenance directory builds/aggregator-<sha8>/ records the commit, the go.mod pins of bft-core and bft-go-base, the toolchain and the digest of the binary.
@@ -112,20 +118,57 @@ utb_lane_components() {
   fi
   [ -z "${UTB_SDK_JS:-}" ] || ! git -C "$UTB_SDK_JS" rev-parse HEAD >/dev/null 2>&1 || out+=("state-transition-sdk-js=$(git -C "$UTB_SDK_JS" rev-parse HEAD)")
   [ -z "${P85_CONTRACTS:-}" ] || ! git -C "$P85_CONTRACTS" rev-parse HEAD >/dev/null 2>&1 || out+=("contracts=$(git -C "$P85_CONTRACTS" rev-parse HEAD)")
-  [ -z "${NBP_DIR:-}" ] || ! git -C "$NBP_DIR" rev-parse HEAD >/dev/null 2>&1 || out+=("native-bridge-plugins=$(git -C "$NBP_DIR" rev-parse HEAD)")
   printf '%s ' "${out[@]+"${out[@]}"}"
 }
 
 
-# ---- lane steps (UTB_LANE=1; sourced by scripts/p85-recovery-steps.sh next to the any-age steps, which supply anyage_dir, anyage_nbp, p85_*, agg-lib.sh) ----------
+# ---- lane steps (UTB_LANE=1; sourced by scripts/p85-recovery-steps.sh next to the any-age steps, which supply anyage_dir, p85_*, agg-lib.sh) ----------
 # Each is a function the P85 step runner calls like its own (nonzero return = the lane fails and tears down). The evidence goes to $(utb_dir); the independent verifier is
 # utb-evidence (scripts/utb-evidence), which trusts no node. Entries: epoch 2 is the K->J handoff (activated, never acknowledged by J's EVM), epoch 3 the derived recovery.
 utb_dir() { mkdir -p "${H3_DIR:?}" && echo "$(cd "$H3_DIR" && pwd)/utb"; }
-utb_ev() { "${UTB_EVIDENCE:?}" "$@"; }
+# Resolve the verifier as a path so the file checked is the one executed,
+# including when later steps run from another working directory.
+utb_resolve_verifier() {
+  local name=UTB_VERIFIER path=${UTB_VERIFIER:-}
+  if [ -z "$path" ] && [ -n "${UTB_EVIDENCE:-}" ]; then
+    name=UTB_EVIDENCE
+    path=$UTB_EVIDENCE
+  fi
+  path=${path:-${1:-build/utb-evidence}}
+  if [ -d "$path" ] || [[ "$path" == */ ]]; then
+    printf '%s must be the verifier executable (got a directory): %s\n' "$name" "$path" >&2
+    return 1
+  fi
+  # A local preflight may build into an absent path. Existing files and
+  # symlinks must always resolve to an executable regular file.
+  if [ "${2:-}" != allow-missing ] || [ -e "$path" ] || [ -L "$path" ]; then
+    if [ ! -f "$path" ] || [ ! -x "$path" ]; then
+      printf '%s must be the verifier executable (expected an executable file): %s\n' "$name" "$path" >&2
+      return 1
+    fi
+  fi
+  case "$path" in /*) ;; *) path=$PWD/$path ;; esac
+  if [ "$name" = UTB_EVIDENCE ]; then
+    printf '%s\n' 'UTB_EVIDENCE is deprecated. Set UTB_VERIFIER to the utb-evidence executable.' >&2
+  fi
+  export UTB_VERIFIER="$path"
+}
+
+utb_ev() {
+  utb_resolve_verifier || return 1
+  "$UTB_VERIFIER" "$@"
+}
 utb_agg_log() { echo "$PWD/$(agg_dir 1)/logs/aggregator.log"; }
 utb_agg_url() { utb_agg_history_url 1; }
 # The shard configurations the pack verifies certificates against: the EVM shard's and every aggregator shard's (shard-conf-aggregator.json is shard 1, -2.json shard 2).
 utb_manifest_confs() { local d=$1/manifest f out; out=$d/shard-conf.json; for f in "$d"/shard-conf-aggregator.json "$d"/shard-conf-aggregator-[0-9].json; do [ -f "$f" ] && out="$out,$f"; done; echo "$out"; }
+# utb_agg_latest_uc FILE: the unicity certificate of the aggregator's latest block (shard 1), as a token file utb-evidence uc-verify reads
+utb_agg_latest_uc() {
+  local hex
+  hex=$(curl -fsS -X POST "http://127.0.0.1:$(agg_port 1)/" -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"get_block","params":{"blockNumber":"latest"}}' 2>/dev/null \
+    | jq -r '.result.block.unicityCertificate // empty' | sed 's/^0x//')
+  [ -n "$hex" ] && printf '%s' "$hex" | xxd -r -p >"$1"
+}
 # the aggregator log lines (JSON) written since byte offset $1
 utb_agg_lines_since() { tail -c +"$(($1 + 1))" "$(utb_agg_log)" 2>/dev/null | grep -a '^{'; }
 utb_agg_offset() { wc -c <"$(utb_agg_log)" 2>/dev/null | tr -d ' ' || echo 0; }
@@ -146,6 +189,9 @@ utb_wait_agg_tip() { # want seconds
   echo "the aggregator serves tip ${tip:-0}, expected >= $want after $(( $2 * 2 )) s; its log tail:" >&2; tail -c 3000 "$(utb_agg_log)" >&2
   return 1
 }
+
+# true if the JSONL on stdin holds a version 3 response received with at least one attached trust-base entry
+utb_u2_attachment_seen() { jq -e -s 'any(.[]; .msg=="received CertificationResponseV3" and (.trustBaseUpdates // 0) >= 1)' >/dev/null 2>&1; }
 
 # The aggregator takes an entry either from the response that carries it (the message path appends, never fetches) or from its own catch-up worker, which is
 # asynchronous, coalesced and also woken by every handshake: which one is first is a race, and it is not a property of the root. U2 asserts what is not racy and records
@@ -174,19 +220,22 @@ PY
 
 # Before rotation: the aggregator and the reference client hold only the genesis history; the saved original proof verifies under it.
 utb_step_u1() {
+  utb_resolve_verifier || return 1
   local out; out=$(utb_dir); mkdir -p "$out"/{bundle,entries,ucresp,verifier,catchup,handoff,proofs,history,manifest}
-  [ -x "${UTB_EVIDENCE:-}" ] || { echo "UTB_EVIDENCE ($UTB_EVIDENCE) is not built" >&2; return 1; }
   utb_ev fetch --url "$(utb_agg_url)" --out "$out/bundle/initial.cbor" || { echo "the aggregator serves no history at $(utb_agg_url)" >&2; return 1; }
   utb_ev verify --bundle "$out/bundle/initial.cbor" --pin "$(utb_pin)" | tee "$out/bundle/initial.verify.txt" || return 1
   grep -q '^ok: epochs 1\.\.1,' "$out/bundle/initial.verify.txt" || { echo "the aggregator held more than the genesis before any rotation" >&2; return 1; }
   grep -aq '"msg":"Signed trust-base history loaded"' "$(utb_agg_log)" || { echo "the aggregator did not report its history loaded" >&2; return 1; }
-  # the original proof, saved by L1a: the digest is recorded now and nothing refetches it
-  cp "$(anyage_dir)/l1/token.cbor" "$out/proofs/token.cbor" || return 1
+  # the original proof: a certificate of the genesis epoch, the aggregator's latest block's (the protocol 6/7 bridge token of L1a was removed
+  # with that bridge, bft-core#1106). Its digest is recorded now and nothing refetches it; U5 verifies the same bytes under the final history.
+  local i; for i in $(seq 1 30); do utb_agg_latest_uc "$out/proofs/token.cbor" && break; sleep 2; done
+  [ -s "$out/proofs/token.cbor" ] || { echo "the aggregator served no block certificate within 60 s" >&2; return 1; }
   shasum -a 256 "$out/proofs/token.cbor" | cut -d' ' -f1 >"$out/proofs/original-proof.sha256"
-  # the original proof is the bridge token's: certified for the EVM shard, so its certificates bind the EVM shard's full configuration (not the aggregator's)
+  # the pack verifies against the EVM shard's full configuration and every aggregator shard's
   cp test-nodes/evm-full-shard-conf-v2.json "$out/manifest/shard-conf.json" && cp "$(agg_conf 1)" "$out/manifest/shard-conf-aggregator.json" || return 1
   local k; for k in $(seq 2 "${aggShards:-1}"); do cp "$(agg_conf "$k")" "$out/manifest/shard-conf-aggregator-$k.json" || return 1; done
   utb_ev uc-verify --token "$out/proofs/token.cbor" --bundle "$out/bundle/initial.cbor" --shard-conf "$(utb_manifest_confs "$out")" | tee "$out/proofs/before-rotation-verify.txt" || return 1
+  grep -q '^certificate 0: epoch 1 ' "$out/proofs/before-rotation-verify.txt" || { echo "the original proof is not a certificate of the genesis epoch" >&2; return 1; }
   # the reference client starts from the genesis alone and holds it through the whole rotation
   utb_ev client --url "$(utb_agg_url)" --store "$out/client.db" --genesis test-nodes/utb-genesis.cbor --pin "$(utb_pin)" | tee "$out/history/client-start.log" || return 1
   echo "U1: the aggregator and the client hold the genesis only; the original proof ($(cut -c1-12 "$out/proofs/original-proof.sha256")...) verifies under it"
@@ -201,6 +250,11 @@ utb_step_u2() {
   utb_ev extract --bundle "$t" --epoch 2 --out "$out/entries/ordinary-handoff.cbor" || return 1
   # the aggregator logs asynchronously: wait for the line which shows epoch 2 added (from a response or by its catch-up) before the log is read
   for n in $(seq 1 60); do utb_agg_lines_since 0 | jq -e -s 'any(.[]; (.msg=="trust-base entries appended from certification response" and .tip==2) or (.msg=="trust-base catch-up finished" and .tip==2 and (.added//0)>=1))' >/dev/null 2>&1 && break; sleep 1; done
+  # ... and for the first response that carries an attachment. The two are independent: the aggregator's catch-up can add epoch 2 seconds before the root's first
+  # attached response reaches it (lane run 42476320969, #965: catch-up added epoch 2 at 12:24:31.5, the first attached response arrived at 12:24:36.5, the step read
+  # the log at ~12:24:32 and failed "never received ... an attachment" although the root attached the entry). Reading the log at the moment epoch 2 shows up made
+  # assertion (1) of utb_u2_evidence a race; it now waits for its own event, and still fails if none arrives within the same 60 s.
+  for n in $(seq 1 60); do utb_agg_lines_since 0 | utb_u2_attachment_seen && break; sleep 1; done
   utb_agg_lines_since 0 | jq -c 'select(.msg=="received CertificationResponseV3" or .msg=="trust-base entries appended from certification response" or .msg=="trust-base catch-up started" or .msg=="trust-base catch-up finished" or .msg=="trust-base gap in certification response" or .msg=="trust-base update already held" or .msg=="dropping an invalid trust-base update")' >"$out/handoff/aggregator-ordinary.jsonl"
   utb_u2_evidence "$out/handoff/aggregator-ordinary.jsonl" "$out/handoff/ordinary-ack.log" || return 1
   # the real message the root sent: captured just before it was sent
@@ -226,7 +280,7 @@ utb_step_u3a() {
   echo "U3a: the aggregator restarted from its store with unchanged records, then stopped with its history store removed"
 }
 
-# After the recovery: the aggregator restarts holding the genesis only, root HTTP unavailable to it; it repairs the missing entries from a genesis-committee root.
+# After the recovery: the aggregator restarts holding the genesis only (in UTB mode it builds no REST trust-base client: only GetTrustBase can serve it); it repairs the missing entries from a genesis-committee root.
 utb_step_u3b() {
   local i attempt out off db msg; out=$(utb_dir); db=$PWD/test-nodes/utb-agg1.db
   # Two routes can repair the aggregator's history after its restart: its own GetTrustBase catch-up from the roots, and the entries a root attaches to the first
@@ -259,15 +313,11 @@ utb_step_u3b() {
 
 # After the acknowledgement: the post-recovery token (certified under the epoch-3 committee), the client's unknown-epoch gap, the aggregator's second restart.
 utb_step_u4() {
-  local out i hex; out=$(utb_dir)
-  # A certificate issued after the recovery: the aggregator's latest block carries the unicity certificate of its partition (the bridge's lock proofs cannot be made for the
-  # successor epoch: the dnb tool's lock proof binds the EVM shard configuration of epoch 1). The aggregator certifies a block every round, so the latest one is of the
-  # current root epoch (3) shortly after the aggregator is back on the recovered chain.
+  local out i; out=$(utb_dir)
+  # A certificate issued after the recovery: the aggregator's latest block carries the unicity certificate of its partition. The aggregator certifies a block every
+  # round, so the latest one is of the current root epoch (3) shortly after the aggregator is back on the recovered chain.
   for i in $(seq 1 60); do
-    hex=$(curl -fsS -X POST "http://127.0.0.1:$(agg_port 1)/" -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"get_block","params":{"blockNumber":"latest"}}' 2>/dev/null \
-      | jq -r '.result.block.unicityCertificate // empty' | sed 's/^0x//')
-    if [ -n "$hex" ]; then
-      printf '%s' "$hex" | xxd -r -p >"$out/proofs/post-recovery-token.cbor"
+    if utb_agg_latest_uc "$out/proofs/post-recovery-token.cbor"; then
       utb_ev fetch --url "$(utb_agg_url)" --out "$out/bundle/final-probe.cbor" >/dev/null 2>&1 && \
         utb_ev uc-verify --token "$out/proofs/post-recovery-token.cbor" --bundle "$out/bundle/final-probe.cbor" --shard-conf "$(agg_conf 1)" 2>&1 | grep -q '^certificate 0: epoch 3 ' && break
     fi
@@ -300,7 +350,7 @@ utb_step_u4() {
 # post-recovery certificate's unknown epoch, fetches the entries from the aggregator's GetTrustBase endpoint (the SDK's own fetch-and-retry loop) and verifies it.
 utb_step_u4b() {
   local out; out=$(utb_dir); mkdir -p "$out/sdk"
-  [ -f "${UTB_SDK_JS:?UTB_SDK_JS (a built state-transition-sdk-js checkout) is not set}/lib/util/TrustBaseUtils.js" ] || { echo "UTB_SDK_JS ($UTB_SDK_JS) is not a built SDK (npm ci && npm run build)" >&2; return 1; }
+  [ -f "${UTB_SDK_JS:?UTB_SDK_JS (a built state-transition-sdk-js checkout) is not set}/lib/api/bft/verification/verifyWithUpdate.js" ] || { echo "UTB_SDK_JS ($UTB_SDK_JS) is not a built SDK (npm ci && npm run build)" >&2; return 1; }
   git -C "$UTB_SDK_JS" rev-parse HEAD >"$out/sdk/sdk-commit.txt" 2>/dev/null || { echo "UTB_SDK_JS is not a git checkout" >&2; return 1; }
   node "$PWD/scripts/utb-sdk-client/check.mjs" --sdk "$UTB_SDK_JS" --url "http://127.0.0.1:$(agg_port 1)" --genesis test-nodes/utb-genesis.cbor --pin "$(utb_pin)" \
     --uc "$out/proofs/post-recovery-token.cbor" --expect-tip 3 --entry "2=$out/entries/ordinary-handoff.cbor" --entry "3=$out/entries/recovery.cbor" --out "$out/sdk/client.log" || return 1
@@ -405,29 +455,28 @@ utb_step_s2() {
   cat "$out/root$node.txt"
 }
 
-# After L1c: the original proof verifies unchanged under its historical committee; the bridge receipt; the exported history reloads exactly.
+# After L2: the original proof verifies unchanged under its historical committee; the exported history reloads exactly.
 utb_step_u5() {
   local out got; out=$(utb_dir)
   [ "$(shasum -a 256 <"$out/proofs/token.cbor" | cut -d' ' -f1)" = "$(cat "$out/proofs/original-proof.sha256")" ] || { echo "the original proof changed" >&2; return 1; }
   utb_ev uc-verify --token "$out/proofs/token.cbor" --bundle "$out/bundle/final.cbor" --shard-conf "$(utb_manifest_confs "$out")" | tee "$out/proofs/historical-verify.log" || return 1
-  cp "$(anyage_dir)/l1/release.json" "$out/proofs/bridge-receipt.json" || return 1
   # the complete history is exported as one tagged file (the final bundle) and a fresh client store reloads it to exactly the same records and tip
   rm -f "$out/reload.db"
   utb_ev client --url "$(utb_agg_url)" --store "$out/reload.db" --genesis test-nodes/utb-genesis.cbor --pin "$(utb_pin)" --export "$out/history/reloaded.cbor" | tee "$out/history/client-reload.log" || return 1
   cmp -s "$out/history/reloaded.cbor" "$out/bundle/final.cbor" || { echo "the reloaded client history differs from the exported final bundle" >&2; return 1; }
   echo "final bundle sha256 $(shasum -a 256 <"$out/bundle/final.cbor" | cut -d' ' -f1)" >>"$out/history/client-reload.log"
-  echo "U5: the original proof verifies unchanged under its historical committee, the bridge receipt is kept, the client reload reproduces the final history"
+  echo "U5: the original proof verifies unchanged under its historical committee, the client reload reproduces the final history"
 }
 
 # The pack: the evidence files the checker requires, the manifest rewritten with relative paths (self-contained), then the checker.
 utb_step_final() {
+  utb_resolve_verifier || return 1
   local out comp; out=$(utb_dir)
   cp test-nodes/trust-base.json "$out/manifest/trust-base.json"
   comp=$(python3 -c "import json;print(' '.join('--component %s=%s' % kv for kv in json.load(open('test-nodes/utb/utb-manifest.json')).get('components',{}).items()))")
   "$UBFT" trust-base utb-manifest --trust-base "$out/manifest/trust-base.json" --out-dir "$out/manifest" --relative-paths $comp >/dev/null || return 1
   [ "$(python3 -c "import json;print(json.load(open('$out/manifest/utb-manifest.json'))['derived']['utbGenesisEntryId'])")" = "$(utb_pin)" ] || { echo "the pack manifest's genesis is not the deployment's" >&2; return 1; }
-  { echo "bft-core $(git rev-parse HEAD) ubft sha256 $(shasum -a 256 "$UBFT" | cut -d' ' -f1)"; echo "utb-evidence sha256 $(shasum -a 256 "$UTB_EVIDENCE" | cut -d' ' -f1)"; echo "aggregator sha256 $(shasum -a 256 "$AGG_BIN" | cut -d' ' -f1)"
-    echo "native-bridge-plugins $(git -C "${NBP_DIR:?}" rev-parse HEAD) (prerequisite: its live driver reads the trust-base release bundle, native-bridge-plugins#27; reads trust-base.bundle.cbor: $(grep -c 'trust-base.bundle.cbor' "$NBP_DIR/tests/live/anyage.ts") places)"
+  { echo "bft-core ${LANE_PRODUCT_COMMIT:-$(git rev-parse HEAD)}${LANE_PRODUCT_COMMIT:+ harness=$(git rev-parse HEAD)} ubft sha256 $(shasum -a 256 "$UBFT" | cut -d' ' -f1)"; echo "utb-evidence sha256 $(shasum -a 256 "$UTB_VERIFIER" | cut -d' ' -f1)"; echo "aggregator sha256 $(shasum -a 256 "$AGG_BIN" | cut -d' ' -f1)"
     echo "state-transition-sdk-js $(git -C "${UTB_SDK_JS:?}" rev-parse HEAD)"
     echo "aggregator shards: ${aggShards:-1} (${aggShardIDs[*]:-0x80})"; } >"$out/manifest/build.txt"
   mkdir -p "$out/manifest/aggregator"; cp "$(utb_agg_provenance "$AGG_BIN" "${AGRE_ROOT:-$PWD/..}/builds")"/{commit.txt,gomod-pins.txt,sha256.txt} "$out/manifest/aggregator/" || return 1
@@ -468,7 +517,6 @@ handoff/recovery-closure.log
 proofs/token.cbor
 proofs/original-proof.sha256
 proofs/historical-verify.log
-proofs/bridge-receipt.json
 history/client-reload.log
 proofs/post-recovery-token.cbor
 history/client-stale.cbor
@@ -482,9 +530,7 @@ state-import/import-line.txt
 LIST
 }
 
-UTB_EVIDENCE=${UTB_EVIDENCE:-build/utb-evidence}
-
-# utb_check_evidence DIR: every required file exists and is non-empty, and the bytes are what they claim to be, checked by the tools and not by keyword:
+# utb_check_evidence DIR [DEFAULT_VERIFIER]: every required file exists and is non-empty, and the bytes are what they claim to be, checked by the tools and not by keyword:
 #  - the manifest checks out against the trust base and genesis entry inside the pack;
 #  - bundle/final.cbor is a tagged history from the manifest's pinned genesis, every record verified from its predecessor (utb-evidence verify);
 #  - each verifier output is exactly that tool's line for the record's epoch (2: the K->J handoff, 3: the recovery), and each entries/*.cbor is exactly that history's record for it;
@@ -492,11 +538,12 @@ UTB_EVIDENCE=${UTB_EVIDENCE:-build/utb-evidence}
 #  - the UCResp sample is a version 3 response whose attachment is byte-identical to entries/ordinary-handoff.cbor;
 #  - proofs/token.cbor is the original (its digest is the recorded one) and its certificates verify under their own epochs' committees (the recorded output is the
 #    tool's output on these bytes);
-#  - the client reload recorded the final bundle's digest and tip; the two-entry gap was fetched in one sync; the bridge receipt is a successful redemption.
+#  - the client reload recorded the final bundle's digest and tip; the two-entry gap was fetched in one sync.
 utb_check_evidence() {
-  local dir=$1 f missing=0 tool=$UTB_EVIDENCE pin out want got
+  local dir=$1 f missing=0 pin out want got
   [ -d "$dir" ] || { echo "utb_check_evidence: $dir is not a directory" >&2; return 1; }
-  [ -x "$tool" ] || { echo "utb_check_evidence: $tool is not built (go build -o build/utb-evidence ./scripts/utb-evidence)" >&2; return 1; }
+  utb_resolve_verifier "${2:-}" || return 1
+  local tool=$UTB_VERIFIER
   while read -r f; do
     [ -s "$dir/$f" ] || { echo "evidence missing or empty: $f" >&2; missing=1; }
   done < <(utb_evidence_required)
@@ -549,7 +596,6 @@ utb_check_evidence() {
   local ir; ir=$(ls "$dir"/state-import/root[0-9]*.txt 2>/dev/null | head -1)
   [ -n "$ir" ] && grep -Eq '^state imports \(completed recovery\): [1-9]' "$ir" && grep -q '^V3 freeze rules are not enabled: 0$' "$ir" && grep -q '^successor trust-base entry cannot be derived: 0$' "$ir" \
     && grep -q '^handoff record outcome: .*phase=committed' "$ir" && grep -q '^vote on the record block: .*signed vote' "$ir" || { echo "state-import/root<N>.txt does not show a state import before the V3 handoff, no refusal, and the committed record outcome" >&2; return 1; }
-  jq -e '(.redeem.gasUsed | tonumber) > 0 and (.claim.gasUsed | tonumber) > 0' "$dir/proofs/bridge-receipt.json" >/dev/null 2>&1 || { echo "proofs/bridge-receipt.json is not a successful redemption and claim" >&2; return 1; }
 }
 
 # ---- chain-free self-tests -----------------------------------------------------------------------------------------------------------------------------
@@ -594,7 +640,7 @@ utb_selftest() {
   utb_st "the aggregator's bft-core pin is accepted when it is an ancestor of the checkout" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; git -C '$cwd' cat-file -e f4f324197 2>/dev/null || exit 0; git -C '$cwd' merge-base --is-ancestor f4f324197 HEAD || exit 0; [ \"\$(utb_agg_pins_ok '$pd' '$cwd')\" = f4f324197c63 ]"
   utb_st_no "an aggregator pin that is not in the checkout's history is refused" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; printf 'replace github.com/unicitynetwork/bft-core => github.com/ristik/bft-core v1.1.1-0.20261019192856-000000000000\n' >'$pd/gomod-pins.txt'; utb_agg_pins_ok '$pd' '$cwd'"
   utb_st "the aggregator environment carries the genesis, the pin and its own store" bash -c "cd '$t' && source '$cwd/scripts/lib/utb-lib.sh' && env=\$(utb_agg_env 2) && grep -q 'UTB_GENESIS_FILE=$t/test-nodes/utb-genesis.cbor' <<<\"\$env\" && grep -q 'UTB_GENESIS_ID=0x' <<<\"\$env\" && grep -q 'UTB_ENTRIES_DB=$t/test-nodes/utb-agg2.db' <<<\"\$env\""
-  utb_st "the history URL follows the aggregator's port" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; [ \"\$(AGG_PORT=3100 utb_agg_history_url 2)\" = http://127.0.0.1:3101/api/v1/trustbases ]"
+  utb_st "the history URL follows the aggregator's (slot-derived) port" env LANE_SLOT=1 bash -c "source '$cwd/scripts/lib/utb-lib.sh'; [ \"\$(utb_agg_history_url 2)\" = http://127.0.0.1:4002/api/v1/trustbases ]"
   # the U3b repair judgement: a catch-up from the roots must raise the tip; responses alone, or a catch-up that only re-appends held entries, do not pass
   local rc="$cwd/scripts/lib/utb-repair-check.py"
   mkdir -p "$t/rep"
@@ -619,12 +665,6 @@ utb_selftest() {
   utb_st "a refusal for another reason (a dropped invalid update) is not the retried one" bash -c "! python3 -I '$rc' '$t/rep/dropped.jsonl' '$t/rep/out.log' 2>&1 | grep -q 'no successful catch-up raised the tip'"
   utb_st_no "a repair with no finished catch-up is refused" python3 -I "$rc" "$t/rep/no-finish.jsonl" "$t/rep/out.log"
   utb_st_no "a repair with a dropped invalid update is refused" python3 -I "$rc" "$t/rep/dropped.jsonl" "$t/rep/out.log"
-  # the aggregator shards in the lane's derived inputs: one shard writes no shard table, two write each shard with its aggregator; the pack verifies against every shard's configuration
-  mkdir -p "$t/lc/test-nodes"; printf '{"BridgeVault":"0x1","TokenVerifier":"0x2"}\n' >"$t/lc/test-nodes/bridge-addresses.json"
-  for n in 1 2; do
-    utb_st "the lane config of a $n-shard deployment is as the driver expects" bash -c "cd '$t/lc' && export DNB_AGG_SHARDS=$n && source '$cwd/scripts/lib/agg-lib.sh' && validators=4 rethEthBase=8545 rootRpcPort=8000 chainID=31337 partitionID=8 DNB_TOOL=true bridge_write_config >/dev/null &&
-      if [ $n = 1 ]; then jq -e 'has(\"aggShards\") | not' test-nodes/lane-config.json; else jq -e '.aggShards == [{shard:\"40\",url:\"http://127.0.0.1:3001\"},{shard:\"c0\",url:\"http://127.0.0.1:3002\"}] and (.aggUrls | length) == 2' test-nodes/lane-config.json; fi"
-  done
   mkdir -p "$t/mc/manifest"; : >"$t/mc/manifest/shard-conf.json"; : >"$t/mc/manifest/shard-conf-aggregator.json"
   utb_st "one aggregator shard: the pack verifies against the EVM shard and the aggregator shard" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; [ \"\$(utb_manifest_confs '$t/mc')\" = '$t/mc/manifest/shard-conf.json,$t/mc/manifest/shard-conf-aggregator.json' ]"
   : >"$t/mc/manifest/shard-conf-aggregator-2.json"
@@ -673,6 +713,10 @@ utb_selftest() {
   utb_st_no "U2 evidence: an 'already held' line below tip 2 does not show epoch 2 consumed" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; utb_u2_evidence '$u2/heldtip1.jsonl' '$u2/o7'"
   utb_st_no "U2 evidence: an attachment dropped as invalid fails it" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; utb_u2_evidence '$u2/dropped.jsonl' '$u2/o8'"
   utb_st "U2 evidence: the catch-up case records that the attachments were consumed" bash -c "grep -q '^consumed: 1 attachments read after the catch-up' '$u2/o1'"
+  # the wait of utb_step_u2 for the attachment: seen once a response with trustBaseUpdates >= 1 is in the log, not before (the 12:24:31 catch-up-first case of run 42476320969)
+  utb_st "U2 attachment wait: a response with an attachment is seen" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; utb_u2_attachment_seen <'$u2/response.jsonl'"
+  utb_st_no "U2 attachment wait: the catch-up having added epoch 2 is not an attachment" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; utb_u2_attachment_seen <'$u2/noattach.jsonl'"
+  utb_st_no "U2 attachment wait: responses carrying zero attachments are not an attachment" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; printf '%s\\n' '{\"msg\":\"received CertificationResponseV3\",\"trustBaseUpdates\":0}' | utb_u2_attachment_seen"
   utb_st_no "U2 evidence: no response carried an attachment" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; utb_u2_evidence '$u2/noattach.jsonl' '$u2/o3'"
   utb_st_no "U2 evidence: epoch 2 was not added" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; utb_u2_evidence '$u2/noadd.jsonl' '$u2/o4'"
   utb_st_no "U2 evidence: a failed catch-up is not an add" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; utb_u2_evidence '$u2/failedcatchup.jsonl' '$u2/o5'"
@@ -681,7 +725,7 @@ utb_selftest() {
   local ev="$t/ev"
   mkdir -p "$ev"
   while read -r f; do mkdir -p "$ev/$(dirname "$f")"; printf 'x\n' >"$ev/$f"; done < <(utb_evidence_required)
-  UBFT=$(realpath "$UBFT") utb_st_no "a pack of placeholders is refused" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; UBFT='$UBFT' UTB_EVIDENCE='${UTB_EVIDENCE:-build/utb-evidence}' utb_check_evidence '$ev'"
+  UBFT=$(realpath "$UBFT") utb_st_no "a pack of placeholders is refused" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; UBFT='$UBFT' UTB_VERIFIER='${UTB_VERIFIER:-build/utb-evidence}' utb_check_evidence '$ev'"
   utb_st "the evidence checker accepts a real pack and refuses each bad property (go test ./scripts/utb-evidence -run EvidencePack)" bash -c "cd '$cwd' && UBFT_BIN='$(realpath "$UBFT")' go test -count=1 ./scripts/utb-evidence -run EvidencePack"
   utb_st "the P85 genesis preparation passes the root identity and the caps to p85-genesis.sh (dry run with fakes: bash -c 'source scripts/lib/p85-lib.sh; p85_selftest')" bash -c "cd '$cwd' && source scripts/lib/p85-lib.sh && p85_selftest"
   echo "utb lane self-test: $UTB_ST_BAD failures"

@@ -119,7 +119,7 @@ func newOperatorAssignmentFixture(t *testing.T, extra ...*types.PartitionDescrip
 	require.NoError(t, err)
 	next.RootNodes[3] = &types.NodeInfo{NodeID: replacement.PeerConf.ID.String(), SigKey: rkey, Stake: 1}
 	f.next = &next
-	f.state, err = f.cm.blockStore.GetState()
+	f.state, err = f.cm.blockStore().GetState()
 	require.NoError(t, err)
 	f.state.CommittedHead.ShardInfo = []abdrc.ShardInfo{{Partition: 8, IR: &types.InputRecord{BlockHash: f.parent}}}
 	f.predecessor, err = f.cm.handoffPredecessor()
@@ -308,12 +308,18 @@ func TestOperatorRefusesBadAssignmentProposalsBeforeAnyEndorsement(t *testing.T)
 		{"PoP for another predecessor", func(t *testing.T, f *operatorAssignmentFixture) (*types.RootTrustBaseV1, *abdrc.StateMsg, *evmassign.Proposal) {
 			return f.next, f.state, f.proposal(t, func(c *evmassign.PoPContext) { c.Predecessor = [32]byte{1} })
 		}, evmassign.ErrPoP},
-		{"EVM-only change (committee unchanged)", func(t *testing.T, f *operatorAssignmentFixture) (*types.RootTrustBaseV1, *abdrc.StateMsg, *evmassign.Proposal) {
-			// the committee is unchanged but its last entity now delegates the new validator ev-e: only the EVM set differs
+		{"EVM-only change that is not a binding replacement (committee unchanged)", func(t *testing.T, f *operatorAssignmentFixture) (*types.RootTrustBaseV1, *abdrc.StateMsg, *evmassign.Proposal) {
+			// the committee is unchanged, its last entity delegates the new validator ev-e, and two entities swap their kept delegates
+			// (ev-a, ev-b): only ev-e alone would be a binding replacement (#1286), the swap is not
 			p := f.proposalFor(t, f.sameRoot, func(b []evmassign.Binding) {
 				for i := range b {
-					if b[i].EVMNodeID == "ev-d" {
+					switch b[i].EVMNodeID {
+					case "ev-d":
 						b[i].EVMNodeID = "ev-e"
+					case "ev-a":
+						b[i].EVMNodeID = "ev-b"
+					case "ev-b":
+						b[i].EVMNodeID = "ev-a"
 					}
 				}
 			})

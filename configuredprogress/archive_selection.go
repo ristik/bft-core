@@ -153,6 +153,7 @@ func bindsArchiveSelection(ctx context.Context, c Context, w journalCandidateWir
 // idempotent, another is a conflict). A committed coverage of the block therefore refuses the selection, and a coverage planned against the earlier representation fails its
 // own transaction (checkCoveredCandidate) and is replanned.
 func (s *Store) SelectArchiveRepresentation(ctx context.Context, c Context, limits JournalLimits, req ArchiveSelectionRequest) error {
+	fp := s.frontierP()
 	if !s.journal {
 		return fmt.Errorf("%w: journal not enabled", ErrSettings)
 	}
@@ -198,8 +199,8 @@ func (s *Store) SelectArchiveRepresentation(ctx context.Context, c Context, limi
 		if b.Get(coverageKey(w.Number)) != nil {
 			return fmt.Errorf("%w: the block is already covered at height %d", ErrConflict, w.Number)
 		}
-		if s.frontier != nil {
-			f, err := readFrontier(b, state.i.descriptorDigest, *s.frontier)
+		if fp != nil {
+			f, err := readFrontier(b, state.i.descriptorDigest, *fp)
 			if err != nil {
 				return err
 			}

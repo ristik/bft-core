@@ -21,6 +21,11 @@ const (
 	// MaxCertificationResponseV2Frame is the limit for the CBOR payload (excluding the
 	// varint length prefix) of a V2 frame.
 	MaxCertificationResponseV2Frame = 1 << 20
+
+	// MaxCertificationResponseV1Frame is the limit for the CBOR payload (excluding the varint length prefix) of a legacy V1 frame (the bare CertificationResponse,
+	// "/ab/certificates/0.0.1"). It is derived, not chosen: the V2 envelope is this response plus an optional view, so V2's limit already bounds the
+	// largest response any root produces in either format; a response that does not fit it cannot be sent in any format. Receive and send both enforce it (#956).
+	MaxCertificationResponseV1Frame = MaxCertificationResponseV2Frame
 )
 
 /*

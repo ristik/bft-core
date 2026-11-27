@@ -3,7 +3,7 @@
 <title>Unicity test UCT faucet</title>
 <style>body{max-width:40rem;margin:4rem auto;padding:1rem;font:18px system-ui;background:#f6f7fa;color:#17233a}button{padding:1rem;font:inherit}pre{white-space:pre-wrap;overflow-wrap:anywhere}</style>
 <h1>Test UCT for gas</h1>
-<p>Get 0.01 UCT. One claim per wallet and IP every 24 hours, subject to availability.</p>
+<p id="terms">Test UCT, one claim per wallet every 24 hours, subject to availability.</p>
 <p><strong>No real value.</strong> This testnet may reset at any time. UCT and other assets may disappear without notice or obligation.</p>
 <p>Connect an EVM wallet configured for this testnet. Its chain ID and block-zero hash must match.</p>
 <div id="captcha"></div><p><button id="claim" disabled>Connect wallet and claim</button></p><pre id="result"></pre>
@@ -14,6 +14,8 @@ const output = document.getElementById('result');
 async function init() {
   network = await (await fetch('/api/network')).json();
   output.textContent = `Chain ID: ${network.chain_id}\nGenesis: ${network.genesis_hash}`;
+  document.getElementById('terms').textContent =
+    `Get ${network.payout} UCT. One claim per wallet${network.limit_per_ip ? ' and IP' : ''} every 24 hours, subject to availability.`;
   if (network.captcha_sitekey) {
     const deadline = Date.now() + 10000;
     while (!window.hcaptcha) {
@@ -28,14 +30,33 @@ document.getElementById('claim').onclick = async () => {
   try {
     if (!window.ethereum) throw Error('Install or open an EVM wallet.');
     const [address] = await ethereum.request({method:'eth_requestAccounts'});
+    // Wallets remember a network per site, so ask the wallet to switch to this testnet,
+    // and to add it if the wallet does not know it yet (error 4902).
+    const chainHex = '0x' + network.chain_id.toString(16);
+    try {
+      await ethereum.request({method:'wallet_switchEthereumChain',params:[{chainId:chainHex}]});
+    } catch (error) {
+      if ((error.code !== 4902 && error.data?.originalError?.code !== 4902) || !network.rpc_url) throw error;
+      await ethereum.request({method:'wallet_addEthereumChain',params:[{chainId:chainHex,
+        chainName:'Unicity testnet',nativeCurrency:{name:'UCT',symbol:'UCT',decimals:18},
+        rpcUrls:[network.rpc_url]}]});
+    }
     const chain = await ethereum.request({method:'eth_chainId'});
     const genesis = await ethereum.request({method:'eth_getBlockByNumber',params:['0x0',false]});
-    if (Number(BigInt(chain)) !== network.chain_id || genesis.hash.toLowerCase() !== network.genesis_hash)
-      throw Error('Wrong network or reset genesis. Reconfigure your wallet before claiming.');
+    const seenChain = Number(BigInt(chain)), seenGenesis = (genesis?.hash || '').toLowerCase();
+    if (seenChain !== network.chain_id)
+      throw Error(`Wrong network: the wallet is on chain ID ${seenChain}, this testnet is ${network.chain_id}. Switch the wallet's network for this site and retry.`);
+    if (seenGenesis !== network.genesis_hash)
+      throw Error(`Reset genesis: the wallet's RPC reports block zero ${seenGenesis || 'unknown'}, this testnet's is ${network.genesis_hash}. Point the network's RPC URL at ${network.rpc_url} and retry.`);
     const response = await fetch('/api/claim', {method:'POST',headers:{'Content-Type':'application/json',
       'h-captcha-response':widget === undefined ? '' : hcaptcha.getResponse(widget)},
       body:JSON.stringify({address,chain_id:network.chain_id,genesis_hash:genesis.hash.toLowerCase()})});
-    output.textContent = JSON.stringify(await response.json(),null,2);
+    const reply = (await response.json().catch(() => null)) || {};
+    const text = reply.msg || reply.message || JSON.stringify(reply);
+    const hash = /0x[0-9a-fA-F]{64}/.exec(text);
+    output.textContent = !response.ok ? `Claim not completed (HTTP ${response.status}): ${text}`
+      : hash ? `Sent ${network.payout} UCT to ${address}.\nTransaction: ${hash[0]}\nIt shows in the wallet after the next block, within about 10 s.`
+      : `Claim accepted: ${text}\nCheck the wallet balance after the next block.`;
     if (widget !== undefined) hcaptcha.reset(widget);
   } catch (error) { output.textContent = error.message; }
 };

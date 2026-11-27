@@ -137,12 +137,8 @@ q3_handoff() {
 # round (E,A*). No epoch-2 certificate may exist before it (the root's verified state still reports epoch 1), and the first one after it is read in
 # q3_activation against A*.
 q3_install_epoch2() {
-  local before r
-  for r in $H3_ROOTS; do
-    before=$(q3_signers_of "$r" | jq -r .epoch) || return 1
-    [ "$before" = 1 ] || { echo "root $r already reports a certificate of epoch $before before its install restart" >&2; return 1; }
-  done
-  h3_restart_roots 2 || { echo "root restart into epoch 2 failed" >&2; return 1; }
+  local r
+  q3_install_roots 2 || return 1   # a root that switched into epoch 2 in process (bft-core#1086) is installed; the others restart
   for r in $(seq 1 120); do
     [ "$(q3_signers_of "$(h3_first_root)" 2>/dev/null | jq -r .epoch 2>/dev/null)" = 2 ] && break
     sleep 1

@@ -121,6 +121,68 @@ func configureOperatorSources(log *slog.Logger, list string) error {
 	return nil
 }
 
+// The Host boundary (astra review of #1185, P3): a page served under a hostname that an attacker re-binds to this machine reaches the loopback
+// listener with a loopback TCP peer, and a same-origin GET need not carry Origin. The operator endpoints therefore also require the request's
+// Host to be an IP literal (a re-bound name never is one), localhost, or a name the operator configured with --operator-allowed-hosts.
+
+// operatorHostsUsage is the help text of --operator-allowed-hosts.
+const operatorHostsUsage = `comma-separated host names, besides IP literals and localhost, that the operator endpoints accept in a request's Host header ` +
+	`(the DNS-rebinding boundary); empty by default`
+
+var activeOperatorHosts atomic.Pointer[map[string]bool]
+
+func init() {
+	activeOperatorHosts.Store(&map[string]bool{})
+}
+
+// parseOperatorHosts reads a comma-separated list of host names (empty: none besides IP literals and localhost). A name with a port, a path or an
+// empty element is an error.
+func parseOperatorHosts(list string) (map[string]bool, error) {
+	out := map[string]bool{}
+	if strings.TrimSpace(list) == "" {
+		return out, nil
+	}
+	for _, item := range strings.Split(list, ",") {
+		name := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(item)), ".")
+		if name == "" || strings.ContainsAny(name, ":/[]@ ") {
+			return nil, fmt.Errorf("--operator-allowed-hosts: %q is not a host name", item)
+		}
+		out[name] = true
+	}
+	return out, nil
+}
+
+// configureOperatorHosts validates the flag value and installs it for the process; it is called at start, before any endpoint is served.
+func configureOperatorHosts(list string) error {
+	hosts, err := parseOperatorHosts(list)
+	if err != nil {
+		return err
+	}
+	activeOperatorHosts.Store(&hosts)
+	return nil
+}
+
+// operatorHostAllowed reports whether a request's Host header names this root as an operator addresses it: an IP literal, localhost, or a
+// configured name (with any port).
+func operatorHostAllowed(hostHeader string) bool {
+	host := hostHeader
+	if h, _, err := net.SplitHostPort(hostHeader); err == nil {
+		host = h
+	}
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	if host == "" {
+		return false
+	}
+	if _, err := netip.ParseAddr(host); err == nil {
+		return true
+	}
+	name := strings.TrimSuffix(strings.ToLower(host), ".")
+	return name == "localhost" || (testOperatorHost != "" && name == testOperatorHost) || (*activeOperatorHosts.Load())[name]
+}
+
+// testOperatorHost is a name the package's tests address the endpoints under (httptest's default host); empty outside tests.
+var testOperatorHost string
+
 // remoteHost is the host part of a request's TCP peer address.
 func remoteHost(remoteAddr string) string {
 	host, _, err := net.SplitHostPort(remoteAddr)

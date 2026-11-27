@@ -2,6 +2,7 @@ package q3active
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 
@@ -14,10 +15,15 @@ import (
 // ErrBundle is returned for a staged bundle that is not one canonical encoding, or that does not carry the activation it is for.
 var ErrBundle = errors.New("q3active: invalid activation bundle")
 
-// Bundle is the unit the install journal stages and replays: the proof envelope that authenticates the activation (the lineage
-// rooted in the trusted genesis, with the old committee's commit proof of the activating link), the native recovery checkpoint of
-// the old epoch that the root installs its anchor from, and the EVM assignment candidate when the handoff carries one. Nothing in
-// it is trusted: the envelope is verified by the history, the checkpoint is re-authenticated against that verified entry.
+// Bundle is the unit the install journal stages and replays: the proof envelope that authenticates the activation (the old
+// committee's commit proof of the activating link), the native recovery checkpoint of the old epoch that the root installs its anchor
+// from, and the EVM assignment candidate when the handoff carries one. Nothing in it is trusted: the envelope is verified by the
+// receiver's own history, forward from its pin, and the checkpoint is re-authenticated against that verified entry.
+//
+// The envelope of an activation carries only the activating link (#1035). Its lineage is the receiver's own verified history: a
+// receiver that lacks earlier epochs takes them first, each from its own bundle and in epoch order, so what one bundle carries does
+// not grow with the number of epochs. A bundle that an earlier version staged with the whole lineage (at most q3format.MaxLinks
+// links) still decodes, verifies and replays: its retained links are references to verified entries.
 type Bundle struct {
 	_         struct{} `cbor:",toarray"`
 	Envelope  []byte
@@ -74,7 +80,7 @@ func activatingProof(env q3format.Envelope) (handoff.OldCommitProof, error) {
 
 // StagedBundle is the bundle of an activation exactly as the journal staged it, for a node that has already installed (or begun to install)
 // that epoch: it needs no live evidence from the committed tree, which no longer holds the old tip once the roots have moved on. ok is false
-// when the journal holds no activation of the epoch.
+// when the journal holds no activation of the epoch. It scans the journal: a serving path uses StagedBundleAt, one indexed read.
 func (r *Runtime) StagedBundle(epoch uint64) (b Bundle, ok bool, err error) {
 	staged, err := r.journal.Staged()
 	if err != nil {
@@ -90,26 +96,30 @@ func (r *Runtime) StagedBundle(epoch uint64) (b Bundle, ok bool, err error) {
 	return Bundle{}, false, nil
 }
 
+// StagedBundleAt is StagedBundle by one indexed, cancellation-aware read of the epoch's stage (q3install.Journal.StagedEpoch): bounded
+// work whatever the history's length, and no journal lock held, so an untrusted reader cannot contend with activation or recovery.
+func (r *Runtime) StagedBundleAt(ctx context.Context, epoch uint64) (b Bundle, ok bool, err error) {
+	a, ok, err := r.journal.StagedEpoch(ctx, epoch)
+	if err != nil || !ok {
+		return Bundle{}, false, err
+	}
+	b, _, err = DecodeBundle(a.Bundle)
+	return b, err == nil, err
+}
+
 // BundleFor assembles the staged bundle of the activation a validator holds the evidence of (consensus.Q3ActivationEvidence): the link, the
 // committed checkpoint and the candidate preimage. The history derives the link's claim and verifies the old committee's commit proof under
-// its own epoch's keys, weights and scheme; the lineage of earlier activations is the journal's own retained envelope, so the envelope the
-// bundle carries rebuilds the whole history from the pinned genesis. An activation the history already holds is returned as the journal
-// staged it. Nothing the caller passes is trusted: a link the history does not authenticate is an error.
+// its own epoch's keys, weights and scheme. The envelope carries that one link: a receiver verifies it against its own history, which must
+// already hold the previous epoch (q3format.ErrMissingHistory otherwise), so the bundle stays the same size however long the chain is. An
+// activation the journal already holds is returned as the journal staged it. Nothing the caller passes is trusted: a link the history does
+// not authenticate is an error.
 func (r *Runtime) BundleFor(l q3format.Link, head *abdrc.CommittedBlock, candidate []byte) (Bundle, error) {
-	staged, err := r.journal.Staged()
-	if err != nil {
-		return Bundle{}, err
-	}
-	var lineage []q3format.Link
-	for _, a := range staged {
-		b, env, err := DecodeBundle(a.Bundle)
+	if a, ok, err := r.journal.StagedEpoch(context.Background(), l.Body.Epoch); err != nil || ok { // one indexed read, never a journal scan
 		if err != nil {
 			return Bundle{}, err
 		}
-		if a.Claim.Epoch == l.Body.Epoch {
-			return b, nil // already staged: serve exactly what the journal holds
-		}
-		lineage = env.Links
+		b, _, err := DecodeBundle(a.Bundle)
+		return b, err // already staged: serve exactly what the journal holds
 	}
 	h := r.History()
 	if _, err := h.ForEpoch(l.Body.Epoch); err == nil {
@@ -125,7 +135,7 @@ func (r *Runtime) BundleFor(l q3format.Link, head *abdrc.CommittedBlock, candida
 		return Bundle{}, err
 	}
 	env := q3format.Envelope{RootInput: p.Record.Bytes(), TargetParent: bytes.Clone(l.Evidence.FrozenParent),
-		Links: append(append([]q3format.Link(nil), lineage...), l)}
+		Links: []q3format.Link{l}}
 	raw, err := env.Encode()
 	if err != nil {
 		return Bundle{}, err

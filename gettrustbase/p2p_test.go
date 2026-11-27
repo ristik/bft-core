@@ -3,6 +3,7 @@ package gettrustbase
 import (
 	"bufio"
 	"bytes"
+	"github.com/unicitynetwork/bft-go-base/types"
 	"testing"
 
 	"github.com/unicitynetwork/bft-core/internal/testutils/peer"
@@ -16,11 +17,11 @@ func testutilsPeer(t *testing.T) *testPeer {
 }
 
 // decodeFrame reads one length-prefixed response frame.
-func decodeFrame(b []byte) (*Response, [][]byte, error) {
-	raw, err := readFrame(bufio.NewReader(bytes.NewReader(b)), DefaultMaxResponse)
+func decodeFrame(b []byte) (*types.TrustBaseResponse, [][]byte, error) {
+	raw, err := readFrame(bufio.NewReader(bytes.NewReader(b)), types.DefaultTrustBaseMaxResponse)
 	if err != nil {
 		return nil, nil, err
 	}
-	r, _, err := DecodeResponse(raw, PageLimits)
+	r, _, err := types.DecodeTrustBaseResponse(raw, types.TrustBasePageLimits)
 	return r, nil, err
 }

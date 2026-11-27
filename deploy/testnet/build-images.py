@@ -8,23 +8,31 @@ import pathlib
 import shutil
 import subprocess
 
+from imagetag import build   # noqa: E402  per-pin immutable tags (bft-core#1092)
+
 HERE = pathlib.Path(__file__).resolve().parent
 PINS = json.loads((HERE / 'pins.json').read_text())
 
 def run(*args):
     return subprocess.check_output(args, text=True).strip()
 
+
 def main():
     p = argparse.ArgumentParser()
     for name in ('bft', 'ureth', 'aggregator-go'):
         p.add_argument('--' + name + '-source', required=True, type=pathlib.Path)
+    p.add_argument('--aggregator-variant', choices=('integration', 'upstream'), default='integration',
+                   help='which aggregator the aggregator-go source must be: the integration aggregator (pin aggregator-go) or the upstream-facing one (pin aggregator-go-upstream: Mongo trust-base history, UTB_BUNDLE_FILE)')
     a = p.parse_args()
+    sources = dict(PINS)
+    if a.aggregator_variant == 'upstream':
+        sources['aggregator-go'] = PINS['aggregator-go-upstream']
     artifacts = HERE / 'artifacts'
     artifacts.mkdir(exist_ok=True)
     records = {}
     for name, binary in (('bft', 'ubft'), ('ureth', 'unicity-reth'), ('aggregator-go', 'aggregator')):
         src = getattr(a, name.replace('-', '_') + '_source').resolve()
-        if run('git', '-C', str(src), 'rev-parse', 'HEAD') != PINS[name]:
+        if run('git', '-C', str(src), 'rev-parse', 'HEAD') != sources[name]:
             raise SystemExit(name + ' source pin mismatch')
         if run('git', '-C', str(src), 'status', '--porcelain', '--untracked-files=no'):
             raise SystemExit(name + ' dirty source')
@@ -45,20 +53,18 @@ def main():
         shutil.copy2(path, artifacts / binary)
         records[binary] = hashlib.sha256(path.read_bytes()).hexdigest()
     shutil.copy2(HERE / 'Dockerfile.node', artifacts / 'Dockerfile')
-    subprocess.run(['docker', 'build', '-t', 'tnops-node:verified', str(artifacts)], check=True)
+    pin = sources['bft'][:12]
+    images, tags = {}, {}
+    images['node'], tags['node'] = build('node', pin, str(artifacts))
     for binary in ('ubft', 'unicity-reth'):
-        subprocess.run(['docker', 'run', '--rm', '--entrypoint', binary, 'tnops-node:verified', '--help'], check=True, stdout=subprocess.DEVNULL)
+        subprocess.run(['docker', 'run', '--rm', '--entrypoint', binary, images['node'], '--help'], check=True, stdout=subprocess.DEVNULL)
     # aggregator-go has no --help: it reads its environment and starts; ldd shows its cgo libraries resolve in the image
-    subprocess.run(['docker', 'run', '--rm', '--entrypoint', 'ldd', 'tnops-node:verified', '/usr/local/bin/aggregator'], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(['docker', 'run', '--rm', '--entrypoint', 'ldd', images['node'], '/usr/local/bin/aggregator'], check=True, stdout=subprocess.DEVNULL)
     subprocess.run(['docker', 'pull', PINS['mongo']], check=True, stdout=subprocess.DEVNULL)
-    images = {'node': run('docker', 'image', 'inspect', '--format={{.Id}}', 'tnops-node:verified')}
     for kind, dockerfile in (('guard', 'Dockerfile.gateway'), ('signer', 'Dockerfile.backend')):
-        tag = 'tnops-' + kind + ':verified'
-        subprocess.run(['docker', 'build', '-t', tag, '-f', str(HERE / 'faucet' / dockerfile), str(HERE / 'faucet')], check=True)
-        images[kind] = run('docker', 'image', 'inspect', '--format={{.Id}}', tag)
-    subprocess.run(['docker', 'build', '-t', 'tnops-rpc:verified', '-f', str(HERE / 'Dockerfile.rpc'), str(HERE)], check=True)
-    images['rpc'] = run('docker', 'image', 'inspect', '--format={{.Id}}', 'tnops-rpc:verified')
-    (artifacts / 'images.json').write_text(json.dumps({'sources': PINS, 'binary_sha256': records, 'images': images}, indent=2) + '\n')
+        images[kind], tags[kind] = build(kind, pin, '-f', str(HERE / 'faucet' / dockerfile), str(HERE / 'faucet'))
+    images['rpc'], tags['rpc'] = build('rpc', pin, '-f', str(HERE / 'Dockerfile.rpc'), str(HERE))
+    (artifacts / 'images.json').write_text(json.dumps({'sources': sources, 'binary_sha256': records, 'images': images, 'tags': tags}, indent=2) + '\n')
     print(artifacts / 'images.json')
 
 if __name__ == '__main__':

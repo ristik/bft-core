@@ -30,6 +30,60 @@ type PosControl struct {
 	// Data is the ABI-encoded payload of the projected record: ClosureData (192 bytes), RetirementData (96) or SessionClosedData (32).
 	Data        []byte
 	WitnessHash [32]byte
+
+	// Registry marks a validator-registry (VR) mode control (schema-v1 section 8, FD-10): the same ten-element shape under the tag
+	// UNICITY_VR_CONTROL, Custody holding VR's address. Its ops are 1 CloseLiability (192-byte Closure), 2 HolderRetirement v2 (context
+	// [evmBlockHash, evmStateRoot], 128-byte HolderRetirement), 3 RejectResult v2 (the RejectResult context, 128-byte OutputRejected),
+	// 4 RuleSupport (Support, no data, zero witness hash), 5 HandoffView (View, no data, zero witness hash) and 6 PoPRequest (Request, no
+	// data, zero witness hash); a VR RejectResult may carry certified handoff-PoP misses as a fifth context element (#1319). The item encoding is
+	// vrschema.EncodeVRControl's (a cross-check test pins it; rctypes cannot import vrschema, which depends on it).
+	Registry bool
+	Support  []SupportCommitment
+	View     *ViewContext
+	// Request is the context [intentDigest] of op 6 PoPRequest (#1319): root-only, no data, zero witness hash.
+	Request *RequestContext
+}
+
+// RequestContext is the context [intentDigest] of PoPRequest.
+type RequestContext struct {
+	IntentDigest [32]byte
+}
+
+// MissSig is one signer of a handoff-PoP miss certificate: [nodeID, sig], field for field vrschema.MissSig.
+type MissSig struct {
+	_      struct{} `cbor:",toarray"`
+	NodeID string
+	Sig    []byte
+}
+
+// MissCertificate is [stakingID, [MissSig]], field for field vrschema.MissCertificate.
+type MissCertificate struct {
+	_         struct{} `cbor:",toarray"`
+	StakingID uint64
+	Sigs      []MissSig
+}
+
+// MaxMissCertificates bounds the certificates of one RejectResult v2 (one per roster member, at most 16).
+const MaxMissCertificates = 16
+
+// SupportCommitment is one rule-support commitment of a RuleSupport control: [network, stakingID, generation, rootKeyHash, bindingRef,
+// ruleId, releaseDigest, sig], field for field vrschema.SupportCommitment.
+type SupportCommitment struct {
+	_             struct{} `cbor:",toarray"`
+	Network       uint64
+	StakingID     []byte
+	Generation    uint64
+	RootKeyHash   []byte
+	BindingRef    []byte
+	RuleID        []byte
+	ReleaseDigest []byte
+	Sig           []byte
+}
+
+// ViewContext is the context [intentDigest, view] of HandoffView.
+type ViewContext struct {
+	IntentDigest [32]byte
+	View         uint64
 }
 
 // CloseContext is the context [closedEpoch, bundleSemanticID] of CloseLiability.
@@ -47,6 +101,9 @@ type RejectContext struct {
 	PredecessorBodyID          [32]byte
 	Attempt                    uint64
 	EVMBlockHash, EVMStateRoot [32]byte
+	// Misses are a VR RejectResult's certified handoff-PoP misses (#1319), the context's optional fifth element: nil keeps the four-element
+	// context of an ordinary rejection. A P85 control never carries them.
+	Misses []MissCertificate
 }
 
 const (
@@ -55,6 +112,15 @@ const (
 	OpCloseLiability uint64 = 1
 	OpRetirement     uint64 = 2
 	OpRejectResult   uint64 = 3
+
+	// VRControlTag is the tag of a VR-mode control; op 2 is HolderRetirement v2 and op 3 RejectResult v2 under it.
+	VRControlTag         = "UNICITY_VR_CONTROL"
+	OpRuleSupport uint64 = 4
+	OpHandoffView uint64 = 5
+	OpPoPRequest  uint64 = 6
+
+	// MaxRuleSupportCommitments bounds one RuleSupport control (64, the rules of the support table).
+	MaxRuleSupportCommitments = 64
 
 	// MaxPosControls bounds the controls of one root block; the executor additionally caps the newly projected records at 32.
 	MaxPosControls = 32
@@ -66,19 +132,50 @@ var (
 )
 
 // dataWidth is the exact ABI width of each op's record payload and uintMask the payload words that are uint64 (high bits zero).
-func dataShape(op uint64) (width int, uintMask uint) {
+func dataShape(op uint64, registry bool) []int {
+	if registry {
+		// the frozen record word types (vrschema.RecordWordTypes): 0 is bytes32, otherwise the integer's bit width, 1 a bool
+		switch op {
+		case OpCloseLiability:
+			return []int{0, 64, 0, 0, 0, 0} // Closure (assignmentID, hRound, hRecordID, terminalRoot, exposureDigest, keyHistoryDigest)
+		case OpRetirement:
+			return []int{8, 64, 64, 0} // HolderRetirement (holder uint8, id, generation, refDigest)
+		case OpRejectResult:
+			return []int{0, 8, 64, 16} // OutputRejected (resultID, reason uint8, memberId, readyBitmap uint16)
+		}
+		return nil // RuleSupport, HandoffView: no data
+	}
 	switch op {
 	case OpCloseLiability:
-		return 192, 0b000010 // (assignmentID, hRound, hRecordID, terminalRoot, exposureDigest, keyHistoryDigest)
+		return []int{0, 64, 0, 0, 0, 0} // (assignmentID, hRound, hRecordID, terminalRoot, exposureDigest, keyHistoryDigest)
 	case OpRetirement:
-		return 96, 0b011 // (id, generation, refDigest)
+		return []int{64, 64, 0} // (id, generation, refDigest)
 	case OpRejectResult:
-		return 32, 0 // (resultID)
+		return []int{0} // (resultID)
 	}
-	return 0, 0
+	return nil
+}
+
+// wordFits reports a big-endian word whose value fits bits (every higher byte zero, and the top byte's spare bits zero); a bool word
+// (bits 1) is exactly 0 or 1.
+func wordFits(w []byte, bits int) bool {
+	full := 32 - (bits+7)/8
+	if !bytes.Equal(w[:full], make([]byte, full)) {
+		return false
+	}
+	if r := bits % 8; r != 0 && w[full]>>r != 0 {
+		return false
+	}
+	return true
 }
 
 func (c PosControl) contextValue() ([]any, error) {
+	if c.Registry {
+		return c.vrContextValue()
+	}
+	if c.Support != nil || c.View != nil || c.Request != nil || (c.Reject != nil && c.Reject.Misses != nil) {
+		return nil, fmt.Errorf("%w: a P85 control carries a VR context", ErrPosControl)
+	}
 	switch {
 	case c.Op == OpCloseLiability && c.Close != nil && c.Retire == nil && c.Reject == nil:
 		return []any{c.Close.ClosedEpoch, c.Close.BundleSemanticID[:]}, nil
@@ -90,24 +187,116 @@ func (c PosControl) contextValue() ([]any, error) {
 	return nil, fmt.Errorf("%w: op %d does not match its context", ErrPosControl, c.Op)
 }
 
+func (c PosControl) vrContextValue() ([]any, error) {
+	none := func(close, retire, reject, support, view, request bool) bool {
+		return (c.Close != nil) == close && (c.Retire != nil) == retire && (c.Reject != nil) == reject && (c.Support != nil) == support && (c.View != nil) == view &&
+			(c.Request != nil) == request
+	}
+	switch {
+	case c.Op == OpCloseLiability && none(true, false, false, false, false, false):
+		return []any{c.Close.ClosedEpoch, c.Close.BundleSemanticID[:]}, nil
+	case c.Op == OpRetirement && none(false, true, false, false, false, false):
+		return []any{c.Retire.EVMBlockHash[:], c.Retire.EVMStateRoot[:]}, nil
+	case c.Op == OpRejectResult && none(false, false, true, false, false, false):
+		ctx := []any{c.Reject.PredecessorBodyID[:], c.Reject.Attempt, c.Reject.EVMBlockHash[:], c.Reject.EVMStateRoot[:]}
+		if c.Reject.Misses == nil {
+			return ctx, nil
+		}
+		if err := checkMisses(c.Reject.Misses); err != nil {
+			return nil, err
+		}
+		return append(ctx, c.Reject.Misses), nil
+	case c.Op == OpPoPRequest && none(false, false, false, false, false, true):
+		if c.Request.IntentDigest == ([32]byte{}) {
+			return nil, fmt.Errorf("%w: PoPRequest of a zero intent", ErrPosControl)
+		}
+		return []any{c.Request.IntentDigest[:]}, nil
+	case c.Op == OpRuleSupport && none(false, false, false, true, false, false):
+		if len(c.Support) == 0 || len(c.Support) > MaxRuleSupportCommitments {
+			return nil, fmt.Errorf("%w: %d rule-support commitments", ErrPosControl, len(c.Support))
+		}
+		for i, x := range c.Support {
+			if len(x.StakingID) != 32 || len(x.RootKeyHash) != 32 || len(x.BindingRef) != 32 || len(x.RuleID) != 32 || len(x.ReleaseDigest) != 32 || len(x.Sig) != 65 {
+				return nil, fmt.Errorf("%w: rule-support commitment %d shape", ErrPosControl, i)
+			}
+			if i > 0 {
+				p := c.Support[i-1]
+				if k := bytes.Compare(p.StakingID, x.StakingID); k > 0 || (k == 0 && bytes.Compare(p.RuleID, x.RuleID) >= 0) {
+					return nil, fmt.Errorf("%w: rule-support commitments not strictly ascending by (stakingID, ruleId)", ErrPosControl)
+				}
+			}
+		}
+		return []any{c.Support}, nil
+	case c.Op == OpHandoffView && none(false, false, false, false, true, false):
+		if c.View.IntentDigest == ([32]byte{}) || c.View.View == 0 {
+			return nil, fmt.Errorf("%w: HandoffView of a zero intent or view 0", ErrPosControl)
+		}
+		return []any{c.View.IntentDigest[:], c.View.View}, nil
+	}
+	return nil, fmt.Errorf("%w: VR op %d does not match its context", ErrPosControl, c.Op)
+}
+
+// checkMisses is the stateless shape of a certificate list (vrschema.CheckMissCertificates): 1..16 certificates strictly ascending by staking
+// id, each with 1..64 signatures strictly ascending by node id, every signature 65 bytes.
+func checkMisses(cs []MissCertificate) error {
+	if len(cs) == 0 || len(cs) > MaxMissCertificates {
+		return fmt.Errorf("%w: %d miss certificates", ErrPosControl, len(cs))
+	}
+	for i, x := range cs {
+		if i > 0 && cs[i-1].StakingID >= x.StakingID {
+			return fmt.Errorf("%w: miss certificates not strictly ascending by staking id", ErrPosControl)
+		}
+		if len(x.Sigs) == 0 || len(x.Sigs) > 64 {
+			return fmt.Errorf("%w: miss certificate %d carries %d signatures", ErrPosControl, i, len(x.Sigs))
+		}
+		for k, sg := range x.Sigs {
+			if sg.NodeID == "" || len(sg.Sig) != 65 || (k > 0 && x.Sigs[k-1].NodeID >= sg.NodeID) {
+				return fmt.Errorf("%w: miss certificate %d signature %d", ErrPosControl, i, k)
+			}
+		}
+	}
+	return nil
+}
+
+func (c PosControl) tag() string {
+	if c.Registry {
+		return VRControlTag
+	}
+	return PosControlTag
+}
+
 // Validate is the stateless shape check: a known op with its context, the exact payload width, uint64 payload words within range.
 func (c PosControl) Validate() error {
 	if _, err := c.contextValue(); err != nil {
 		return err
 	}
-	width, mask := dataShape(c.Op)
-	if len(c.Data) != width {
-		return fmt.Errorf("%w: op %d payload is %d bytes, want %d", ErrPosControl, c.Op, len(c.Data), width)
+	words := dataShape(c.Op, c.Registry)
+	if len(c.Data) != 32*len(words) {
+		return fmt.Errorf("%w: op %d payload is %d bytes, want %d", ErrPosControl, c.Op, len(c.Data), 32*len(words))
 	}
-	for j := 0; j < width/32; j++ {
-		if mask&(1<<j) != 0 && !bytes.Equal(c.Data[32*j:32*j+24], make([]byte, 24)) {
-			return fmt.Errorf("%w: payload word %d exceeds uint64", ErrPosControl, j)
+	for j, bits := range words {
+		if bits != 0 && !wordFits(c.Data[32*j:32*j+32], bits) {
+			return fmt.Errorf("%w: payload word %d exceeds uint%d", ErrPosControl, j, bits)
 		}
 	}
 	if c.Op == OpCloseLiability && c.Close.ClosedEpoch == 0 {
 		return fmt.Errorf("%w: closed epoch zero", ErrPosControl)
 	}
+	if c.Registry && rootOnly(c.Op) && c.WitnessHash != ([32]byte{}) {
+		return fmt.Errorf("%w: a root-only control carries no witness", ErrPosControl)
+	}
 	return nil
+}
+
+// CarriesWitness reports whether the control commits to a retained witness. The VR root-only controls, RuleSupport and HandoffView, carry none
+// (Validate refuses a witness hash on them): there is nothing to fetch for them, and their zero hash is no witness.
+func (c PosControl) CarriesWitness() bool {
+	return !(c.Registry && rootOnly(c.Op))
+}
+
+// rootOnly reports the VR root-only ops: RuleSupport, HandoffView and PoPRequest.
+func rootOnly(op uint64) bool {
+	return op == OpRuleSupport || op == OpHandoffView || op == OpPoPRequest
 }
 
 // MarshalCBOR encodes the canonical ten-element item.
@@ -116,7 +305,11 @@ func (c PosControl) MarshalCBOR() ([]byte, error) {
 		return nil, err
 	}
 	ctx, _ := c.contextValue()
-	return types.Cbor.Marshal([]any{PosControlTag, c.Network, c.ChainID[:], c.Custody[:], c.OrderingEpoch, c.OrderingRound, c.Op, ctx, c.Data, c.WitnessHash[:]})
+	data := c.Data
+	if data == nil {
+		data = []byte{}
+	}
+	return types.Cbor.Marshal([]any{c.tag(), c.Network, c.ChainID[:], c.Custody[:], c.OrderingEpoch, c.OrderingRound, c.Op, ctx, data, c.WitnessHash[:]})
 }
 
 func exactBytes(v any, n int) ([]byte, bool) {
@@ -131,10 +324,12 @@ func (c *PosControl) UnmarshalCBOR(data []byte) error {
 	if err := types.Cbor.Unmarshal(data, &f); err != nil || len(f) != 10 {
 		return fmt.Errorf("%w: item shape", ErrPosControl)
 	}
-	if tag, ok := f[0].(string); !ok || tag != PosControlTag {
+	tag, ok := f[0].(string)
+	if !ok || (tag != PosControlTag && tag != VRControlTag) {
 		return fmt.Errorf("%w: tag", ErrPosControl)
 	}
 	var out PosControl
+	out.Registry = tag == VRControlTag
 	var good [9]bool
 	out.Network, good[0] = f[1].(uint64)
 	chain, ok := exactBytes(f[2], 32)
@@ -175,7 +370,7 @@ func (c *PosControl) UnmarshalCBOR(data []byte) error {
 		out.Retire = &RetireContext{}
 		copy(out.Retire.EVMBlockHash[:], bh)
 		copy(out.Retire.EVMStateRoot[:], sr)
-	case out.Op == OpRejectResult && len(ctx) == 4:
+	case out.Op == OpRejectResult && (len(ctx) == 4 || (out.Registry && len(ctx) == 5)):
 		pb, ok1 := exactBytes(ctx[0], 32)
 		attempt, ok2 := ctx[1].(uint64)
 		bh, ok3 := exactBytes(ctx[2], 32)
@@ -187,8 +382,37 @@ func (c *PosControl) UnmarshalCBOR(data []byte) error {
 		copy(out.Reject.PredecessorBodyID[:], pb)
 		copy(out.Reject.EVMBlockHash[:], bh)
 		copy(out.Reject.EVMStateRoot[:], sr)
+		if len(ctx) == 5 {
+			raw, err := types.Cbor.Marshal(ctx[4])
+			if err != nil || types.Cbor.Unmarshal(raw, &out.Reject.Misses) != nil || out.Reject.Misses == nil {
+				return fmt.Errorf("%w: rejection misses", ErrPosControl)
+			}
+		}
+	case out.Registry && out.Op == OpRuleSupport && len(ctx) == 1:
+		raw, err := types.Cbor.Marshal(ctx[0])
+		if err != nil || types.Cbor.Unmarshal(raw, &out.Support) != nil || out.Support == nil {
+			return fmt.Errorf("%w: rule-support context", ErrPosControl)
+		}
+	case out.Registry && out.Op == OpHandoffView && len(ctx) == 2:
+		id, ok1 := exactBytes(ctx[0], 32)
+		view, ok2 := ctx[1].(uint64)
+		if !ok1 || !ok2 {
+			return fmt.Errorf("%w: HandoffView context", ErrPosControl)
+		}
+		out.View = &ViewContext{View: view}
+		copy(out.View.IntentDigest[:], id)
+	case out.Registry && out.Op == OpPoPRequest && len(ctx) == 1:
+		id, ok := exactBytes(ctx[0], 32)
+		if !ok {
+			return fmt.Errorf("%w: PoPRequest context", ErrPosControl)
+		}
+		out.Request = &RequestContext{}
+		copy(out.Request.IntentDigest[:], id)
 	default:
 		return fmt.Errorf("%w: op %d", ErrPosControl, out.Op)
+	}
+	if len(out.Data) == 0 {
+		out.Data = nil
 	}
 	if err := out.Validate(); err != nil {
 		return err
@@ -201,9 +425,13 @@ func (c *PosControl) UnmarshalCBOR(data []byte) error {
 	return nil
 }
 
-// closureEpoch, retirementKey are the identities the ordering rule sorts and de-duplicates by.
-func (c PosControl) retirementKey() [2]uint64 {
-	return [2]uint64{beUint64(c.Data[24:32]), beUint64(c.Data[56:64])}
+// RetirementKey is the identity by which valid retirement controls are sorted and deduplicated.
+// A P85 Retirement is keyed (0, id, generation), a VR HolderRetirement (holder, id, generation).
+func (c PosControl) RetirementKey() [3]uint64 {
+	if c.Registry {
+		return [3]uint64{beUint64(c.Data[24:32]), beUint64(c.Data[56:64]), beUint64(c.Data[88:96])}
+	}
+	return [3]uint64{0, beUint64(c.Data[24:32]), beUint64(c.Data[56:64])}
 }
 
 func beUint64(b []byte) (v uint64) {
@@ -214,8 +442,9 @@ func beUint64(b []byte) (v uint64) {
 }
 
 // validatePosControls is the payload-level rule: at most MaxPosControls; every item valid; the mandatory closures first in strictly
-// ascending closed epoch, then at most one RejectResult, then Retirements in strictly ascending (id, generation). Duplicates and any
-// other order are refused, so the executor never has a tie to break.
+// ascending closed epoch, then at most one RejectResult, then Retirements in strictly ascending (id, generation) (VR: (holder, id,
+// generation)), then, in VR mode only, the RuleSupport controls, at most one PoPRequest and at most one HandoffView, last. Duplicates and any other order are
+// refused, so the executor never has a tie to break; P85 and VR controls never share a block.
 func validatePosControls(cs []PosControl) error {
 	if len(cs) > MaxPosControls {
 		return fmt.Errorf("%w: %d controls", ErrPosControl, len(cs))
@@ -226,13 +455,32 @@ func validatePosControls(cs []PosControl) error {
 			return 0
 		case OpRejectResult:
 			return 1
+		case OpRetirement:
+			return 2
+		case OpRuleSupport:
+			return 3
+		case OpPoPRequest:
+			return 4
 		}
-		return 2
+		return 5
 	}
-	rejects := 0
+	rejects, views, requests := 0, 0, 0
 	for i, c := range cs {
 		if err := c.Validate(); err != nil {
 			return fmt.Errorf("control %d: %w", i, err)
+		}
+		if c.Registry != cs[0].Registry {
+			return fmt.Errorf("%w: P85 and VR controls in one block", ErrPosControl)
+		}
+		if c.Op == OpHandoffView {
+			if views++; views > 1 {
+				return fmt.Errorf("%w: more than one HandoffView in a block", ErrPosControl)
+			}
+		}
+		if c.Op == OpPoPRequest {
+			if requests++; requests > 1 {
+				return fmt.Errorf("%w: more than one PoPRequest in a block", ErrPosControl)
+			}
 		}
 		if c.Op == OpRejectResult {
 			if rejects++; rejects > 1 {
@@ -248,11 +496,18 @@ func validatePosControls(cs []PosControl) error {
 			return fmt.Errorf("%w: control %d is out of group order", ErrPosControl, i)
 		case gc == gp && c.Op == OpCloseLiability && c.Close.ClosedEpoch <= p.Close.ClosedEpoch:
 			return fmt.Errorf("%w: closures must ascend by closed epoch without duplicates", ErrPosControl)
-		case gc == gp && c.Op == OpRetirement && !lessKey(p.retirementKey(), c.retirementKey()):
+		case gc == gp && c.Op == OpRetirement && !lessKey(p.RetirementKey(), c.RetirementKey()):
 			return fmt.Errorf("%w: retirements must ascend by (id, generation) without duplicates", ErrPosControl)
 		}
 	}
 	return nil
 }
 
-func lessKey(a, b [2]uint64) bool { return a[0] < b[0] || a[0] == b[0] && a[1] < b[1] }
+func lessKey(a, b [3]uint64) bool {
+	for i := range a {
+		if a[i] != b[i] {
+			return a[i] < b[i]
+		}
+	}
+	return false
+}

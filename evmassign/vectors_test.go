@@ -149,7 +149,8 @@ func buildVectors(t *testing.T) vectorFile {
 		{"popRecovery", "recovery byte flipped", "ErrPoP", "VerifyPoPs", "signature otherwise valid"},
 		{"rootMembers", "successor root members differ from the body", "ErrContext", "VerifyBinding", "assignment valid"},
 		{"coupling", "a root member without its delegated EVM key (or a shared key, a weight mismatch)", "ErrCoupling", "VerifyBinding", "assignment valid"},
-		{"evmOnly", "EVM validators changed with the root committee unchanged", "ErrEVMOnly", "VerifyInstalled", "assignment valid"},
+		{"evmOnly", "EVM validators added, removed or reweighted with the root committee unchanged (a binding replacement of a retained root entity against its K binding is allowed, #1286)", "ErrEVMOnly", "VerifyInstalled", "assignment valid"},
+		{"swappedBinding", "root committee unchanged; a retained entity bound to another entity's kept delegate", "ErrEVMOnly", "VerifyInstalled", "assignment valid"},
 		{"installedEpoch", "OldShardEpoch != installed", "ErrContext", "VerifyInstalled", "assignment valid"},
 		{"installedHash", "OldActiveHash != installed full hash", "ErrContext", "VerifyInstalled", "assignment valid"},
 	}

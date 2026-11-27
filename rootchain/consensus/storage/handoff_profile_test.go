@@ -62,6 +62,12 @@ func profileStore(t *testing.T) *BlockStore {
 func installTestFrozenShard(t *testing.T, s *BlockStore, parent []byte) {
 	t.Helper()
 	key := []byte{0x3, 0x24, 0x8b, 0x61, 0x68, 0x51, 0xac, 0x6e, 0x43, 0x7e, 0xc2, 0x4e, 0xcc, 0x21, 0x9e, 0x5b, 0x42, 0x43, 0xdf, 0xa5, 0xdb, 0xdb, 0x8, 0xce, 0xa6, 0x48, 0x3a, 0xc9, 0xe0, 0xdc, 0x6b, 0x55, 0xcd}
+	installTestFrozenShardKeyed(t, s, parent, key)
+}
+
+// installTestFrozenShardKeyed is installTestFrozenShard with the validator "n" holding key.
+func installTestFrozenShardKeyed(t *testing.T, s *BlockStore, parent, key []byte) {
+	t.Helper()
 	conf := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: 8, PartitionTypeID: 8,
 		Validators: []*types.NodeInfo{{NodeID: "n", SigKey: key, Stake: 1}}}
 	si, err := NewShardInfo(conf, crypto.SHA256)
@@ -78,7 +84,7 @@ func installTestFrozenShard(t *testing.T, s *BlockStore, parent []byte) {
 		UC: types.UnicityCertificate{Version: 1, InputRecord: si.IR, TRHash: trHash, ShardConfHash: si.ShardConfHash,
 			UnicityTreeCertificate: &types.UnicityTreeCertificate{Version: 1, Partition: conf.PartitionID},
 			ShardTreeCertificate:   types.ShardTreeCertificate{Shard: conf.ShardID}, UnicitySeal: &types.UnicitySeal{Version: 1}}}
-	root := s.blockTree.Root()
+	root := s.tree().Root()
 	root.ShardState.States[shard] = si
 	tree, _, err := root.ShardState.UnicityTree(crypto.SHA256)
 	require.NoError(t, err)
@@ -97,7 +103,7 @@ func installTestAggregatorShards(t *testing.T, s *BlockStore) [2]types.Partition
 	configs, err := s.orchestration.ShardConfigs(1)
 	require.NoError(t, err)
 	evmKey := configs[types.PartitionShardID{PartitionID: 8, ShardID: (types.ShardID{}).Key()}].Validators[0].SigKey
-	root := s.blockTree.Root()
+	root := s.tree().Root()
 	for i, id := range ids {
 		conf := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: 9, PartitionTypeID: 9, ShardID: id,
 			Validators: []*types.NodeInfo{{NodeID: "n", SigKey: evmKey, Stake: 1}}}
@@ -187,7 +193,7 @@ func TestOrderedFreezeStopsOnlyFrozenShardAndAbortReopensIt(t *testing.T) {
 	s := profileStore(t)
 	frozenParent := bytes.Repeat([]byte{0x42}, 32)
 	installTestFrozenShard(t, s, frozenParent)
-	root := s.blockTree.Root()
+	root := s.tree().Root()
 	rootShard := types.PartitionShardID{PartitionID: 8, ShardID: (types.ShardID{}).Key()}
 	aggregator := types.PartitionShardID{PartitionID: 9, ShardID: (types.ShardID{}).Key()}
 	conf := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: 9, PartitionTypeID: 9,
@@ -246,7 +252,7 @@ func TestCommitRequiresFrozenParentAtCommittedTip(t *testing.T) {
 	body, frozen := bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32)
 	addProfileBlock(t, s, 2, [][]byte{record("prepare", 2, 7, zero, body, zero)})
 	addProfileBlock(t, s, 3, [][]byte{record("freeze", 3, 7, frozen, body, zero)})
-	root := s.blockTree.Root()
+	root := s.tree().Root()
 	rootShard := root.ShardState.States[types.PartitionShardID{PartitionID: 8, ShardID: (types.ShardID{}).Key()}]
 	changedIR := *rootShard.IR
 	changedIR.BlockHash = bytes.Repeat([]byte{0x43}, 32)
@@ -418,7 +424,7 @@ func TestInstallEpochAnchorFromRecoveryCheckpoint(t *testing.T) {
 	installTestFrozenShard(t, s, bytes.Repeat([]byte{0x42}, 32))
 	zero := make([]byte, 32)
 	body, frozen := bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32)
-	tr, err := s.blockTree.Root().ShardState.States[types.PartitionShardID{PartitionID: 8, ShardID: (types.ShardID{}).Key()}].TR.Hash()
+	tr, err := s.tree().Root().ShardState.States[types.PartitionShardID{PartitionID: 8, ShardID: (types.ShardID{}).Key()}].TR.Hash()
 	require.NoError(t, err)
 	addProfileBlock(t, s, 2, [][]byte{record("prepare", 2, 7, zero, body, zero)})
 	addProfileBlock(t, s, 3, [][]byte{record("freeze", 3, 7, frozen, body, zero)})
@@ -426,7 +432,7 @@ func TestInstallEpochAnchorFromRecoveryCheckpoint(t *testing.T) {
 	suffix := addProfileBlock(t, s, 5, nil)
 	anchoredTR, err := suffix.ShardState.States[types.PartitionShardID{PartitionID: 8, ShardID: (types.ShardID{}).Key()}].TR.Hash()
 	require.NoError(t, err)
-	_, err = s.blockTree.Commit(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 5, ParentRoundNumber: 4, Epoch: 1},
+	_, err = s.tree().Commit(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 5, ParentRoundNumber: 4, Epoch: 1},
 		LedgerCommitInfo: &types.UnicitySeal{Version: 1, RootChainRoundNumber: 4, Epoch: 1, Hash: h.RootHash}})
 	require.NoError(t, err)
 	rec := evmroot.OrderedHandoffRecord{Network: 5, Epoch: 1, OrderedRound: 4, PredecessorBodyID: zero,
@@ -447,7 +453,7 @@ func TestInstallEpochAnchorFromRecoveryCheckpoint(t *testing.T) {
 	require.ErrorIs(t, s.AnchoredFrozenParent(anchoredTR, bytes.Repeat([]byte{0x43}, 32)), rctypes.ErrEpochAnchor)
 	require.ErrorIs(t, s.AnchoredFrozenParent(anchoredTR, []byte{1}), rctypes.ErrEpochAnchor)
 	require.ErrorIs(t, s.AnchoredFrozenParent(bytes.Repeat([]byte{0x44}, 32), bytes.Repeat([]byte{0x42}, 32)), rctypes.ErrEpochAnchor)
-	anchoredRoot := s.blockTree.Root()
+	anchoredRoot := s.tree().Root()
 	require.Equal(t, head.Block.Timestamp, anchoredRoot.BlockData.Timestamp)
 	shardKey := types.PartitionShardID{PartitionID: 8, ShardID: (types.ShardID{}).Key()}
 	anchoredShard := anchoredRoot.ShardState.States[shardKey]
@@ -459,11 +465,11 @@ func TestInstallEpochAnchorFromRecoveryCheckpoint(t *testing.T) {
 	require.ErrorIs(t, s.AnchoredFrozenParent(anchoredTR, bytes.Repeat([]byte{0x42}, 32)), rctypes.ErrEpochAnchor)
 	delete(anchoredRoot.ShardState.States, duplicateKey)
 	require.EqualValues(t, 6, a.Slot)
-	require.True(t, isEpochAnchorRoot(s.blockTree.Root()))
+	require.True(t, isEpochAnchorRoot(s.tree().Root()))
 	reloaded, err := New(crypto.SHA256, s.storage, s.orchestration, logger.New(t), ProfileHandoff)
 	require.NoError(t, err)
-	require.Equal(t, head.Block.Timestamp, reloaded.blockTree.Root().BlockData.Timestamp)
-	require.True(t, isEpochAnchorRoot(reloaded.blockTree.Root()))
+	require.Equal(t, head.Block.Timestamp, reloaded.tree().Root().BlockData.Timestamp)
+	require.True(t, isEpochAnchorRoot(reloaded.tree().Root()))
 	anchorState, err := reloaded.GetState()
 	require.NoError(t, err)
 	require.Equal(t, a, anchorState.CommittedHead.Anchor)
@@ -579,7 +585,7 @@ func TestTwoConsecutiveRootHandoffsRestartAtEachPhase(t *testing.T) {
 		_, err = s.Add(&rctypes.BlockData{Version: 3, Epoch: 2, Round: round + 1, Payload: &rctypes.Payload{Version: 3},
 			Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round, Epoch: 2, CurrentRootHash: acked.RootHash}}}, nil)
 		require.NoError(t, err)
-		_, err = s.blockTree.Commit(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round + 1, ParentRoundNumber: round, Epoch: 2},
+		_, err = s.tree().Commit(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round + 1, ParentRoundNumber: round, Epoch: 2},
 			LedgerCommitInfo: &types.UnicitySeal{Version: 1, RootChainRoundNumber: round, Epoch: 2, Hash: acked.RootHash}})
 		require.NoError(t, err)
 	}
@@ -631,7 +637,7 @@ func TestTwoConsecutiveRootHandoffsRestartAtEachPhase(t *testing.T) {
 				RoundNumber: base + 2, Epoch: epoch, CurrentRootHash: prior.RootHash}}}, nil)
 		require.NoError(t, err)
 		suffix := mustBlock(t, s, base+3)
-		_, err = s.blockTree.Commit(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{
+		_, err = s.tree().Commit(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{
 			RoundNumber: base + 3, ParentRoundNumber: base + 2, Epoch: epoch},
 			LedgerCommitInfo: &types.UnicitySeal{Version: 1, RootChainRoundNumber: base + 2,
 				Epoch: epoch, Hash: h.RootHash}})
@@ -730,7 +736,7 @@ func TestCommittedAbortReplayRetainsPhaseAndResumesEVMRequests(t *testing.T) {
 	// the head is built from an uncommitted block (its input record is past the last response): a checkpoint, authenticated by its own verification
 	restarted, err := NewFromCheckpoint(crypto.SHA256, checkpoint, s.GetDB(), s.orchestration, logger.New(t), ProfileHandoff)
 	require.NoError(t, err, "recovery after durable Abort retains the authenticated phase")
-	root := restarted.blockTree.Root()
+	root := restarted.tree().Root()
 	require.Equal(t, "aborted", root.ShardState.Control.Phase)
 	block := &rctypes.BlockData{Version: 3, Round: 4, Epoch: 1,
 		Payload: &rctypes.Payload{Version: 3, Requests: []*rctypes.IRChangeReq{{Partition: 8}}},
@@ -775,14 +781,14 @@ func TestCommittedHandoffSuffixClearsPendingChanges(t *testing.T) {
 	require.NoError(t, err)
 	suffix := addProfileBlock(t, recovered, 5, nil)
 	marker := types.PartitionShardID{PartitionID: 99}
-	recovered.blockTree.Root().ShardState.Changed[marker] = struct{}{}
+	recovered.tree().Root().ShardState.Changed[marker] = struct{}{}
 	suffix.ShardState.Changed[marker] = struct{}{}
 	qc := &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 6, ParentRoundNumber: 5, Epoch: 1},
 		LedgerCommitInfo: &types.UnicitySeal{Hash: suffix.RootHash}}
-	ucs, err := recovered.blockTree.Commit(qc)
+	ucs, err := recovered.tree().Commit(qc)
 	require.NoError(t, err)
 	require.Empty(t, ucs)
-	require.Empty(t, recovered.blockTree.Root().ShardState.Changed)
+	require.Empty(t, recovered.tree().Root().ShardState.Changed)
 }
 
 func TestProfileOffNonemptyByteIdentity(t *testing.T) {

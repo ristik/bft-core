@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -30,25 +32,53 @@ func main() {
 		fmt.Println(crypto.PubkeyToAddress(key.PublicKey).Hex())
 		return
 	}
-	if len(os.Args) != 2 {
-		panic("usage: keygen <new private directory> | keygen address <key file> | keygen owners <new private directory> <identities>")
+	if len(os.Args) != 2 && len(os.Args) != 3 {
+		panic("usage: keygen <new private directory> [<genesis balance, wei>] | keygen address <key file> | keygen owners <new private directory> <identities>")
 	}
-	dir := os.Args[1]
-	must(os.Mkdir(dir, 0700))
+	balance := DefaultFaucetBalanceWei
+	if len(os.Args) == 3 {
+		balance = os.Args[2]
+	}
+	must(faucet(os.Args[1], balance, os.Stdout))
+}
+
+// DefaultFaucetBalanceWei is the faucet account's genesis balance when generate.py names none: 50,000 UCT, 250 claims at the package's default payout of
+// 200 UCT (5 days at its default 50 claims a day).
+const DefaultFaucetBalanceWei = "50000000000000000000000"
+
+// faucet makes the faucet account in a new 0700 directory (its keystore and password in 0600 files) and writes the genesis alloc that funds it with
+// balanceWei (a positive decimal integer, wei) to out.
+func faucet(dir, balanceWei string, out io.Writer) error {
+	balance, ok := new(big.Int).SetString(balanceWei, 10)
+	if !ok || balance.Sign() <= 0 || balance.String() != balanceWei {
+		return fmt.Errorf("faucet balance must be a positive decimal number of wei, got %q", balanceWei)
+	}
+	if err := os.Mkdir(dir, 0700); err != nil {
+		return err
+	}
 	key, err := crypto.GenerateKey()
-	must(err)
+	if err != nil {
+		return err
+	}
 	password := make([]byte, 32)
-	_, err = rand.Read(password)
-	must(err)
+	if _, err = rand.Read(password); err != nil {
+		return err
+	}
 	pass := hex.EncodeToString(password)
 	address := crypto.PubkeyToAddress(key.PublicKey)
 	data, err := keystore.EncryptKey(&keystore.Key{Id: uuid.New(), Address: address, PrivateKey: key}, pass, keystore.StandardScryptN, keystore.StandardScryptP)
-	must(err)
-	must(os.WriteFile(filepath.Join(dir, "keystore.json"), data, 0600))
-	must(os.WriteFile(filepath.Join(dir, "password"), []byte(pass), 0600))
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "keystore.json"), data, 0600); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "password"), []byte(pass), 0600); err != nil {
+		return err
+	}
 	// Fresh genesis funds only this random account, never the public Hardhat key.
-	alloc := map[string]any{address.Hex(): map[string]string{"balance": "1000000000000000000000"}}
-	must(json.NewEncoder(os.Stdout).Encode(alloc))
+	alloc := map[string]any{address.Hex(): map[string]string{"balance": balance.String()}}
+	return json.NewEncoder(out).Encode(alloc)
 }
 
 // owners writes one secp256k1 key per role (owner, withdrawal, payee) of each genesis identity of the PoS profile, as 0x-prefixed hex private keys (the form `ubft pos-relayer --sender-key` reads) in 0600 files under a new 0700

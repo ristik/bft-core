@@ -15,7 +15,7 @@ import (
 
 // Fetcher retrieves one page from one peer. *Client implements it.
 type Fetcher interface {
-	Page(ctx context.Context, id peer.ID, req *Request) (*Response, [][]byte, error)
+	Page(ctx context.Context, id peer.ID, req *Request) (*types.TrustBaseResponse, [][]byte, error)
 }
 
 // Sink is the store being caught up. *utbstore.Store implements it; Append is the only way in and authenticates each entry from the held tip.
@@ -28,8 +28,8 @@ type Sink interface {
 type SyncOptions struct {
 	Network    types.NetworkID
 	To         *uint64       // optional end epoch
-	MaxEntries uint32        // requested page entries, default DefaultMaxEntries
-	MaxBytes   uint32        // requested page bytes, default DefaultMaxResponse
+	MaxEntries uint32        // requested page entries, default types.DefaultTrustBaseMaxEntries
+	MaxBytes   uint32        // requested page bytes, default types.DefaultTrustBaseMaxResponse
 	Rounds     int           // passes over the peer list before giving up, default 2
 	Backoff    time.Duration // pause between passes, default 200 ms
 }
@@ -47,10 +47,10 @@ func Sync(ctx context.Context, f Fetcher, sink Sink, peers []peer.ID, opt SyncOp
 		return 0, ErrNoPeer
 	}
 	if opt.MaxEntries == 0 {
-		opt.MaxEntries = DefaultMaxEntries
+		opt.MaxEntries = types.DefaultTrustBaseMaxEntries
 	}
 	if opt.MaxBytes == 0 {
-		opt.MaxBytes = DefaultMaxResponse
+		opt.MaxBytes = types.DefaultTrustBaseMaxResponse
 	}
 	if opt.Rounds == 0 {
 		opt.Rounds = 2
@@ -85,21 +85,21 @@ func Sync(ctx context.Context, f Fetcher, sink Sink, peers []peer.ID, opt SyncOp
 					break
 				}
 				if resp.Network != opt.Network {
-					last = fmt.Errorf("%w: network %d", ErrResponse, resp.Network)
+					last = fmt.Errorf("%w: network %d", types.ErrTrustBaseResponse, resp.Network)
 					break
 				}
-				if resp.Status == StatusNotYetAvailable && snapEnd == nil && resp.EffectiveEnd < from {
+				if resp.Status == types.TrustBaseStatusNotYetAvailable && snapEnd == nil && resp.EffectiveEnd < from {
 					// A peer's tip is unauthenticated metadata: a lagging or hostile peer must not end the catch-up. Only when every peer says there is
 					// nothing newer is the store current.
 					current++
 					break
 				}
-				if resp.Status != StatusOK {
+				if resp.Status != types.TrustBaseStatusOK {
 					last = fmt.Errorf("peer %s: %s", id, resp.Status)
 					break
 				}
 				if resp.FromEpoch != from || (snapEnd != nil && (resp.EffectiveEnd != *snapEnd || !bytes.Equal(resp.EndEntryID, snapID))) {
-					last = fmt.Errorf("%w: page does not continue the requested range", ErrResponse)
+					last = fmt.Errorf("%w: page does not continue the requested range", types.ErrTrustBaseResponse)
 					break
 				}
 				refused := false

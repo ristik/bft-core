@@ -1,0 +1,167 @@
+package signingauthority
+
+import (
+	"bytes"
+	"fmt"
+
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
+
+	"github.com/unicitynetwork/bft-core/vrschema"
+)
+
+// VR registration and binding rotation (VT-10, astra's design for #1201). The authority's key is the validator's EVM key, so the EVM
+// possession proof of VR.register / VR.proposeBinding is its signature over vrschema.RegistrationDigest. Like the other EVM signatures
+// here this operation takes typed inputs, never a digest: the digest is computed inside the authority from the pinned deployment, the
+// request's owner, identity and registration, and only that digest is signed, for this authority's own enrolled node and key. Operator
+// channel only; the member's possession-proof endpoint never reaches it.
+
+// RegistrationDeployment pins the VR deployment a registration digest binds: its network word, the chain id and VR's address. It is
+// fixed when the authority starts; no request names a deployment.
+type RegistrationDeployment struct {
+	Network, ChainID [32]byte
+	Registry         [20]byte
+}
+
+// RegistrationAuthorization is one registration the operator has authorized this authority to sign: the action (the domain), the owner
+// account that sends the transaction, the identity (0 for a registration), the root node binding and the payee. The EVM node and key
+// are always the authority's own and are not part of the authorization.
+type RegistrationAuthorization struct {
+	Domain     string
+	Owner      [20]byte
+	ID         uint64
+	RootNodeID string
+	RootKey    []byte
+	Payee      [20]byte
+}
+
+// RegistrationPolicy is what an operator starts an authority with to let it sign registrations: the pinned deployment and the authorized
+// registrations. It is immutable for the authority's lifetime (the key does not outlive the process either).
+type RegistrationPolicy struct {
+	Deployment RegistrationDeployment
+	Authorized []RegistrationAuthorization
+}
+
+// WithRegistrationPolicy enables SignRegistration under the policy.
+func WithRegistrationPolicy(p RegistrationPolicy) Option {
+	return func(a *Authority) error {
+		if d := p.Deployment; d.Network == [32]byte{} || d.ChainID == [32]byte{} || d.Registry == [20]byte{} {
+			return fmt.Errorf("the registration policy's deployment pin is incomplete: network, chain id and registry are all required")
+		}
+		// An empty list is a valid start: the deployment is pinned and nothing is authorized yet (ReloadRegistrationAuthorizations).
+		auth, err := copyAuthorizations(p.Authorized)
+		if err != nil {
+			return err
+		}
+		a.registration = &RegistrationPolicy{Deployment: p.Deployment, Authorized: auth}
+		return nil
+	}
+}
+
+func copyAuthorizations(in []RegistrationAuthorization) ([]RegistrationAuthorization, error) {
+	var out []RegistrationAuthorization
+	for _, x := range in {
+		if x.Domain != vrschema.RegisterDomainText && x.Domain != vrschema.BindingDomainText {
+			return nil, fmt.Errorf("%w: policy entry domain %q", ErrRegistrationDomain, x.Domain)
+		}
+		// an entry that can never match a request is a typo the operator should hear of now, not at registration time
+		switch {
+		case (x.Domain == vrschema.RegisterDomainText) != (x.ID == 0):
+			return nil, fmt.Errorf("%w: a register entry has id 0 and a binding entry the identity's nonzero id", ErrRegistrationDomain)
+		case len(x.RootNodeID) < 1 || len(x.RootNodeID) > 128:
+			return nil, fmt.Errorf("policy entry: the root node id is 1..128 bytes")
+		case x.Owner == [20]byte{} || x.Payee == [20]byte{}:
+			return nil, fmt.Errorf("policy entry: the owner and the payee are nonzero addresses")
+		}
+		if _, err := ethcrypto.DecompressPubkey(x.RootKey); err != nil || len(x.RootKey) != 33 {
+			return nil, fmt.Errorf("policy entry: the root key is not a 33-byte compressed point of the curve")
+		}
+		x.RootKey = bytes.Clone(x.RootKey)
+		out = append(out, x)
+	}
+	return out, nil
+}
+
+// ReloadRegistrationAuthorizations replaces the list of authorized registrations of a running authority (the operator's refresh: the
+// identity id is allocated by VR only at registration, and a later payee or root key is unknown at startup). It changes nothing else: the
+// deployment pin, the signing key and the signing record stay as they are, and an authority started without a policy refuses it. Operator
+// channel only.
+//
+// The caller names the deployment its list is for; it must equal the pin from startup, so a policy file made for another deployment
+// (staging against production) is refused whole.
+func (a *Authority) ReloadRegistrationAuthorizations(expect RegistrationDeployment, list []RegistrationAuthorization) error {
+	auth, err := copyAuthorizations(list)
+	if err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.registration == nil {
+		return fmt.Errorf("%w: this authority was started without a registration policy (no deployment pin)", ErrRegistrationUnauthorized)
+	}
+	if expect != a.registration.Deployment {
+		return fmt.Errorf("%w: the policy is for another deployment (network, chain id or registry) than this authority's pin", ErrRegistrationDeployment)
+	}
+	a.registration = &RegistrationPolicy{Deployment: a.registration.Deployment, Authorized: auth}
+	return nil
+}
+
+// RegistrationRequest asks for the possession signature this authority's key owes a registration (domain unicity.vr.register, ID 0) or a
+// binding proposal (domain unicity.vr.binding, the identity's nonzero ID). Owner is the account that sends the transaction (msg.sender).
+type RegistrationRequest struct {
+	Domain       string
+	Owner        [20]byte
+	ID           uint64
+	Registration vrschema.Registration
+}
+
+// SignRegistration signs vrschema.RegistrationDigest as low-s r||s||v with v 27/28, after it checked: the domain is one of the two and
+// agrees with the identity id; a policy is configured and authorizes this action, owner, identity, root binding and payee; the
+// registration is well formed (shape, both compressed keys on the curve, distinct keys); and its EVM node and key are exactly this
+// authority's enrolled node and key.
+func (a *Authority) SignRegistration(req RegistrationRequest) ([]byte, error) {
+	if _, err := a.fenceGate(); err != nil {
+		return nil, err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	binding := false
+	switch {
+	case req.Domain == vrschema.RegisterDomainText && req.ID == 0:
+	case req.Domain == vrschema.BindingDomainText && req.ID != 0:
+		binding = true
+	default:
+		return nil, fmt.Errorf("%w: %q for identity %d", ErrRegistrationDomain, req.Domain, req.ID)
+	}
+	if a.registration == nil {
+		return nil, fmt.Errorf("%w: this authority was started without a registration policy", ErrRegistrationUnauthorized)
+	}
+	hs, pub, err := a.ethSigner()
+	if err != nil {
+		return nil, err
+	}
+	r := req.Registration
+	if err := r.ValidShape(); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrContextMismatch, err)
+	}
+	for _, k := range [][]byte{r.RootKey, r.EVMKey} {
+		if _, err := ethcrypto.DecompressPubkey(k); err != nil {
+			return nil, fmt.Errorf("%w: a key is not a point of the curve", ErrContextMismatch)
+		}
+	}
+	if r.EVMNodeID != a.enroll.NodeID || !bytes.Equal(r.EVMKey, pub) {
+		return nil, fmt.Errorf("%w: the registration names another EVM node or key than this authority's", ErrContextMismatch)
+	}
+	ok := false
+	for _, x := range a.registration.Authorized {
+		if x.Domain == req.Domain && x.Owner == req.Owner && x.ID == req.ID && x.RootNodeID == r.RootNodeID && bytes.Equal(x.RootKey, r.RootKey) && x.Payee == r.Payee {
+			ok = true
+			break
+		}
+	}
+	if !ok {
+		return nil, fmt.Errorf("%w: no policy entry for this action, owner, identity, root binding and payee", ErrRegistrationUnauthorized)
+	}
+	d := a.registration.Deployment
+	digest := vrschema.RegistrationDigest(binding, d.Network, d.ChainID, d.Registry, req.Owner, req.ID, r)
+	return ethSign(hs, digest)
+}

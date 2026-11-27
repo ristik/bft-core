@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/unicitynetwork/bft-core/shardnode"
 )
 
 func TestCheckedExecutionConfigIdentity(t *testing.T) {
@@ -120,4 +122,40 @@ func TestCheckedExecutionConfigBytesMatchPinnedIdentity(t *testing.T) {
 	if _, err := a.CheckedExecutionConfigBytes(context.Background(), legacy); !errors.Is(err, ErrSealConfigIdentity) {
 		t.Fatalf("changed companion accepted: %v", err)
 	}
+}
+
+func TestLiveFeesKeepGenesisExecutionIdentity(t *testing.T) {
+	ctx := t.Context()
+	legacy := [32]byte{1}
+	genesis := sealConfigWire{Version: 1, MaxGas: 30_000_000, SystemGas: 2_000_000,
+		BaseFeeFloor: 1_000_000, Elasticity: 2, ChangeDenominator: 8, FeeCollector: "0x" + strings.Repeat("12", 20)}
+	genesis.GenesisBaseFeeFloor = genesis.BaseFeeFloor
+	genesis.GenesisChangeDenominator = genesis.ChangeDenominator
+	genesis.GenesisFeeCollector = genesis.FeeCollector
+	current := genesis
+	engine := newMockReth(t, Secret{})
+	engine.on("engine_sealConfigV1", func(json.RawMessage) (any, *rpcError) { return current, nil })
+	a, closeFn := newTestAdapter(t, engine, newMockReth(t, Secret{}))
+	defer closeFn()
+	a.feeCollector = filledCollector()
+	legacyID, err := a.readExecutionConfigIdentity(ctx, legacy)
+	require.NoError(t, err)
+	a.resolveCollector = func(context.Context, *EthClient, shardnode.BlockRef) ([20]byte, error) {
+		panic("the generation identity does not read a per-block collector")
+	}
+	pinned, err := a.CheckedExecutionConfigIdentity(ctx, legacy)
+	require.NoError(t, err)
+	require.Equal(t, legacyID, pinned)
+
+	current.EffectiveBlock = 101
+	current.BaseFeeFloor = 5_000_000
+	current.ChangeDenominator = 4
+	current.FeeCollector = "0x" + strings.Repeat("34", 20)
+	id, err := a.CheckedExecutionConfigIdentity(ctx, legacy)
+	require.NoError(t, err)
+	require.Equal(t, pinned, id)
+
+	current.GenesisChangeDenominator++
+	_, err = a.CheckedExecutionConfigIdentity(ctx, legacy)
+	require.ErrorIs(t, err, ErrSealConfigIdentity)
 }

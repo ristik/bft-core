@@ -156,7 +156,7 @@ func TestSignedFrontierInitialAndOrdinaryPairsFromRealLoop(t *testing.T) {
 		h.start(t)
 		si, err := h.cm.ShardInfo(partitionID, shardID)
 		require.NoError(t, err)
-		require.NoError(t, h.cm.RequestCertification(context.Background(), IRChangeRequest{Partition: partitionID, Shard: shardID, Reason: Quorum, Requests: buildBlockCertificationRequest(t, h.shardNodes, si.LastCR)}))
+		require.NoError(t, h.cm.RequestCertification(context.Background(), IRChangeRequest{RootEpoch: h.cm.InstalledRootEpoch(), Partition: partitionID, Shard: shardID, Reason: Quorum, Requests: buildBlockCertificationRequest(t, h.shardNodes, si.LastCR)}))
 		h.commitRoundTwo(t)
 		response, err := h.cm.SampleSignedFrontier(context.Background(), signedRequest(t, h, 0x22))
 		require.NoError(t, err)
@@ -532,7 +532,7 @@ func TestSignedFrontierRepliesFormClientQuorumEndToEnd(t *testing.T) {
 	// when it arrives from an author already counted for the initial pair.
 	si, err := cms[0].ShardInfo(partitionID, shardID)
 	require.NoError(t, err)
-	require.NoError(t, cms[0].RequestCertification(context.Background(), IRChangeRequest{Partition: partitionID, Shard: shardID, Reason: Quorum, Requests: buildBlockCertificationRequest(t, shardNodes, si.LastCR)}))
+	require.NoError(t, cms[0].RequestCertification(context.Background(), IRChangeRequest{RootEpoch: cms[0].InstalledRootEpoch(), Partition: partitionID, Shard: shardID, Reason: Quorum, Requests: buildBlockCertificationRequest(t, shardNodes, si.LastCR)}))
 	var ordinary *SignedFrontierResponse
 	require.Eventually(t, func() bool {
 		ordinary, err = cms[0].SampleSignedFrontier(context.Background(), request)
@@ -628,13 +628,13 @@ func TestFrontierClientBudgetBindingAndCanonicalRejection(t *testing.T) {
 	require.NotEqual(t, mutated, before.CanonicalPair())
 }
 
-func TestFrontierClientRetainsOrdinaryDespiteInvalidOuterAndRefusesUnknownSealSigner(t *testing.T) {
+func TestFrontierClientRetainsOrdinaryDespiteInvalidOuterAndIgnoresUnknownSealSigner(t *testing.T) {
 	h := newFrontierHarnessWithSigner(t, nil, true)
 	h.start(t)
 	request := signedRequest(t, h, 0x79)
 	si, err := h.cm.ShardInfo(partitionID, shardID)
 	require.NoError(t, err)
-	require.NoError(t, h.cm.RequestCertification(context.Background(), IRChangeRequest{Partition: partitionID, Shard: shardID, Reason: Quorum, Requests: buildBlockCertificationRequest(t, h.shardNodes, si.LastCR)}))
+	require.NoError(t, h.cm.RequestCertification(context.Background(), IRChangeRequest{RootEpoch: h.cm.InstalledRootEpoch(), Partition: partitionID, Shard: shardID, Reason: Quorum, Requests: buildBlockCertificationRequest(t, h.shardNodes, si.LastCR)}))
 	h.commitRoundTwo(t)
 	ordinary, err := h.cm.SampleSignedFrontier(context.Background(), request)
 	require.NoError(t, err)
@@ -651,13 +651,7 @@ func TestFrontierClientRetainsOrdinaryDespiteInvalidOuterAndRefusesUnknownSealSi
 	wire.Signature = nil // Negative evidence is independent of positive-only outer fields.
 	altered, err := types.Cbor.Marshal(wire)
 	require.NoError(t, err)
-	// D3 section 3: a signer that is not a member rejects the certificate; it is no longer skipped
-	require.ErrorIs(t, c.Add(altered).Err, frontierclient.ErrUnauthentic)
-	delete(pair.UC.UnicitySeal.Signatures, "unknown-root")
-	wire.Pair, err = types.Cbor.Marshal(pair)
-	require.NoError(t, err)
-	altered, err = types.Cbor.Marshal(wire)
-	require.NoError(t, err)
+	// the seal rule (upstream): a signer that is not a member counts zero and does not fail the seal; the honest quorum holds
 	result := c.Add(altered)
 	require.Equal(t, frontierclient.OrdinaryObserved, result.Status)
 	require.NoError(t, result.Err)

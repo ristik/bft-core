@@ -114,21 +114,24 @@ func TestSubmitCalldata(t *testing.T) {
 // fakeChain answers the submitter's reads from a small state and records what it sends. It encodes with the same ABIs, so a wrong selector,
 // argument type or tuple shape in the submitter fails here.
 type fakeChain struct {
-	t        *testing.T
-	f        *fixture
-	rec      *SlotRecord
-	seen     bool
-	progress uint64
-	asg      Assignment
-	terms    Terms
-	rootKeyH [32]byte
-	epoch    uint64
-	lots     []*big.Int
-	cursor   uint32
-	maxBatch uint32
-	admitted map[[32]byte]bool
-	sent     [][]byte
-	sendErr  error
+	t          *testing.T
+	f          *fixture
+	rec        *SlotRecord
+	seen       bool
+	progress   uint64
+	asg        Assignment
+	terms      Terms
+	rootKeyH   [32]byte
+	epoch      uint64
+	lots       []*big.Int
+	cursor     uint32
+	maxBatch   uint32
+	admitted   map[[32]byte]bool
+	sent       [][]byte
+	sendErr    error
+	compact    bool
+	readErrors map[string]error
+	lotCount   *uint32
 }
 
 func newFakeChain(t *testing.T, f *fixture, rec *SlotRecord) *fakeChain {
@@ -157,6 +160,9 @@ func (c *fakeChain) Call(_ context.Context, to [20]byte, data []byte) ([]byte, e
 	require.NoError(c.t, err)
 	in, err := m.Inputs.Unpack(data[4:])
 	require.NoError(c.t, err)
+	if err := c.readErrors[m.Name]; err != nil {
+		return nil, err
+	}
 	var out []any
 	switch m.Name {
 	case "network":
@@ -184,6 +190,25 @@ func (c *fakeChain) Call(_ context.Context, to [20]byte, data []byte) ([]byte, e
 		}
 		out = []any{uint8(1), [32]byte{}, epoch, uint64(0), c.asg.Offset, c.asg.FirstRound, c.asg.OffsetSet, c.asg.HKnown, c.asg.HRound, c.asg.Closed,
 			c.asg.PClose, uint64(0), [32]byte{}, [32]byte{}, [32]byte{}, uint32(1)}
+	case "assignmentSeatCount":
+		n := int64(0)
+		if c.compact {
+			n = 1
+		}
+		out = []any{big.NewInt(n)}
+	case "assignmentSeat":
+		require.True(c.t, c.compact)
+		require.Equal(c.t, assignment, in[0])
+		require.Zero(c.t, in[1].(*big.Int).Sign())
+		seat := custodySeat{ExposureID: exposure, LotID: c.lots[0]}
+		seat.Binding.RootKeyHash = c.rootKeyH
+		out = []any{seat}
+	case "caseLocation":
+		id := [32]byte{}
+		if c.compact {
+			id = assignment
+		}
+		out = []any{id, big.NewInt(0)}
 	case "assignmentExposures":
 		out = []any{[][32]byte{exposure}}
 	case "exposures":
@@ -194,6 +219,9 @@ func (c *fakeChain) Call(_ context.Context, to [20]byte, data []byte) ([]byte, e
 		out = []any{c.lots}
 	case "caseInfo":
 		v := caseView{ExposureID: exposure, Budget: big.NewInt(0), Debited: big.NewInt(0), Cursor: c.cursor, LotCount: uint32(len(c.lots))}
+		if c.lotCount != nil {
+			v.LotCount = *c.lotCount
+		}
 		if c.admitted[in[0].([32]byte)] || c.cursor > 0 {
 			v.Reporter = ethcommon.Address{0xaa}
 		}
@@ -216,7 +244,8 @@ func (c *fakeChain) Send(_ context.Context, to [20]byte, _ *big.Int, data []byte
 	if c.sendErr != nil {
 		return ethcommon.Hash{}, c.sendErr
 	}
-	if string(data[:4]) == string(evidenceAbi.Methods["submitEvidence"].ID) {
+	if string(data[:4]) == string(evidenceAbi.Methods["submitEvidence"].ID) ||
+		string(data[:4]) == string(evidenceAbi.Methods["submitSeatEvidence"].ID) {
 		caseID, err := CaseID(netWord, chainID, evAddr, c.offence())
 		require.NoError(c.t, err)
 		c.admitted[caseID] = true
@@ -237,6 +266,86 @@ func TestCaseIDMatchesTheContractFormula(t *testing.T) {
 	got, err := CaseID(netWord, chainID, evAddr, offence)
 	require.NoError(t, err)
 	require.Equal(t, [32]byte(want), got)
+}
+
+func TestCompactSeatLocator(t *testing.T) {
+	f := newFixture(t)
+	rec := pairedRecord(t, f)
+	c := newFakeChain(t, f, rec)
+	c.compact = true
+	c.lots = []*big.Int{big.NewInt(11)}
+	ctx := context.Background()
+	s := c.submitter()
+	res, err := s.Submit(ctx, rec)
+	require.NoError(t, err)
+	require.Equal(t, Submitted, res.Outcome)
+	require.Len(t, c.sent, 1)
+	method := evidenceAbi.Methods["submitSeatEvidence"]
+	require.Equal(t, method.ID, c.sent[0][:4])
+	values, err := method.Inputs.Unpack(c.sent[0][4:])
+	require.NoError(t, err)
+	require.Equal(t, assignment, values[3])
+	require.Zero(t, values[4].(*big.Int).Sign())
+	require.Equal(t, exposure, values[5])
+	count, err := s.Settle(ctx, res.CaseID)
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+	settle := evidenceAbi.Methods["settleEvidence"]
+	values, err = settle.Inputs.Unpack(c.sent[1][4:])
+	require.NoError(t, err)
+	require.Equal(t, []*big.Int{big.NewInt(11)}, values[1])
+}
+
+func TestTransientCompactEvidenceReadsCanBeRetried(t *testing.T) {
+	f := newFixture(t)
+	rec := pairedRecord(t, f)
+	c := newFakeChain(t, f, rec)
+	c.compact = true
+	c.lots = []*big.Int{big.NewInt(11)}
+	s := c.submitter()
+	ctx := context.Background()
+
+	c.readErrors = map[string]error{"assignmentSeatCount": context.DeadlineExceeded}
+	_, err := s.Submit(ctx, rec)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Empty(t, c.sent)
+	delete(c.readErrors, "assignmentSeatCount")
+	res, err := s.Submit(ctx, rec)
+	require.NoError(t, err)
+	require.Equal(t, Submitted, res.Outcome)
+
+	c.readErrors["caseLocation"] = context.DeadlineExceeded
+	n, err := s.Settle(ctx, res.CaseID)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Zero(t, n)
+	require.Len(t, c.sent, 1)
+	delete(c.readErrors, "caseLocation")
+
+	unexpectedCount := uint32(2)
+	c.lotCount = &unexpectedCount
+	n, err = s.Settle(ctx, res.CaseID)
+	require.ErrorContains(t, err, "case expects 2 lots")
+	require.Zero(t, n)
+	require.Len(t, c.sent, 1)
+	c.lotCount = nil
+	n, err = s.Settle(ctx, res.CaseID)
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+}
+
+func TestLegacyEvidenceUnknownSelectors(t *testing.T) {
+	f := newFixture(t)
+	rec := pairedRecord(t, f)
+	c := newFakeChain(t, f, rec)
+	c.readErrors = map[string]error{"assignmentSeatCount": revertErr{"0x"}, "caseLocation": revertErr{"0x"}}
+	s := c.submitter()
+	ctx := context.Background()
+	res, err := s.Submit(ctx, rec)
+	require.NoError(t, err)
+	require.Equal(t, Submitted, res.Outcome)
+	n, err := s.Settle(ctx, res.CaseID)
+	require.NoError(t, err)
+	require.Equal(t, 3, n)
 }
 
 func TestSubmit(t *testing.T) {

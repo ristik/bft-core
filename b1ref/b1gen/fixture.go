@@ -20,6 +20,7 @@ type fixture struct {
 	scheme    map[uint32][]string // nil: the default scheme
 	states    map[string][]byte   // input record state hash by ucKey, overriding the derived one
 	irTime    uint64              // input record timestamp, overriding genesisTime+1000 when nonzero
+	sealPrev  *[32]byte           // the seal's previous hash, overriding the derived one when set (OpenTip)
 }
 
 // scheme maps partition to its shard scheme.
@@ -126,6 +127,9 @@ func (f *fixture) build(variant string, round uint64, signers []validator, withV
 
 	seal := sealSpec{network: f.network, round: round, epoch: f.epoch, timestamp: genesisTime + 5000 + round,
 		prev: newDRBG(f.seed, "prev/"+variant).hash(), root: root.hash}
+	if f.sealPrev != nil {
+		seal.prev = *f.sealPrev
+	}
 	seal.signWith(signers, withV)
 	for _, p := range parts {
 		var key [4]byte

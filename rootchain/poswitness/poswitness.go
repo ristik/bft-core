@@ -6,7 +6,7 @@
 // a peer can withhold a witness (the node then does not vote and recovers later) but never substitute one.
 //
 // The protocol is one request per stream: the 32-byte hash, answered by a 4-byte big-endian length and that many bytes, or length zero
-// when the peer does not hold it. It is served only to the root nodes of the current trust base.
+// when the peer does not hold it. It is served only to authorized roots, including the staged successor committee.
 package poswitness
 
 import (
@@ -89,14 +89,12 @@ type Server struct {
 
 	mu      sync.Mutex
 	pending int
-	peers   map[peer.ID]*peerState
+	peers   map[peer.ID]int // active streams per peer
 }
-
-type peerState struct{ active int }
 
 // NewServer serves source to the peers allowed accepts. allowed is consulted per request, so a trust-base change takes effect at once.
 func NewServer(source Source, allowed func(peer.ID) bool) *Server {
-	return &Server{source: source, allowed: allowed, peers: map[peer.ID]*peerState{}}
+	return &Server{source: source, allowed: allowed, peers: map[peer.ID]int{}}
 }
 
 // Handler is the libp2p stream handler.
@@ -141,15 +139,11 @@ func (s *Server) admit(from peer.ID) bool {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st := s.peers[from]
-	if st == nil {
-		st = &peerState{}
-		s.peers[from] = st
-	}
-	if s.pending >= MaxPendingStreams || st.active >= MaxPendingPerPeer {
+	active := s.peers[from]
+	if s.pending >= MaxPendingStreams || active >= MaxPendingPerPeer {
 		return false
 	}
-	st.active++
+	s.peers[from] = active + 1
 	s.pending++
 	return true
 }
@@ -157,7 +151,11 @@ func (s *Server) admit(from peer.ID) bool {
 func (s *Server) release(from peer.ID) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.peers[from].active--
+	if active := s.peers[from] - 1; active == 0 {
+		delete(s.peers, from)
+	} else {
+		s.peers[from] = active
+	}
 	s.pending--
 }
 

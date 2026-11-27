@@ -1,3 +1,5 @@
+import concurrent.futures
+import hashlib
 import re
 import http.client
 import http.server
@@ -8,6 +10,7 @@ import os
 import subprocess
 from pathlib import Path
 import tempfile
+import unittest.mock
 import threading
 import time
 import unittest
@@ -23,13 +26,24 @@ import handoff
 import observe
 import joiner
 import pos_join
+import root_keys
 import pos_sample
 import pos_crash
 
+
+def strip_follow(svc):
+    """The joiner's shard service without its --follow-source pair (the one flag a joiner has and a genesis validator has not), and that pair's value."""
+    import copy as _copy
+    svc=_copy.deepcopy(svc); entry=svc['entrypoint']
+    if '--follow-source' not in entry: return svc,None
+    at=entry.index('--follow-source'); value=entry[at+1]; del entry[at:at+2]
+    return svc,value
+
 class FakeRelay:
-    def __init__(self): self.calls=[]
-    def call(self, method, params):
-        self.calls.append((method,params))
+    def __init__(self): self.calls=[]; self.max_bytes=[]; self.too_large=False
+    def call(self, method, params, max_bytes=None):
+        self.calls.append((method,params)); self.max_bytes.append(max_bytes)
+        if self.too_large: raise gateway.ResponseTooLarge('over')
         return {'jsonrpc':'2.0','id':1,'result':'0x1'}
 
 class LaneKeysAreNotInherited(unittest.TestCase):
@@ -59,6 +73,16 @@ class LaneKeysAreNotInherited(unittest.TestCase):
             self.assertEqual(seen[0].get('P85_CAST'),'cast')
 
 
+class PortOffset(unittest.TestCase):
+    """--port-offset (the lane slot scheme, scripts/lib/lane-slot.sh): host-published ports shift together, the default is 8545/8088/9090."""
+    def test_published_ports(self):
+        self.assertEqual(generate.HOST_PORTS,{'rpc':8545,'faucet':8088,'prometheus':9090})
+        self.assertEqual(generate.check_port_offset(0),0); self.assertEqual(generate.check_port_offset(1000),1000)
+    def test_refuses_bad_offsets(self):
+        for bad in (-1,20001,60000):
+            with self.assertRaises(SystemExit): generate.check_port_offset(bad)
+
+
 class ChurnBudget(unittest.TestCase):
     def test_the_generated_evm_configuration_commits_the_testnet_churn_budget(self):
         params=dict(item.split('=',1) for item in generate.evm_partition_params(1337).split(','))
@@ -70,6 +94,40 @@ class ChurnBudget(unittest.TestCase):
         self.assertEqual(source.count("evm_partition_params(a.chain_id)"),1)
         self.assertNotIn("f'proof_type=exec,chain_id=",source.split('def main')[1])
 
+class BlockInterval(unittest.TestCase):
+    """bft-core#1167: the package paces the EVM shard to one block every 10 s by default, with a T2 that covers it; a fast package (the lanes) is the earlier one."""
+    images={k:'sha256:'+'a'*64 for k in ['node','rpc','guard','signer']}
+    def topo(self,n,**kw):
+        with tempfile.TemporaryDirectory() as tmp:
+            out=Path(tmp)/'tn-fixture';out.mkdir()
+            return generate.topology(out,n,{'root':['r%d'%i for i in range(n)],'evm':['e%d'%i for i in range(n)]},self.images,'captcha',**kw)
+    def test_the_default_is_unpaced_until_the_pin_has_the_flag_and_ten_seconds_has_a_t2_that_covers_it(self):
+        # 0 until the pin and image bump that carries --target-block-interval (bft-core#1169), then 10000
+        self.assertEqual(generate.BLOCK_INTERVAL_MS,0)
+        self.assertEqual(generate.TESTNET_BLOCK_INTERVAL_MS,10000)
+        self.assertEqual(generate.t2_for_block_interval(10000),20000)
+        self.assertGreaterEqual(generate.t2_for_block_interval(10000),generate.min_t2_ms(10000))
+        self.assertEqual(generate.t2_for_block_interval(0),5000,'without an interval the T2 is the one every lane runs')
+        for ms in (1,500,1000,2000,3000,5000,7000,10000,30000,60000):
+            t2=generate.t2_for_block_interval(ms)
+            # the rule shard-node run enforces (shardnode.CheckBlockInterval): T2 >= interval + min(T2/2, 5 s) + one root round
+            self.assertGreaterEqual(t2,ms+min(t2//2,generate.FOLLOWER_AWAIT_CAP_MS)+generate.ROOT_BLOCK_RATE_MS,ms)
+        with self.assertRaises(ValueError): generate.t2_for_block_interval(-1)
+    def test_every_shard_node_carries_the_interval(self):
+        cfg=self.topo(4,block_interval_ms=10000)
+        for i in range(1,5):
+            shard=cfg['services']['shard%d'%i]['entrypoint']
+            self.assertEqual(shard[shard.index('--target-block-interval')+1],'10000ms')
+        for name,svc in cfg['services'].items():
+            if not name.startswith('shard'): self.assertNotIn('--target-block-interval',svc['entrypoint'],name)
+    def test_a_fast_package_has_no_interval_flag(self):
+        self.assertEqual(self.topo(4,block_interval_ms=0),self.topo(4),'0 is exactly the package without pacing')
+        self.assertFalse(any('--target-block-interval' in svc['entrypoint'] for svc in self.topo(4)['services'].values()))
+    def test_a_joiner_entity_gets_the_interval(self):
+        four=self.topo(4,block_interval_ms=10000)
+        got=joiner.joiner_services(four,5,'r4','e4')
+        shard=got['shard5']['entrypoint']
+        self.assertEqual(shard[shard.index('--target-block-interval')+1],'10000ms')
 class B1Layout(unittest.TestCase):
     def test_the_package_is_on_the_single_b1_layout(self):
         source=(generate.HERE/'generate.py').read_text()
@@ -83,10 +141,50 @@ class B1Layout(unittest.TestCase):
         self.assertEqual((g['config']['chainId'],int(g['gasLimit'],16),g['alloc'],g['extraData']),(1337,60000000,{'ab':{'balance':'0x1'}},'0x'+'cd'*32))
     def test_the_workflow_builds_the_pinned_source_and_the_verifier(self):
         workflow=(generate.REPO/'.github/workflows/testnet-package.yml').read_text()
-        self.assertIn('ref: '+generate.PINS['bft'],workflow)
+        # the pinned checkouts come from pins.json itself (a pin bump is one file, #1075): no SHA is repeated in the workflow
+        self.assertIn("json.load(open('deploy/testnet/pins.json'))",workflow)
+        self.assertIsNone(re.search(r'ref: [0-9a-f]{40}',workflow))
+        for out,path in (('bft','pinned-bft'),('aggregator_go','pinned-aggregator-go'),('vr_contracts','pinned-contracts')):
+            self.assertRegex(workflow,r'ref: \$\{\{ steps\.pins\.outputs\.%s \}\}\s+path: %s'%(out,path))
         self.assertIn('./scripts/b1genesis',workflow)
-        self.assertIn('ref: '+generate.PINS['contracts'],workflow)   # the PoS profile's contracts checkout
         self.assertIn('--pos-contracts pinned-contracts',workflow)
+        self.assertIn('--vr-fresh-measurement deploy/testnet/measurements/vr-hook-pos16-independent.json', workflow)
+    def test_every_pins_workflow_builds_dnb_tool_from_the_node_pin(self):
+        # #1075: the bridge image's dnb-tool comes from the same bft checkout as the nodes (an older one cannot read their archive layout)
+        for name in ('testnet-bridge.yml','testnet-bridge-pos.yml'):
+            workflow=(generate.REPO/'.github/workflows'/name).read_text()
+            for line in workflow.splitlines():
+                if 'build-bridge-image.py' in line and 'run:' in line:
+                    self.assertIn('--bft-source pinned-bft',line,name)
+        source=(Path(__file__).parent/'bridge/build-bridge-image.py').read_text()
+        self.assertIn("NODE_PINS['bft'] if name == 'bft'",source)
+        self.assertNotIn("rev-parse', '--show-toplevel'",source)   # not the package's own checkout any more
+    def test_the_tools_refuse_a_bridge_image_built_for_another_bft(self):
+        import importlib.util
+        spec=importlib.util.spec_from_file_location('deploy_bridge',Path(__file__).parent/'bridge/deploy_bridge.py'); ov=importlib.util.module_from_spec(spec); spec.loader.exec_module(ov)
+        image='sha256:'+'a'*64
+        self.assertEqual(ov.bridge_image({'sources':{'bft':'f'*40},'images':{'bridge':image}},{'bft':'f'*40}),image)
+        for record in ({'sources':{'bft':'e'*40},'images':{'bridge':image}},{'images':{'bridge':image}},{'sources':{'bft':'f'*40},'images':{'bridge':'tnops-bridge:verified'}}):
+            with self.assertRaises(SystemExit) as e: ov.bridge_image(record,{'bft':'f'*40})
+            self.assertRegex(str(e.exception),'bridge image|dnb-tool was built')
+    def test_the_pinned_ubft_must_accept_every_generated_flag(self):
+        import ubft_flags
+        compose={'services':{'root1':{'entrypoint':['ubft','root-node','run','--home','/state','--address=/ip4/0.0.0.0/tcp/8000']},
+                             'shard1':{'entrypoint':['ubft','shard-node','run','--archive-public-reads','--follow-source','/dns4/x']},
+                             'rpc':{'entrypoint':['python3','-u','gateway.py','--not-ubft']},
+                             'auth':{'entrypoint':['/usr/local/bin/ubft','signing-authority','run','--socket','/a']}}}
+        self.assertEqual(ubft_flags.invocations(compose),{('root-node','run'):{'--home','--address'},('shard-node','run'):{'--archive-public-reads','--follow-source'},
+                                                          ('signing-authority','run'):{'--socket'}})
+        # a stand-in for cobra: `ubft <path> <flags> --help` parses every flag first and fails on an unknown one, hidden flags included
+        known={('root-node','run'):{'--home','--address'},('shard-node','run'):{'--follow-source'},('signing-authority','run'):{'--socket'}}
+        def runner(cmd,**kw):
+            words=cmd[1:-1]; path=tuple(w for w in words if not w.startswith('-') and words.index(w)<2)
+            bad=[w.split('=',1)[0] for w in words if w.startswith('--') and w.split('=',1)[0] not in known[path]]
+            return subprocess.CompletedProcess(cmd,1 if bad else 0,'' if bad else 'Usage: ...','Error: unknown flag: '+bad[0] if bad else '')
+        self.assertEqual(ubft_flags.check('/x/ubft',[compose,compose],runner=runner),['ubft shard-node run: Error: unknown flag: --archive-public-reads'])   # an older ubft; said once
+        known[('shard-node','run')].add('--archive-public-reads')
+        self.assertEqual(ubft_flags.check('/x/ubft',[compose],runner=runner),[])
+        self.assertIn('flags_ok(generation)',(Path(__file__).parent/'validate-generation.py').read_text())   # CI runs it on every generation it makes
     def test_the_topology_follows_the_profile(self):
         with tempfile.TemporaryDirectory() as tmp:
             out=Path(tmp)/'tn-fixture';out.mkdir()
@@ -94,13 +192,418 @@ class B1Layout(unittest.TestCase):
             cfg=generate.topology(out,3,{'root':['r%d'%i for i in range(3)],'evm':['e%d'%i for i in range(3)]},images,'captcha',['--unicity.network-id','3'],123456)
             for i in (1,2,3):
                 svc=cfg['services']
-                self.assertEqual(svc['ureth%d'%i]['entrypoint'][-2:],['--unicity.network-id','3'])
-                self.assertEqual(svc['ureth%d'%i]['entrypoint'][svc['ureth%d'%i]['entrypoint'].index('--builder.gaslimit')+1],'123456')
+                # #1321: the profile's vector, then the fee collector, the builder's gas limit and the persistence threshold (vr_genesis.ureth_runtime_flags)
+                self.assertEqual(svc['ureth%d'%i]['entrypoint'][-5:],['--unicity.network-id','3','--unicity.fee-collector='+generate.FEE,
+                                 '--builder.gaslimit=123456','--engine.persistence-threshold=64'])
                 shard=svc['shard%d'%i]['entrypoint']
                 self.assertEqual(shard[shard.index('--b1-profile')+1],'/network/b1-profile.json')
                 self.assertIn('--q3-lane',shard);self.assertNotIn('--registry-layout',shard)
                 root=svc['root%d'%i]['entrypoint']
-                self.assertIn('--q3-lane',root);self.assertEqual(root[root.index('--genesis-identities')+1],'/network/genesis-identities.json')
+                self.assertIn('--q3-lane',root);self.assertIn('--b1-registry',root);self.assertEqual(root[root.index('--genesis-identities')+1],'/network/genesis-identities.json')
+
+class ImageTags(unittest.TestCase):
+    """bft-core#1092: images are tagged per pin and per ID, a tag is never moved, and nothing the package records or runs names an image by a tag."""
+    ID='sha256:'+'ab'*32; OTHER='sha256:'+'cd'*32
+    def test_mutable_images_are_found(self):
+        import imagetag
+        compose={'services':{'a':{'image':self.ID},'b':{'image':'mongo:7.0.45@sha256:'+'1'*64},'c':{'image':'tnops-node:verified'},
+                             'd':{'image':'prom/prometheus:v3.2.1'},'e':{'entrypoint':['x']}}}
+        self.assertEqual(imagetag.mutable_images(compose),['c','d'])
+        self.assertEqual(imagetag.immutable_tag('node','92ed0ce8c1ab',self.ID),'tnops-node:92ed0ce8c1ab-'+'ab'*6)
+    def test_generate_refuses_a_compose_with_a_tag(self):
+        with self.assertRaises(SystemExit) as e: generate.immutable({'services':{'rpc':{'image':'tnops-rpc:verified'},'root1':{'image':self.ID}}})
+        self.assertIn('rpc',str(e.exception))
+        ok={'services':{'root1':{'image':self.ID}}}
+        self.assertIs(generate.immutable(ok),ok)
+        source=(Path(__file__).parent/'generate.py').read_text()
+        self.assertEqual(source.count("=immutable(topology("),2,'every compose.yaml the generator writes is checked')
+        self.assertIn("write(out/'compose.yaml',boot)",source); self.assertIn("write(out/'compose.yaml',final)",source)
+    def test_build_tags_by_id_and_never_moves_a_tag(self):
+        import imagetag
+        calls=[]; present={}; resolves={}
+        def run(cmd,check=False,capture_output=False,text=False,**kw):
+            calls.append(cmd)
+            if cmd[:2]==['docker','build']:
+                Path(cmd[cmd.index('--iidfile')+1]).write_text(self.ID+'\n')
+            if cmd[:3]==['docker','image','inspect']:
+                ref=cmd[-1]
+                if ref.startswith('sha256:'):   # the iidfile's ID resolves to itself (or, for a manifest digest, to the config ID)
+                    return subprocess.CompletedProcess(cmd,0,resolves.get(ref,ref)+'\n','')
+                return subprocess.CompletedProcess(cmd,0 if ref in present else 1,present.get(ref,''),'')
+            if cmd[:2]==['docker','tag']:
+                present[cmd[3]]=cmd[2]
+            return subprocess.CompletedProcess(cmd,0,'','')
+        with patch.object(imagetag.subprocess,'run',run):
+            image,tag=imagetag.build('node','92ed0ce8c1ab','ctx')
+            self.assertEqual((image,tag),(self.ID,'tnops-node:92ed0ce8c1ab-'+'ab'*6))
+            self.assertNotIn('-t',[w for c in calls if c[:2]==['docker','build'] for w in c],'no mutable tag at build time')
+            self.assertEqual(present,{tag:self.ID,'tnops-node:verified':self.ID})
+            present[tag]=self.OTHER   # the same tag on another image: refused, never moved
+            with self.assertRaises(SystemExit): imagetag.build('node','92ed0ce8c1ab','ctx')
+            present.clear(); resolves[self.ID]=self.OTHER   # a containerd manifest digest in the iidfile: it is not the local image's ID
+            with self.assertRaises(SystemExit) as e: imagetag.build('node','92ed0ce8c1ab','ctx')
+            self.assertIn('not a local image ID',str(e.exception))
+            self.assertEqual(present,{},'nothing tagged')
+        for bad in ('sha256:abc','registry/x@sha256:'+'1'*64,'tnops-node:verified'):
+            with self.assertRaises(SystemExit): imagetag.immutable_tag('node','92ed0ce8c1ab',bad)
+    def test_nothing_runs_an_image_through_a_tag(self):
+        here=Path(__file__).parent
+        for name in ('build-images.py','bridge/build-bridge-image.py','bridge/deploy_bridge.py','bridge/nb2/deploy_nb2.py','bridge/nb2/rehearse_nb2.py','bridge/sdk_clients.py','generate.py'):
+            source=(here/name).read_text()
+            self.assertNotIn(':verified',source,name)
+            self.assertNotRegex(source,r"\bTAG\b",name)
+        self.assertIn("'tags': tags",(here/'build-images.py').read_text())
+        self.assertIn("'tags': {'bridge': tag}",(here/'bridge/build-bridge-image.py').read_text())
+    def deploy_bridge(self):
+        import importlib.util
+        sys.path.insert(0,str(Path(__file__).parent/'bridge'))
+        spec=importlib.util.spec_from_file_location('deploy_bridge',Path(__file__).parent/'bridge/deploy_bridge.py'); db=importlib.util.module_from_spec(spec); spec.loader.exec_module(db)
+        return db
+    def test_the_bridge_tools_run_by_the_recorded_id(self):
+        db=self.deploy_bridge()
+        inspect=lambda rc: (lambda cmd,**kw: subprocess.CompletedProcess(cmd,rc,'',''))
+        with tempfile.TemporaryDirectory() as tmp:
+            art=Path(tmp)/'artifacts'; art.mkdir()
+            (Path(tmp)/'pins.json').write_text(json.dumps({'bft':'f'*40}))
+            # a record without 'tags' (written before #1092) still resolves by its ID
+            (art/'bridge-images.json').write_text(json.dumps({'sources':{'bft':'f'*40},'images':{'bridge':self.OTHER}}))
+            new=Path(tmp)/'tn-new'; (new/'bridge').mkdir(parents=True)
+            old=Path(tmp)/'tn-old'; (old/'bridge').mkdir(parents=True)
+            (old/'bridge/bridge-image.json').write_text(json.dumps({'image':self.ID}))
+            with patch.object(db,'ARTIFACTS',art), patch.object(db.subprocess,'run',inspect(0)):
+                self.assertEqual(db.image(new),self.OTHER,'a generation being deployed takes the current record')
+                self.assertEqual(db.image(old),self.ID,'an older generation keeps its own image although a newer one is current')
+                db.record_image(new,self.OTHER); db.record_image(new,self.ID)   # written once, at the deploy
+                self.assertEqual(json.loads((new/'bridge/bridge-image.json').read_text()),{'image':self.OTHER})
+                (old/'bridge/bridge-image.json').write_text(json.dumps({'image':'tnops-bridge:verified'}))
+                with self.assertRaises(SystemExit): db.image(old)
+            with patch.object(db,'ARTIFACTS',art), patch.object(db.subprocess,'run',inspect(1)):
+                with self.assertRaises(SystemExit) as e: db.image(new)
+                self.assertIn('not in the local image store',str(e.exception))
+        self.assertIn('image(gen), *args]',(Path(__file__).parent/'bridge/deploy_bridge.py').read_text())
+        self.assertIn('record_image(gen, ',(Path(__file__).parent/'bridge/nb2/deploy_nb2.py').read_text())
+
+
+class UtbProfile(unittest.TestCase):
+    """P1 live UTB source (briefs/pos-utb-live-source-plan.md, step 1): every root, shard node and the aggregator get the signed-history profile with the SAME pin,
+    which is passed as its own argument next to the mounted genesis entry; without a pin the package is exactly the one without the profile."""
+    PIN='0x'+'ab'*32
+    images={k:'sha256:'+'a'*64 for k in ['node','rpc','guard','signer']}
+    def topo(self,n,pin):
+        with tempfile.TemporaryDirectory() as tmp:
+            out=Path(tmp)/'tn-fixture';out.mkdir()
+            return generate.topology(out,n,{'root':['r%d'%i for i in range(n)],'evm':['e%d'%i for i in range(n)]},self.images,'captcha',(),30000000,False,'127.0.0.1',pin)
+    def flags(self,entry):
+        at=entry.index('--utb-genesis')
+        return entry[at:at+6]
+    def test_every_root_and_shard_node_carries_the_pin_and_its_own_store(self):
+        cfg=self.topo(4,self.PIN)
+        for i in (1,2,3,4):
+            for part in ('root','shard'):
+                entry=cfg['services']['%s%d'%(part,i)]['entrypoint']
+                self.assertEqual(self.flags(entry),['--utb-genesis','/network/utb-genesis.cbor','--utb-genesis-id',self.PIN,'--utb-entries-db','/state/utb-entries.db'],part+str(i))
+                state=[m for m in cfg['services']['%s%d'%(part,i)]['volumes'] if m.endswith(':/state')]
+                self.assertEqual(len(state),1,'the store lives on the entity\'s persistent volume')
+                self.assertNotIn(':ro',state[0])
+    def boot(self,n,pin):
+        """the compose main() starts the authorities from (only the arguments known before the genesis: no ureth flags, no PoS)"""
+        with tempfile.TemporaryDirectory() as tmp:
+            out=Path(tmp)/'tn-fixture';out.mkdir()
+            return generate.topology(out,n,{'root':['r%d'%i for i in range(n)],'evm':['e%d'%i for i in range(n)]},self.images,'captcha',utb=pin)
+    def test_every_authority_is_pinned_to_the_utb_lineage(self):
+        for i in (1,2,3,4):
+            entry=self.topo(4,self.PIN)['services']['authority%d'%i]['entrypoint']
+            self.assertEqual(entry[entry.index('--lineage-genesis-trust-base')+1],'/network/trust-base.json')
+            self.assertIn('--lineage-utb-genesis',entry,'bft-core#1091: a UTB chain\'s authority verifies the first activation only with the UTB genesis')
+            plain=self.topo(4,None)['services']['authority%d'%i]['entrypoint']
+            self.assertNotIn('--lineage-utb-genesis',plain)
+    def test_the_authorities_are_started_with_the_entrypoints_of_the_final_compose(self):
+        # bft-core#1091: the authorities were started from a first compose written without the UTB pin and never recreated
+        generate.check_authorities_unchanged(self.boot(4,self.PIN),self.topo(4,self.PIN),4)
+        with self.assertRaisesRegex(RuntimeError,'never recreated'):
+            generate.check_authorities_unchanged(self.boot(4,None),self.topo(4,self.PIN),4)
+        # astra on #1090: the whole service, not only its arguments
+        import copy
+        for field,change in (('image',lambda svc: svc.__setitem__('image','sha256:'+'b'*64)),
+                             ('volumes',lambda svc: svc.__setitem__('volumes',[v.replace('./network:','./network-other:') for v in svc['volumes']])),
+                             ('command',lambda svc: svc.__setitem__('command',['--extra'])),
+                             ('environment',lambda svc: svc.__setitem__('environment',{'UBFT_LINEAGE_UTB_GENESIS':'false'})),
+                             ('entrypoint',lambda svc: svc['entrypoint'].append('--recovery-unchecked-advance'))):
+            final=copy.deepcopy(self.topo(4,self.PIN))
+            change(final['services']['authority3'])
+            with self.assertRaisesRegex(RuntimeError,r"authority3 .*\b"+field+r"\b",msg=field):
+                generate.check_authorities_unchanged(self.boot(4,self.PIN),final,4)
+    def test_the_rehearsal_reset_keeps_the_selected_utb_profile_and_variant(self):
+        import rehearse
+        class R: pass
+        for manifest,want in (({},['--no-utb']),({'utb':{'aggregator':'integration'}},['--utb','--utb-aggregator','integration']),
+                              ({'utb':{'aggregator':'upstream'}},['--utb','--utb-aggregator','upstream'])):
+            r=R(); r.manifest=manifest
+            self.assertEqual(rehearse.Rehearsal.reset_utb_args(r),want)
+        self.assertIn('*self.reset_utb_args()',(Path(generate.__file__).with_name('rehearse.py')).read_text(),'the reset stage passes them to reset.py')
+    def test_the_rehearsal_reset_supplies_its_own_inventory_or_is_disposable(self):
+        import rehearse
+        class R:
+            def __init__(self, manifest, ev): self.manifest, self.ev, self.calls = manifest, ev, []
+            def evh(self): return self.ev
+            def expect(self, ok, what, detail=''):
+                if not ok: raise AssertionError(what + ' ' + str(detail))
+            def utb_history(self, label, pin, snapshot=None):
+                self.calls.append((label, pin)); b = self.ev / 'h.cbor'; b.write_bytes(b'x'); return 5, '0x' + 'aa' * 32, b
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            self.assertEqual(rehearse.Rehearsal.reset_inventory_args(R({}, d), {'ubft': 'x'}), (['--disposable'], []), 'a --no-utb rehearsal is disposable')
+            ubft = d / 'ubft'
+            ubft.write_text('#!/bin/sh\nwhile [ $# -gt 0 ]; do [ "$1" = --keys-out ] && echo {} > "$2"; shift; done\n'); ubft.chmod(0o755)
+            r = R({'utb': {'genesis_id': '0x' + 'ab' * 32}}, d)
+            flags, gen = rehearse.Rehearsal.reset_inventory_args(r, {'ubft': str(ubft)})
+            self.assertEqual(flags, [])
+            self.assertEqual(gen, ['--prior-generation', str(d / 'utb-history-reset-inventory-keys.json')], 'a UTB generation supplies its own served history')
+            self.assertEqual(r.calls, [('reset-inventory', '0x' + 'ab' * 32)])
+        source = (Path(generate.__file__).with_name('rehearse.py')).read_text()
+        self.assertIn("'--lose-all-assets', *reset_flags", source)
+        self.assertIn("'--', '--out', str(new), *inventory", source)
+    def test_image_records_must_match_the_aggregator_variant_before_a_reset_tears_anything_down(self):
+        integration={'sources':dict(generate.PINS)}
+        upstream={'sources':{**generate.PINS,'aggregator-go':generate.PINS['aggregator-go-upstream']}}
+        self.assertIsNone(generate.image_sources_error(integration,'integration'))
+        self.assertIsNone(generate.image_sources_error(upstream,'upstream'))
+        self.assertIn('differ',generate.image_sources_error(integration,'upstream'))
+        self.assertIn('differ',generate.image_sources_error(upstream,'integration'))
+    def test_reset_py_refuses_wrong_images_or_variant_before_any_teardown(self):
+        import tempfile, os, stat
+        here=Path(generate.__file__).parent
+        with tempfile.TemporaryDirectory() as d:
+            d=Path(d); bin=d/'bin'; bin.mkdir(); spy=d/'docker-called'
+            (bin/'docker').write_text('#!/bin/sh\necho "$@" >> %s\n'%spy); (bin/'docker').chmod(0o755)
+            old=d/'tn-old'; old.mkdir(); (old/'manifest.json').write_text(json.dumps({'genesis_hash':'0x1'})); (old/'compose.yaml').write_text('')
+            integration=d/'integration.json'; integration.write_text(json.dumps({'sources':dict(generate.PINS),'images':{}}))
+            upstream=d/'upstream.json'; upstream.write_text(json.dumps({'sources':{**generate.PINS,'aggregator-go':generate.PINS['aggregator-go-upstream']},'images':{}}))
+            def reset(*gen):
+                return subprocess.run([sys.executable,str(here/'reset.py'),'--old',str(old),'--lose-all-assets','--','--out',str(d/'tn-new'),*gen],
+                                      env={**os.environ,'PATH':str(bin)+os.pathsep+os.environ['PATH']},capture_output=True,text=True)
+            for gen,why in ((('--no-utb','--images',str(upstream)),'legacy profile with upstream images'),
+                            (('--utb','--utb-aggregator','upstream','--images',str(integration)),'upstream variant with integration images'),
+                            (('--utb','--utb-aggregator','bogus','--images',str(integration)),'unknown variant'),
+                            (('--no-utb','--utb-aggregator','upstream','--images',str(upstream)),'a variant without the profile')):
+                done=reset(*gen)
+                self.assertEqual(done.returncode,2,(why,done.stderr))
+                self.assertFalse(spy.exists(),why+': docker must not be called')
+                self.assertTrue(old.exists(),why+': the old generation stays')
+            # #1297: the old generation's UTB history keys are required before the teardown; --first-generation is not a reset
+            history=d/'old-utb-keys.json'; history.write_text(json.dumps({'format':root_keys.HISTORY_FORMAT,'epochs':[{'epoch':1,'keys':['0x02'+'11'*32]}]}))
+            for gen,why in ((('--no-utb','--images',str(integration)),'no prior history'),
+                            (('--no-utb','--images',str(integration),'--first-generation','--prior-generation',str(history)),'a reset is not a first generation')):
+                done=reset(*gen)
+                self.assertEqual(done.returncode,2,(why,done.stderr)); self.assertIn('--prior-generation',done.stderr,why)
+                self.assertFalse(spy.exists(),why+': docker must not be called')
+            # a disposable --no-utb generation (no pin anywhere) resets without a history; --disposable never applies to one with a pin
+            def reset_disposable(*gen):
+                return subprocess.run([sys.executable,str(here/'reset.py'),'--old',str(old),'--lose-all-assets','--disposable','--','--out',str(d/'tn-new'),*gen],
+                                      env={**os.environ,'PATH':str(bin)+os.pathsep+os.environ['PATH']},capture_output=True,text=True)
+            done=reset_disposable('--no-utb','--images',str(integration),'--prior-generation',str(history))
+            self.assertEqual(done.returncode,2,done.stderr); self.assertIn('fresh inventory',done.stderr); self.assertFalse(spy.exists())
+            disposable=d/'tn-disposable'; shutil.copytree(old,disposable)
+            done=subprocess.run([sys.executable,str(here/'reset.py'),'--old',str(disposable),'--lose-all-assets','--disposable','--','--out',str(d/'tn-new'),'--no-utb','--images',str(integration)],
+                                env={**os.environ,'PATH':str(bin)+os.pathsep+os.environ['PATH']},capture_output=True,text=True)
+            self.assertTrue(spy.exists(),'a disposable --no-utb generation reaches the teardown without a history'); spy.unlink()
+            # astra r3: without a trusted root-genesis pin nothing binds the history to the old generation: refused before any teardown
+            (old/'network/handoff').mkdir(parents=True)
+            done=reset('--no-utb','--images',str(integration),'--prior-generation',str(history))
+            self.assertEqual(done.returncode,2,done.stderr); self.assertIn('names no root-genesis pin',done.stderr)
+            self.assertFalse(spy.exists(),'no pin: docker must not be called')
+            # the manifest's utb.genesis_id is the pin when network/utb-genesis.id is absent: a foreign history is refused against it
+            (old/'manifest.json').write_text(json.dumps({'genesis_hash':'0x1','utb':{'genesis_id':'0x'+'ab'*32}}))
+            foreign=d/'foreign.json'; foreign.write_text(json.dumps({'format':root_keys.HISTORY_FORMAT,'genesisId':'0x'+'cd'*32,'epochs':[{'epoch':1,'keys':['0x02'+'11'*32]}]}))
+            done=reset('--no-utb','--images',str(integration),'--prior-generation',str(foreign))
+            self.assertEqual(done.returncode,2,done.stderr); self.assertIn('complete one',done.stderr)
+            self.assertFalse(spy.exists(),'a foreign history: docker must not be called')
+            self.assertEqual(root_keys.generation_pin(old),'0x'+'ab'*32)
+            done=reset_disposable('--no-utb','--images',str(integration))
+            self.assertEqual(done.returncode,2,done.stderr); self.assertIn('only for a generation without a signed history',done.stderr)
+            self.assertFalse(spy.exists(),'--disposable is refused for a generation with a pin')
+            # review r2 P3-2: the history is bound to the generation it replaces: its own genesis, through its newest installed epoch
+            (old/'network/utb-genesis.id').write_text('0x'+'ab'*32+'\n')
+            (old/'network/handoff/trust-base-epoch3.json').write_text('{}')
+            root_keys.write(old/'network',{root_keys.key_hash('0x03'+'99'*32)})
+            def hist(name,gid,last):
+                h=d/name; h.write_text(json.dumps({'format':root_keys.HISTORY_FORMAT,'genesisId':gid,'epochs':[{'epoch':e,'keys':['0x02'+'11'*32]} for e in range(1,last+1)]}))
+                return h
+            for h,why in ((hist('stale.json','0x'+'cd'*32,5),'another root genesis (a stale export)'),(hist('short.json','0x'+'ab'*32,2),'truncated before epoch 3')):
+                done=reset('--no-utb','--images',str(integration),'--prior-generation',str(h))
+                self.assertEqual(done.returncode,2,(why,done.stderr)); self.assertIn('complete one',done.stderr,why)
+                self.assertFalse(spy.exists(),why+': docker must not be called')
+            done=reset('--no-utb','--images',str(integration),'--prior-generation',str(hist('own.json','0x'+'ab'*32,3)))   # accepted by the preflight: it reaches the teardown (the spy) and fails later in generate
+            self.assertTrue(spy.exists(),'a matching profile proceeds to the teardown')
+            kept=old.with_suffix('.retired-root-keys.json')
+            self.assertTrue(kept.is_file(),'the old generation\'s own retired list is kept beside it and passed on')
+            self.assertEqual(root_keys.read_list(kept),{root_keys.key_hash('0x03'+'99'*32)})
+    def test_the_signed_history_is_on_by_default_and_no_utb_is_the_escape_hatch(self):
+        source=(Path(generate.__file__)).read_text()
+        self.assertRegex(source,r"add_argument\('--utb',action=argparse\.BooleanOptionalAction,default=True",'--utb defaults on; argparse adds --no-utb')
+        for wf, flag in (('testnet-rehearsal.yml','--no-utb'),('testnet-bridge.yml','--utb')):
+            text=(Path(generate.__file__).resolve().parents[2]/'.github/workflows'/wf).read_text()
+            for call in re.findall(r"deploy/testnet/generate\.py.*?(?=\n\s*- name:|\n\s*\n|\Z)",text,re.S):
+                self.assertIn(flag,call,wf)
+    def test_the_aggregator_gets_the_pin_and_a_writable_store_of_its_own(self):
+        agg=self.topo(4,self.PIN)['services']['aggregator']
+        env=agg['environment']
+        self.assertEqual((env['UTB_GENESIS_FILE'],env['UTB_GENESIS_ID'],env['UTB_ENTRIES_DB']),('/network/utb-genesis.cbor',self.PIN,'/utb/utb-entries.db'))
+        self.assertIn('./aggregator-utb:/utb',agg['volumes'])
+        self.assertIn('./aggregator:/state:ro',agg['volumes'],'the signing key mount stays read-only')
+        self.assertNotIn('UTB_BUNDLE_FILE',env,'a fresh chain starts from the genesis entry, not from a bundle')
+    def test_the_aggregator_persists_its_shard_configuration_checkpoint_on_a_writable_mount(self):
+        for utb in (self.PIN, None):
+            agg=self.topo(4,utb)['services']['aggregator']
+            self.assertEqual(agg['environment']['BFT_SHARD_CONF_CHECKPOINT_FILE'],'/shardconf/shard-conf-checkpoint.json')
+            self.assertIn('./aggregator-conf:/shardconf',agg['volumes'],'a mount that survives the container, writable: its /state is read-only')
+    def test_the_upstream_facing_aggregator_gets_the_bundle_pin_and_network_and_no_bolt_store(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out=Path(tmp)/'tn-fixture';out.mkdir()
+            roots,evms=['r%d'%i for i in range(4)],['e%d'%i for i in range(4)]
+            cfg=generate.topology(out,4,{'root':roots,'evm':evms},self.images,'captcha',(),30000000,False,'127.0.0.1',self.PIN,'upstream')
+        agg=cfg['services']['aggregator']
+        env=agg['environment']
+        self.assertEqual((env['UTB_BUNDLE_FILE'],env['UTB_GENESIS_ID'],env['UTB_EXPECTED_NETWORK']),('/network/utb-bundle.cbor',self.PIN,str(generate.TRUST_BASE_NETWORK_ID)))
+        for name in ('UTB_GENESIS_FILE','UTB_ENTRIES_DB'):
+            self.assertNotIn(name,env,'the two aggregators read the same names with different meaning: each gets only its own')
+        self.assertNotIn('./aggregator-utb:/utb',agg['volumes'])
+        self.assertIn('./aggregator:/state:ro',agg['volumes'])
+        integration=self.topo(4,self.PIN)
+        for name in cfg['services']:
+            if name != 'aggregator': self.assertEqual(cfg['services'][name],integration['services'][name],name)
+    def test_the_upstream_aggregator_history_lives_on_its_own_persistent_mongo_volume_and_the_bundle_is_read_only(self):
+        """Case 3 of briefs/utb-acceptance-host-plan.md, checked statically: the history (the durable tail of the upstream-facing aggregator) is in its MongoDB on a
+        persistent volume of the package, the shipped bundle is only ever mounted read-only, and exactly one service reads UTB_BUNDLE_FILE."""
+        with tempfile.TemporaryDirectory() as tmp:
+            out=Path(tmp)/'tn-fixture';out.mkdir()
+            cfg=generate.topology(out,4,{'root':['r%d'%i for i in range(4)],'evm':['e%d'%i for i in range(4)]},self.images,'captcha',(),30000000,False,'127.0.0.1',self.PIN,'upstream')
+        svc=cfg['services']
+        self.assertIn('./mongo:/data/db',svc['mongo']['volumes'],'the tail survives a recreated aggregator')
+        from urllib.parse import urlparse
+        self.assertEqual(urlparse(svc['aggregator']['environment']['MONGODB_URI']).hostname,'mongo','the history is in the package\'s own mongo service')
+        network=[m for m in svc['aggregator']['volumes'] if m.endswith(':/network:ro')]
+        self.assertEqual(len(network),1,'the bundle comes from the read-only network mount')
+        self.assertTrue(svc['aggregator']['environment']['UTB_BUNDLE_FILE'].startswith('/network/'),'the bundle is read from the read-only network mount, not from /state or anywhere writable')
+        readers=[n for n,s in svc.items() if 'UTB_BUNDLE_FILE' in s.get('environment',{})]
+        self.assertEqual(readers,['aggregator'],'one history owner per database: no other service reads the bundle as its history')
+        self.assertNotIn('./aggregator-utb:/utb',svc['aggregator']['volumes'],'no second (bolt) history next to the Mongo one')
+    def test_an_unknown_aggregator_variant_is_refused(self):
+        with self.assertRaises(ValueError): generate.utb_aggregator_environment(self.PIN,'other')
+    def test_the_upstream_aggregator_pin_is_a_full_commit_and_differs_from_the_integration_one(self):
+        pins=json.loads((Path(__file__).parent/'pins.json').read_text())
+        self.assertRegex(pins['aggregator-go-upstream'],r'^[0-9a-f]{40}$')
+        self.assertNotEqual(pins['aggregator-go-upstream'],pins['aggregator-go'])
+    def test_the_utb_stages_are_methods_outside_the_default_and_pos_lists(self):
+        import rehearse
+        for name,method in rehearse.UTB_STAGES:
+            self.assertTrue(callable(getattr(rehearse.Rehearsal,method)),name)
+            self.assertNotIn(name,[n for n,_ in rehearse.STAGES+rehearse.POS_STAGES],'the hosted rehearsal package has no signed history: its default run must not name them')
+    def utb_live_fixture(self,roots_epoch=3,served_tip=3,replay_tip=None,wrong_snapshot_answers_history=False,verifier_accepts_tampered=False,wrong_snapshot_answers_reserialised=False,genesis_epoch=None,first_epoch=1):
+        """A Rehearsal whose gateway and offline verifier are fakes: the served history is a pure function of (tip, query). Returns (instance, calls)."""
+        import rehearse
+        ev=Path(tempfile.mkdtemp());calls=[]
+        if genesis_epoch is not None:
+            (ev/'network').mkdir();(ev/'network'/'trust-base.json').write_text(json.dumps({'epoch':genesis_epoch}))
+        pin=self.PIN
+        def tip_id(t): return '0x'+('%02x'%t)*32
+        class Fake(rehearse.Rehearsal):
+            def __init__(self): self.n,self.manifest,self.ubft,self.gen,self.evidence=4,{'utb':{'genesis_id':pin,'aggregator':'integration'}},'/bin/ubft',ev,ev
+            def say(self,*a): pass
+            def evh(self): return ev
+            def compose(self,*a,**k): return ''
+            def root_epoch(self,i,t): return roots_epoch
+            def wait(self,what,probe,seconds):
+                r=probe()
+                if not r: raise rehearse.Failure(what)
+                return r
+            def keep_redacted(self,path,text): path.write_text(text)
+            def utb_page(self,query):
+                calls.append(query)
+                if 'snapshotEnd=' in query:
+                    t=int(re.search(r'snapshotEnd=(\d+)',query).group(1));want=re.search(r'snapshotEntryId=(0x[0-9a-f]{64})',query).group(1)
+                    if want!=tip_id(t) and wrong_snapshot_answers_reserialised: return 200,b'T%d:sum%d#x' % (t,t)   # the same history in other bytes
+                    if want!=tip_id(t) and not wrong_snapshot_answers_history: return 409,b'conflict'
+                    u=replay_tip if replay_tip is not None else t;return 200,b'T%d:sum%d' % (u,u)
+                return 200,b'T%d:sum%d' % (served_tip,served_tip)
+            def utb_verify(self,path,pin_):
+                data=Path(path).read_bytes()
+                m=re.fullmatch(rb'T(\d+):sum(\d+)(?:#x)?',data)
+                if not m or m.group(1)!=m.group(2): return (verifier_accepts_tampered and data!=b'conflict'),(1 if verifier_accepts_tampered else None),(3 if verifier_accepts_tampered else None),('0x'+'ab'*32 if verifier_accepts_tampered else None),'bad'
+                t=int(m.group(1));return True,first_epoch,t,tip_id(t),'ok'
+        return Fake(),calls
+    def run_utb_live(self,**kw):
+        import rehearse
+        fake,calls=self.utb_live_fixture(**kw)
+        with patch('rehearse.handoff_ops.DockerTransport',lambda gen: None): fake.utb_live()
+        return fake,calls
+    def test_utb_live_accepts_a_tip_ahead_of_the_roots_epoch_and_does_not_count_log_lines(self):
+        fake,calls=self.run_utb_live(roots_epoch=3,served_tip=4)   # a finalized future entry: tip 4 while the roots certify at 3
+        steps=json.loads((fake.evh()/'utb-live-steps.json').read_text())
+        self.assertEqual((steps['rootsEpoch'],steps['tipEpoch']),(3,4))
+        self.assertTrue(any('snapshotEnd=4' in c for c in calls),'the replay asks for exactly the first history')
+    def test_utb_live_refuses_a_history_that_does_not_reach_the_roots_epoch(self):
+        import rehearse
+        with self.assertRaises(rehearse.Failure): self.run_utb_live(roots_epoch=3,served_tip=2)
+    def test_utb_live_refuses_a_replay_that_answers_a_different_history(self):
+        import rehearse
+        with self.assertRaises(rehearse.Failure): self.run_utb_live(roots_epoch=3,served_tip=3,replay_tip=4)
+    def test_utb_live_control_fails_when_a_wrong_snapshot_is_answered_with_the_held_history(self):
+        import rehearse
+        with self.assertRaises(rehearse.Failure): self.run_utb_live(wrong_snapshot_answers_history=True)
+    def test_utb_live_control_fails_when_a_wrong_snapshot_is_answered_with_the_same_history_in_other_bytes(self):
+        import rehearse
+        with self.assertRaises(rehearse.Failure): self.run_utb_live(wrong_snapshot_answers_reserialised=True)
+    def test_utb_live_follows_the_genesis_epoch_of_the_generation_not_a_constant_1(self):
+        import rehearse
+        fake,calls=self.run_utb_live(roots_epoch=6,served_tip=6,genesis_epoch=5,first_epoch=5)
+        self.assertTrue(all(c.startswith('from=5&') for c in calls),calls)
+        with self.assertRaises(rehearse.Failure): self.run_utb_live(roots_epoch=6,served_tip=6,genesis_epoch=5,first_epoch=1)
+    def test_utb_live_control_fails_when_the_verifier_accepts_a_tampered_file(self):
+        import rehearse
+        with self.assertRaises(rehearse.Failure): self.run_utb_live(verifier_accepts_tampered=True)
+    def test_the_offline_verifier_output_is_parsed_exactly(self):
+        import rehearse
+        m=rehearse.Rehearsal.UTB_VERIFIED.search('ok: epochs 1..3, tip 0x'+'cd'*32+'\n')
+        self.assertEqual((m.group(1),m.group(2),m.group(3)),('1','3','0x'+'cd'*32))
+        self.assertIsNone(rehearse.Rehearsal.UTB_VERIFIED.search('ok: epochs 1..3, tip 0xabc'))
+    def test_without_a_pin_the_package_is_the_one_without_the_profile(self):
+        plain,off=self.topo(4,None),self.topo(4,None)
+        self.assertEqual(plain,off)
+        for name,svc in plain['services'].items():
+            self.assertFalse(any(str(x).startswith('--utb') for x in svc['entrypoint']),name)
+        env=plain['services']['aggregator']['environment']
+        self.assertFalse([k for k in env if k.startswith('UTB_')])
+        self.assertNotIn('./aggregator-utb:/utb',plain['services']['aggregator']['volumes'])
+    def test_a_malformed_pin_is_refused(self):
+        for bad in ('ab'*32,'0x'+'AB'*32,'0x'+'ab'*31,'0x'):
+            with self.assertRaises(ValueError,msg=bad): self.topo(4,bad)
+    def test_a_joiner_entity_gets_the_profile_with_its_own_store(self):
+        four=self.topo(4,self.PIN);five=self.topo(5,self.PIN)
+        got=joiner.joiner_services(four,5,'r4','e4')
+        got['shard5'],_=strip_follow(got['shard5'])
+        for name in ('root5','shard5'):
+            self.assertEqual(got[name],five['services'][name],name)
+            self.assertEqual(self.flags(got[name]['entrypoint'])[3],self.PIN)
+    def test_the_tool_derives_the_pin_the_package_passes(self):
+        """With the real ubft binary (skipped without one): the pin generate.py reads from `trust-base utb-manifest` is the genesis EntryID of the same trust base, and the manifest checks out."""
+        ubft=generate.REPO/'build/ubft'
+        if not ubft.is_file(): self.skipTest('build/ubft is not built')
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            home=Path(tmp)
+            ids=[]
+            for i in (1,2,3):
+                subprocess.run([str(ubft),'root-node','init','--home',str(home/('root%d'%i)),'--generate'],check=True,capture_output=True)
+            subprocess.run([str(ubft),'trust-base','generate','--home',str(home),'--epoch','1','--epoch-start','1','--network-id','3']+sum((['--node-info',str(home/('root%d/node-info.json'%i))] for i in (1,2,3)),[]),check=True,capture_output=True)
+            for i in (1,2,3): subprocess.run([str(ubft),'trust-base','sign','--home',str(home/('root%d'%i)),'--trust-base',str(home/'trust-base.json')],check=True,capture_output=True)
+            text=subprocess.run([str(ubft),'trust-base','utb-manifest','--trust-base',str(home/'trust-base.json'),'--out-dir',str(home/'utb')],check=True,capture_output=True,text=True).stdout
+            found=re.search(r'^utb genesis id +(0x[0-9a-f]{64})$',text,re.M)
+            self.assertTrue(found,text)
+            subprocess.run([str(ubft),'trust-base','utb-manifest','--check',str(home/'utb/utb-manifest.json')],check=True,capture_output=True)
+            self.assertTrue((home/'utb/utb-genesis.cbor').is_file())
+            self.assertEqual(generate.utb_node_flags(found.group(1))[3],found.group(1))
+
 
 class Aggregator(unittest.TestCase):
     def test_the_workflows_build_the_pinned_aggregator_go(self):
@@ -108,7 +611,7 @@ class Aggregator(unittest.TestCase):
             workflow=(generate.REPO/'.github/workflows'/name).read_text()
             self.assertNotIn('rugregator',workflow,name)
             self.assertIn('repository: ristik/aggregator-go',workflow,name)
-        self.assertIn('ref: '+generate.PINS['aggregator-go'],(generate.REPO/'.github/workflows/testnet-package.yml').read_text())
+        self.assertIn('ref: ${{ steps.pins.outputs.aggregator_go }}',(generate.REPO/'.github/workflows/testnet-package.yml').read_text())   # read from pins.json (#1075)
         self.assertNotIn('rugregator',(generate.HERE/'build-images.py').read_text()+(generate.HERE/'Dockerfile.node').read_text())
     def test_the_aggregator_partition_asks_for_no_consistency_proof(self):
         # aggregator-go sends none; under proof_type=aggregator_rsmt_v1 the root would refuse every nonempty certification request
@@ -169,18 +672,23 @@ class ProofOfStake(unittest.TestCase):
         self.assertEqual(len(listed),len(rehearse.POS_STAGES),'a method listed twice')
         self.assertIn('pos_resources',attached,'the test sees attachments (pos_sample.pos_resources)')
     def test_the_rotated_epoch_restart_waits_for_the_measured_slowdown_and_still_fails_on_a_stop(self):
-        # bft-core #886: with a validator down the survivors need 51-219 s per transaction from root epoch 2 (PoA, epoch 1: 4-6 s); pos-restart waits MINE_SECONDS_ROTATED,
-        # the PoA pod-restart keeps 240 s, and a transaction that is never mined still ends in a Failure at exactly that limit (a real stop is not hidden)
+        # bft-core #888, #886: PoA waits 240 s and a rotated epoch the design's one-stage ceiling; a transaction never mined still ends in a Failure at exactly that limit (a real stop is not hidden)
         import rehearse
         self.assertEqual(rehearse.MINE_SECONDS,240)
-        self.assertGreaterEqual(rehearse.MINE_SECONDS_ROTATED,2*219,'twice the slowest of the 36 measured samples')
+        self.assertGreaterEqual(rehearse.MINE_SECONDS_ROTATED,2*142,'twice the slowest of 22 rotated transitions at bft pin 11051123')
+        self.assertLessEqual(rehearse.MINE_SECONDS_ROTATED,360,'the design\'s one-stage ceiling: raising this hides a defect')
         waits=[]
         class Fake(rehearse.Rehearsal):
-            def __init__(self): self.n,self.pods,self.manifest,self.evidence=3,[1],{'faucet_address':'0x'+'11'*20},Path(tempfile.mkdtemp())
+            def __init__(self): self.n,self.pods,self.manifest,self.evidence=3,[1],{'funder_address':'0x'+'11'*20},Path(tempfile.mkdtemp())
             def say(self,*a): pass
             def expect(self,ok,what,detail=''): assert ok,what
             def compose(self,*a,**k): return ''
-            def http(self,*a,**k): return (503,'')
+            chain_id=1
+            def http(self,*a,**k): return (200,'')
+            def call(self,method,params=()):
+                if method=='eth_getTransactionReceipt': return {'blockHash':'0xb'}
+                if method=='eth_sendRawTransaction': return '0xtx'
+                return '0x1'
             def ureth(self,j,method,params=None): return '0x1'
             def raw_tx(self,*a): return '0xraw'
             def cast_run(self,*a): return '0xtx'
@@ -189,27 +697,32 @@ class ProofOfStake(unittest.TestCase):
                 waits.append((what,seconds))
                 if 'mines it' in what: raise rehearse.Failure(f'{what}: not within {seconds} s (last: None)')
                 return True
-        for limit in (None,rehearse.MINE_SECONDS_ROTATED):
+        for rotated in (False,True):
             waits.clear()
             with self.assertRaises(rehearse.Failure):
-                Fake().pod_restart() if limit is None else Fake().pod_restart(mine_within=limit)
-            self.assertEqual([x for what,x in waits if 'mines it' in what],[limit or rehearse.MINE_SECONDS])
+                Fake().pod_restart(rotated=rotated)
+            self.assertEqual([x for what,x in waits if 'mines it' in what],[rehearse.MINE_SECONDS_ROTATED if rotated else rehearse.MINE_SECONDS])
         seen=[]
         class Pos(Fake):
             def root_epoch(self,i,t): return 2
-            def pod_restart(self,mine_within=rehearse.MINE_SECONDS): seen.append(mine_within); raise rehearse.Failure('stop here')
+            def pod_restart(self,rotated=False): seen.append(rotated); raise rehearse.Failure('stop here')
             gen=Path(tempfile.mkdtemp())
         with patch('rehearse.handoff_ops.DockerTransport',lambda gen: None), self.assertRaises(rehearse.Failure): Pos().pos_restart()
-        self.assertEqual(seen,[rehearse.MINE_SECONDS_ROTATED])
+        self.assertEqual(seen,[True])
     def test_the_restart_latency_is_recorded_on_the_passing_path_and_the_note_is_only_for_the_rotated_limit(self):
         import rehearse
         said=[]
         class Fake(rehearse.Rehearsal):
-            def __init__(self): self.n,self.pods,self.manifest,self.evidence,self.target=3,[1],{'faucet_address':'0x'+'11'*20},Path(tempfile.mkdtemp()),2
+            def __init__(self): self.n,self.pods,self.manifest,self.evidence,self.target=3,[1],{'funder_address':'0x'+'11'*20},Path(tempfile.mkdtemp()),2
             def say(self,m): said.append(m)
             def expect(self,ok,what,detail=''): assert ok,what
             def compose(self,*a,**k): return 'a stop window line'
-            def http(self,*a,**k): return (503,'')
+            chain_id=1
+            def http(self,*a,**k): return (200,'')
+            def call(self,method,params=()):
+                if method=='eth_getTransactionReceipt': return {'blockHash':'0xb'}
+                if method=='eth_sendRawTransaction': return '0xtx'
+                return '0x1'
             def ureth(self,j,method,params=None): return '0x1'
             def raw_tx(self,*a): return '0xraw'
             def cast_run(self,*a): return '0xtx'
@@ -218,45 +731,57 @@ class ProofOfStake(unittest.TestCase):
                 if 'mines it' in what: return {'status':'0x1','blockHash':'0xb'}
                 if 'catches up' in what: raise rehearse.Failure('stop after the mining check')
                 return True
-        r=Fake()
-        with patch.object(rehearse,'SETTLED_SAMPLES',12),self.assertRaises(rehearse.Failure): r.pod_restart(mine_within=rehearse.MINE_SECONDS_ROTATED)   # past the mining wait: the record is written before anything else can fail
+        r=Fake(); r.gen=self._secret_generation()
+        with patch.object(rehearse,'AFTER_TRANSITION_SAMPLES',12),self.assertRaises(rehearse.Failure): r.pod_restart(rotated=True)   # past the mining wait: the record is written before anything else can fail
         rows=[json.loads(x) for x in (r.evidence/'restart-latency.jsonl').read_text().splitlines()]
         self.assertEqual([(x['validator_down'],x['limit'],x['tx']) for x in rows if x['phase']=='transition'],[(1,rehearse.MINE_SECONDS_ROTATED,'0xtx')])
-        settled=[x for x in rows if x['phase']=='settled']
-        self.assertEqual([x['sample'] for x in settled],list(range(12)),'where the latency settles, the validator still down')
+        samples=[x for x in rows if x['phase']=='after_transition']
+        self.assertEqual([x['sample'] for x in samples],list(range(12)),'after the transition transaction, the validator still down')
+        self.assertTrue(all(0<=x['since_stop']<60 for x in samples),'timed from this stop: the fake waits for nothing')
         self.assertEqual(rows[0]['phase'],'transition')
-        self.assertEqual((r.evidence/'stop-window-2-v1.log').read_text(),'a stop window line')
+        self.assertEqual((r.evidence/'stop-window-2-v1.log').read_text(),'a stop window line\n')
         self.assertTrue(any('survivors mined it' in m for m in said))
-        for limit,stall,note in ((rehearse.MINE_SECONDS,90,False),(rehearse.MINE_SECONDS_ROTATED,90,True),(rehearse.MINE_SECONDS_ROTATED,5,False)):
-            said.clear(); r.record_restart_latency(2,stall,limit,'0xt')
-            self.assertEqual('#886' in said[0],note,(limit,stall,said))
-    def test_a_restarted_validator_catches_up_to_the_last_settled_sample(self):
+        for rotated,stall,note in ((False,90,False),(True,90,True),(True,5,False)):
+            said.clear(); r.record_restart_latency(2,stall,rotated,'0xt')
+            self.assertEqual('#886' in said[0],note,(rotated,stall,said))
+    def test_a_restarted_validator_catches_up_to_the_last_after_transition_sample(self):
         import rehearse
         said=[]
         class Fake(rehearse.Rehearsal):
-            def __init__(self): self.n,self.pods,self.manifest,self.evidence,self.target=3,[1],{'faucet_address':'0x'+'11'*20},Path(tempfile.mkdtemp()),2
+            def __init__(self): self.n,self.pods,self.manifest,self.evidence,self.target=3,[1],{'funder_address':'0x'+'11'*20},Path(tempfile.mkdtemp()),2
             def say(self,m): said.append(m)
             def expect(self,ok,what,detail=''): assert ok,what
             def compose(self,*a,**k): return 'a stop window line'
-            def http(self,*a,**k): return (503,'')
-            def ureth(self,j,method,params=None): return '0x1'
+            chain_id=1
+            def http(self,*a,**k): return (200,'')
+            def call(self,method,params=()):
+                if method=='eth_getTransactionReceipt': return {'blockHash':'0xb'}
+                if method=='eth_sendRawTransaction': return self.inner_reply()['result']
+                return '0x1'
+            hashes=[]
+            def ureth(self,j,method,params=None):
+                if method=='eth_getTransactionReceipt': self.asked=params[0]
+                return '0x1'
             def raw_tx(self,*a): return '0xraw'
-            def cast_run(self,*a): return '0xtx'
-            def inner_reply(self,*a): return {'result':'0xtx'}
+            def cast_run(self,*a):
+                self.hashes.append(f'0xtx{len(self.hashes)}')
+                return self.hashes[-1]
+            def inner_reply(self,*a): return {'result':self.hashes[-1] if self.hashes else '0xtx'}
             def wait(self,what,probe,seconds):
                 if 'mines it' in what: return {'status':'0x1','blockHash':'0xb'}
                 if 'catches up to the last' in what:
-                    self.last=probe()
+                    probe()
                     raise rehearse.Failure('stop after the catch-up wait')
                 if 'catches up' in what: return {'blockHash':'0xb'}
                 return True
         r=Fake()
-        with patch.object(rehearse,'SETTLED_SAMPLES',12),self.assertRaises(rehearse.Failure): r.pod_restart(mine_within=rehearse.MINE_SECONDS_ROTATED)   # past the mining waittten before anything else can fail
-        self.assertEqual(r.last,'0x1','the gateway reads the sender nonce from the restarted validator: it must hold the last settled sample first')
-    def settled_fake(self,replies):
+        with patch.object(rehearse,'AFTER_TRANSITION_SAMPLES',12),self.assertRaises(rehearse.Failure): r.pod_restart(rotated=True)   # past the mining wait
+        self.assertEqual(r.asked,r.hashes[-1],'the last after-transition sample, not the transition transaction: the gateway reads the nonce from the restarted validator')
+        self.assertGreater(len(r.hashes),1)
+    def after_transition_fake(self,replies):
         import rehearse
         class Fake(rehearse.Rehearsal):
-            def __init__(self): self.manifest,self.evidence,self.sent={'faucet_address':'0x'+'11'*20},Path(tempfile.mkdtemp()),[]
+            def __init__(self): self.manifest,self.evidence,self.sent={'funder_address':'0x'+'11'*20},Path(tempfile.mkdtemp()),[]
             def say(self,m): pass
             def expect(self,ok,what,detail=''):
                 if not ok: raise rehearse.Failure(what+' '+detail)
@@ -268,25 +793,265 @@ class ProofOfStake(unittest.TestCase):
                 return replies(url)
             def wait(self,what,probe,seconds): return True
         return Fake()
-    def test_a_settled_sample_goes_to_every_survivor(self):
+    def test_the_transition_transaction_uses_the_gateway_while_a_validator_is_down(self):
         import rehearse
-        r=self.settled_fake(lambda url:{'result':'0xtx'})
-        with patch.object(rehearse,'SETTLED_SAMPLES',2): self.assertEqual(r.settled_latency(2,[1,3,4],600),'0xtx')
+        calls = []
+
+        class Fake(rehearse.Rehearsal):
+            n, pods, chain_id = 4, [2], 1
+            manifest = {'funder_address': '0x' + '11' * 20}
+
+            def __init__(self): pass
+            def say(self, message): pass
+            def expect(self, ok, what, detail=''): assert ok, what
+            def compose(self, *args): calls.append(args)
+            def http(self, host, method, path): return (200, '')
+            def raw_tx(self, *args): return '0xraw'
+            def cast_run(self, *args): return '0xtx'
+
+            def call(self, method, params=()):
+                calls.append((method, params))
+                return '0xtx' if method == 'eth_sendRawTransaction' else '0x1'
+
+            def wait(self, what, probe, seconds):
+                if 'mines it' in what:
+                    raise rehearse.Failure('stop at the mining wait')
+                return probe()
+
+        with self.assertRaisesRegex(rehearse.Failure, 'stop at the mining wait'):
+            Fake().pod_restart(rotated=True)
+        self.assertEqual(calls, [
+            ('stop', 'ureth2', 'root2', 'shard2'),
+            ('eth_chainId', ()),
+            ('eth_getTransactionCount', [Fake.manifest['funder_address'], 'latest']),
+            ('eth_gasPrice', ()),
+            ('eth_sendRawTransaction', ['0xraw']),
+        ])
+
+    def test_the_next_result_is_any_open_result_but_the_last_handoffs(self):
+        import rehearse
+        done,other,zero='0x'+'aa'*32,'0x'+'bb'*32,'0x'+'00'*32
+        self.assertEqual(rehearse.next_open_result(other,done),other,'also when it was already open as the stage started')
+        self.assertIsNone(rehearse.next_open_result(done,done))
+        self.assertIsNone(rehearse.next_open_result(zero,done))
+    def handoff_2_fake(self,state,open_result='0x'+'bb'*32):
+        import rehearse
+        gen=Path(tempfile.mkdtemp()); (gen/'network'/'handoff').mkdir(parents=True)
+        (gen/'network'/'pos-deployment.json').write_text(json.dumps({'election':'0xe','custody':'0xc'}))
+        (gen/'network'/'handoff'/'result-epoch-2.txt').write_text('0x'+'aa'*32+'\n')
+        class Fake(rehearse.Rehearsal):
+            def __init__(self): self.n,self.gen,self.target=1,gen,2
+            def say(self,m): pass
+            def expect(self,ok,what,detail=''):
+                if not ok: raise rehearse.Failure(what+' '+detail)
+            def root_epoch(self,i,transport=None): return 2
+            def view_text(self,*a): return open_result
+            def view(self,*a): return [0]
+            def wait(self,what,probe,seconds): return probe()
+            def cast_run(self,*a): return '0xdata'
+            def call(self,*a,**k): return '0x'+f'{state:064x}'
+            def pos_proposal(self): raise rehearse.Failure('reached the proposal')
+        return Fake()
+    def test_the_second_handoff_needs_the_first_result_acknowledged(self):
+        import rehearse
+        with patch('rehearse.handoff_ops.DockerTransport'):
+            with self.assertRaisesRegex(rehearse.Failure,'reached the proposal'): self.handoff_2_fake(rehearse.RESULT_ACKNOWLEDGED).pos_handoff_2()
+            with self.assertRaisesRegex(rehearse.Failure,'is Acknowledged'): self.handoff_2_fake(5).pos_handoff_2()   # Closed also clears openResult
+    def test_the_rotated_stop_window_is_kept_redacted_and_fails_closed(self):
+        import rehearse
+        gen=self._secret_generation()
+        said=[]
+        class Fake(rehearse.Rehearsal):
+            def __init__(self,g): self.evidence,self.gen,self.target=Path(tempfile.mkdtemp()),g,2
+            def say(self,m): said.append(m)
+        r=Fake(gen); r.keep_stop_window(2,'t1 local timeout\nt2 key hunter2-faucet-password\nt3 private_key=abc')
+        out=(r.evidence/'stop-window-2-v2.log').read_text()
+        self.assertIn('local timeout',out); self.assertNotIn('hunter2',out); self.assertIn(rehearse.WITHHELD_LINE,out)
+        r.keep_stop_window(2,'t9 the second restart')
+        self.assertIn('local timeout',(r.evidence/'stop-window-2-v2.log').read_text(),'the first window is not overwritten')
+        self.assertIn('the second restart',(r.evidence/'stop-window-2-v2-again.log').read_text())
+        r=Fake(gen)
+        with patch('rehearse.redact_log',lambda text,secrets=(): (text.splitlines(),0,0)): r.keep_stop_window(1,'t1 hunter2-faucet-password')
+        self.assertFalse((r.evidence/'stop-window-2-v1.log').exists(),'a literal survived: nothing is written')
+        self.assertTrue(any('NOT kept' in m for m in said))
+        for g in (None,Path(tempfile.mkdtemp())):   # no generation, or a scan that finds nothing
+            r=Fake(g); r.keep_stop_window(1,'t1 anything')
+            self.assertFalse((r.evidence/'stop-window-2-v1.log').exists())
+    def test_the_driver_output_is_redacted_before_it_reaches_the_job_log(self):
+        import rehearse,io,contextlib
+        gen=self._secret_generation()
+        class Fake(rehearse.Rehearsal):
+            def __init__(self,g): self.gen,self.log,self.results=g,io.StringIO(),[]
+        def printed(r,fn):
+            out=io.StringIO()
+            with contextlib.redirect_stdout(out): fn()
+            return out.getvalue()+r.log.getvalue()
+        r=Fake(gen)
+        out=printed(r,lambda: r.say('relayer: exit 1: key hunter2-faucet-password rejected'))
+        self.assertNotIn('hunter2',out); self.assertIn('[redacted]',out)
+        out=printed(r,lambda: r.say(r.scrub('the token is checked\nservice line hunter2-faucet-password\nprivate_key=abc',True)))
+        self.assertNotIn('hunter2',out); self.assertNotIn('private_key',out); self.assertIn(rehearse.WITHHELD_LINE,out)
+        self.assertIn('the token is checked',printed(r,lambda: r.say('the token is checked')),'the driver\'s own words are not withheld by pattern')
+        def failing_stage():
+            raise rehearse.Failure('ubft: exit 1: hunter2-faucet-password')
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(rehearse.Failure): r.stage('s',failing_stage)
+        self.assertNotIn('hunter2',r.log.getvalue()); self.assertNotIn('hunter2',r.results[-1][2])
+        calls=[]
+        orig=rehearse.known_secrets
+        with patch('rehearse.known_secrets',lambda g: calls.append(g) or orig(g)):
+            r=Fake(gen)
+            for _ in range(5): printed(r,lambda: r.say('a line'))
+        self.assertEqual(len(calls),1,'the generation is scanned once, not per line')
+        for g in (Path(tempfile.mkdtemp()),Path(tempfile.mkdtemp())/'missing'):   # a scan that finds nothing or fails: the text is withheld, nothing raises
+            r=Fake(g); out=printed(r,lambda: r.say('stderr hunter2-faucet-password'))
+            self.assertNotIn('hunter2',out); self.assertIn('output withheld',out)
+        r=Fake(gen)
+        with patch('rehearse.redact_log',lambda text,secrets=(): (text.splitlines(),0,0)):
+            out=printed(r,lambda: r.say(r.scrub('x hunter2-faucet-password',True)))
+        self.assertNotIn('hunter2',out,'a literal that survives the redaction is withheld')
+    def test_a_secret_written_mid_run_is_redacted_after_a_rescan(self):
+        import rehearse,io,contextlib
+        gen=self._secret_generation()
+        class Fake(rehearse.Rehearsal):
+            def __init__(self,g): self.gen,self.log,self.results=g,io.StringIO(),[]
+        def said(r,text):
+            with contextlib.redirect_stdout(io.StringIO()): r.say(text)
+            return r.log.getvalue().splitlines()[-1]
+        r=Fake(gen); said(r,'first line')   # the generation is scanned here
+        late,owner='latekey'+'ab'*20,'ownerkey'+'cd'*20
+        (gen/'heavy-joiner'/'root').mkdir(parents=True); (gen/'heavy-joiner'/'root'/'keys.json').write_text(json.dumps({'sigKey':{'privateKey':late}}))
+        (gen/'heavy-joiner'/'identity.json').write_text(json.dumps({'ownerKey':owner,'payee':'0x'+'1'*40}))
+        (gen/'validator2'/'auth').mkdir(parents=True); (gen/'validator2'/'auth'/'operator.cred').write_text('LATECREDENTIAL0123456789abcdef\n')
+        self.assertIn(late,said(r,'x '+late),'documents the cache: a key written after the scan is not known until a rescan')
+        r.rescan()
+        for secret in (late,owner,'LATECREDENTIAL0123456789abcdef'): self.assertNotIn(secret,said(r,'y '+secret))
+        self.assertIn('0x'+'1'*40,said(r,'payee 0x'+'1'*40),'the public fields of an identity file stay readable')
+        (gen/'heavy-joiner'/'evm').mkdir(); (gen/'heavy-joiner'/'evm'/'keys.json').write_text(json.dumps({'sigKey':{'privateKey':'second'+'ef'*20}}))
+        with contextlib.redirect_stdout(io.StringIO()): r.stage('s',lambda: None)   # a stage starts with a fresh scan
+        self.assertNotIn('second'+'ef'*20,said(r,'z second'+'ef'*20))
+        def failing():
+            (gen/'heavy-joiner'/'third.key').write_text('thirdkey'+'01'*20+'\n')   # written inside the stage, after its first lines
+            said(r,'inside'); raise rehearse.Failure('wrote '+'thirdkey'+'01'*20)
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(rehearse.Failure): r.stage('f',failing)
+        self.assertNotIn('thirdkey',r.log.getvalue().splitlines()[-1],'a key written inside the failing stage is scanned for before its FAIL line')
+    def test_compose_logs_are_redacted_or_withheld_before_upload(self):
+        import redact_evidence
+        gen=self._secret_generation()
+        log=Path(tempfile.mkdtemp())/'compose-logs.txt'
+        log.write_text('t1 round 7\nt2 hunter2-faucet-password\nt3 private_key=abc\n')
+        redact_evidence.redact_file(gen,log)
+        out=log.read_text()
+        self.assertIn('t1 round 7',out); self.assertNotIn('hunter2',out); self.assertNotIn('abc',out)
+        log.write_text('t1 hunter2-faucet-password\n')
+        redact_evidence.redact_file(Path(tempfile.mkdtemp()),log)   # a scan that finds nothing did not see the generation
+        self.assertTrue(log.read_text().startswith('[log withheld'),log.read_text())
+        log.write_text('t1 hunter2-faucet-password\n')
+        with patch('redact_evidence.redact_log',lambda text,secrets=(): (text.splitlines(),0,0)): redact_evidence.redact_file(gen,log)
+        self.assertNotIn('hunter2',log.read_text(),'a literal survived: none of the content stays')
+    def test_every_workflow_redacts_the_compose_logs_it_uploads(self):
+        for name in ('testnet-rehearsal.yml','testnet-bridge.yml'):
+            lines=(Path(__file__).resolve().parents[2]/'.github'/'workflows'/name).read_text().splitlines()
+            taken=[i for i,l in enumerate(lines) if "compose-logs.txt'" in l and ' logs ' in l]
+            self.assertTrue(taken,name)
+            for i in taken:
+                self.assertIn('redact_evidence.py',lines[i+1],f'{name}:{i+1} uploads compose logs unredacted')
+                self._redaction_line_withholds_when_the_script_cannot_start(name,lines[i+1].strip())
+    def _redaction_line_withholds_when_the_script_cannot_start(self,name,line):
+        """Run the workflow's own line from a directory without the script: the raw log must not survive it."""
+        import subprocess
+        home=Path(tempfile.mkdtemp()); fake=home/'bin'; fake.mkdir()
+        (fake/'sudo').write_text('#!/bin/sh\nexec env "$@"\n'); (fake/'sudo').chmod(0o755)
+        temp=home/'runner'
+        for d in ('evidence','evidence-pos','evidence-join'): (temp/d).mkdir(parents=True); (temp/d/'compose-logs.txt').write_text('raw hunter2-secret\n')
+        done=subprocess.run(['bash','-e','-c',line],cwd=home,env={**os.environ,'PATH':f'{fake}:{os.environ["PATH"]}','RUNNER_TEMP':str(temp),'G':str(home)},capture_output=True,text=True)
+        self.assertEqual(done.returncode,0,f'{name}: {line}: {done.stderr}')
+        path=re.search(r'\$RUNNER_TEMP/([^"\']+)',line).group(1)
+        self.assertEqual((temp/path).read_text(),'[log withheld: redaction did not finish]\n',f'{name}: {line}')
+    def test_a_restored_generation_is_scanned_with_its_original(self):
+        import rehearse
+        original=self._secret_generation(); restored=original.with_name(original.name+'-restored'); restored.mkdir()
+        self.assertIn('hunter2-faucet-password',rehearse.known_secrets(restored))
+        shutil.rmtree(original)
+        with self.assertRaises(rehearse.SecretScanError): rehearse.known_secrets(restored)
+    def test_the_join_profile_runs_the_heavy_joiner_before_the_slow_restart(self):
+        import rehearse
+        text=(Path(__file__).resolve().parents[2]/'.github'/'workflows'/'testnet-rehearsal.yml').read_text()
+        wanted=re.search(r'"(?:\$\{JOIN_STAGES:-)?(up,[^"}]*pos-join-heavy[^"}]*)\}?"',text).group(1).split(',')   # the default list; JOIN_STAGES overrides it (#905)
+        runs=[name for name,_ in rehearse.STAGES+rehearse.POS_STAGES if name in wanted]   # main() walks these and uses --stages only as a filter
+        self.assertEqual(set(runs),set(wanted),'a stage the workflow names does not exist')
+        self.assertLess(runs.index('pos-join-heavy'),runs.index('pos-restart'),'pos-restart can outlast the election cadence, and the open attempt never sees the heavy joiner')
+    def test_the_restore_abort_pattern_matches_compose_log_lines(self):
+        """#905: `compose logs --timestamps` prefixes a line with the service and the time, so a panic is not at the start of the line."""
+        import rehearse
+        hit=rehearse.Rehearsal.ABORT_LINES
+        for line in ('shard5-1  | 2026-11-08T13:57:36.388735271Z panic: runtime error: index out of range',
+                     'shard5-1  | 2026-11-08T13:57:36.388735271Z runtime/cgo: pthread_create failed: Resource temporarily unavailable',
+                     'shard5-1  | 2026-11-08T13:57:36.390850679Z SIGABRT: abort', 'shard5-1  | fatal error: all goroutines are asleep', 'panic: boom'):
+            self.assertTrue(hit.search(line),line)
+        for line in ('shard5-1  | 2026-11-08T13:57:36Z goroutine 1 [running]:', 'shard5-1  | Error: restore requires a fresh BFT data directory: /state/execution-journal.db already exists'):
+            self.assertFalse(hit.search(line),line)
+    def test_a_restore_keeps_the_whole_log_redacted(self):
+        import rehearse
+        gen=self._secret_generation()
+        whole='fatal error: the first line of the crash\nt2 hunter2-faucet-password\n'
+        class Fake(rehearse.Rehearsal):
+            def __init__(self,up): self.gen,self.dir,self.up=gen,Path(tempfile.mkdtemp()),up
+            def evh(self): return self.dir
+            def say(self,m): pass
+            def expect(self,ok,what,detail=''):
+                if not ok: raise rehearse.Failure(what)
+            def compose(self,*a,**k):
+                if a[0]=='ps': return 'shard5' if self.up else 'shard1'
+                return 'the last lines' if '--tail' in a else whole
+        with patch('rehearse.time.sleep'):
+            r=Fake(False)
+            with self.assertRaisesRegex(rehearse.Failure,'runs as a restore'): r.expect_restore_running(5)
+            out=(r.dir/'joiner-shard-5-restore-whole.log').read_text()
+            self.assertIn('the first line of the crash',out); self.assertNotIn('hunter2',out)
+            r=Fake(True); r.expect_restore_running(5)
+            self.assertIn('the first line of the crash',(r.dir/'joiner-shard-5-restore-whole.log').read_text(),'a restart loop can read as running at the look')
+    def test_every_log_of_a_service_is_kept_redacted(self):
+        here=Path(__file__).resolve().parent
+        for name in ('rehearse.py','pos_crash.py','pos_join.py'):
+            for n,line in enumerate((here/name).read_text().splitlines(),1):
+                if 'head + body' in line: continue   # capture_restart_window, which has redacted it
+                self.assertFalse(re.search(r"\.log'?\)\.write_text\(",line),f'{name}:{n} writes a log raw: {line.strip()}')
+    def test_an_after_transition_sample_goes_to_every_survivor(self):
+        import rehearse
+        r=self.after_transition_fake(lambda url:{'result':'0xtx'})
+        with patch.object(rehearse,'AFTER_TRANSITION_SAMPLES',2): self.assertEqual(r.after_transition_latency(2,[1,3,4],600,0),'0xtx')
         self.assertEqual(r.sent,[f'http://ureth{j}:8545' for j in (1,3,4)]*2,'the validators have no peers: a pool not sent it never holds it')
-    def test_a_refused_settled_sample_fails_at_once(self):
+    def test_an_after_transition_row_says_when_its_sample_was_accepted(self):
+        import datetime,rehearse,time
+        r=self.after_transition_fake(lambda url:{'result':'0xtx'})
+        before=datetime.datetime.now(datetime.timezone.utc)
+        with patch.object(rehearse,'AFTER_TRANSITION_SAMPLES',2): r.after_transition_latency(2,[1,3,4],600,time.monotonic()-100)
+        rows=[json.loads(x) for x in (r.evidence/'restart-latency.jsonl').read_text().splitlines()]
+        self.assertEqual([x['sample'] for x in rows],[0,1])
+        for row in rows:
+            self.assertTrue(100<=row['since_stop']<160,row)   # #886: the report splits the samples still in the adaptation burst on this
+            self.assertLess((datetime.datetime.fromisoformat(row['accepted_at'].replace('Z','+00:00'))-before).total_seconds(),60,row)
+    def test_a_refused_after_transition_sample_fails_at_once(self):
         import rehearse
-        r=self.settled_fake(lambda url:{'error':{'message':'replacement underpriced'}} if 'ureth3' in url else {'result':'0xtx'})
-        with patch.object(rehearse,'SETTLED_SAMPLES',2),self.assertRaisesRegex(rehearse.Failure,'survivor 3 accepts'): r.settled_latency(2,[1,3,4],600)
+        r=self.after_transition_fake(lambda url:{'error':{'message':'replacement underpriced'}} if 'ureth3' in url else {'result':'0xtx'})
+        with patch.object(rehearse,'AFTER_TRANSITION_SAMPLES',2),self.assertRaisesRegex(rehearse.Failure,'survivor 3 accepts'): r.after_transition_latency(2,[1,3,4],600,0)
         self.assertEqual(r.sent,[f'http://ureth{j}:8545' for j in (1,3)],'not after a 600 s wait for its receipt')
-    def test_settled_samples_are_off_until_the_pin_has_886(self):
+    def test_after_transition_samples_are_off_until_the_pin_has_886(self):
         import rehearse
         said=[]
         class Fake(rehearse.Rehearsal):
-            def __init__(self): self.n,self.pods,self.manifest,self.evidence,self.target=3,[1],{'faucet_address':'0x'+'11'*20},Path(tempfile.mkdtemp()),2
+            def __init__(self): self.n,self.pods,self.manifest,self.evidence,self.target=3,[1],{'funder_address':'0x'+'11'*20},Path(tempfile.mkdtemp()),2
             def say(self,m): said.append(m)
             def expect(self,ok,what,detail=''): assert ok,what
             def compose(self,*a,**k): return 'a stop window line'
-            def http(self,*a,**k): return (503,'')
+            chain_id=1
+            def http(self,*a,**k): return (200,'')
+            def call(self,method,params=()):
+                if method=='eth_getTransactionReceipt': return {'blockHash':'0xb'}
+                if method=='eth_sendRawTransaction': return self.inner_reply()['result']
+                return '0x1'
             def ureth(self,j,method,params=None):
                 if method=='eth_getTransactionReceipt': self.asked=params[0]
                 return '0x1'
@@ -301,10 +1066,10 @@ class ProofOfStake(unittest.TestCase):
                 if 'catches up' in what: return {'blockHash':'0xb'}
                 return True
         r=Fake()
-        with self.assertRaises(rehearse.Failure): r.pod_restart(mine_within=rehearse.MINE_SECONDS_ROTATED)   # past the mining waittten before anything else can fail
-        self.assertEqual(rehearse.SETTLED_SAMPLES,0,'at a pin without #886 a sample can wait out its whole limit (run 41737297875)')
+        with patch.object(rehearse,'AFTER_TRANSITION_SAMPLES',0),self.assertRaises(rehearse.Failure): r.pod_restart(rotated=True)   # past the mining wait: the record is written before anything else can fail
+        self.assertEqual(rehearse.AFTER_TRANSITION_SAMPLES,12,'the pin contains #886: twelve after-transition samples (0 at a pin without it: run 41737297875)')
         rows=[json.loads(x) for x in (r.evidence/'restart-latency.jsonl').read_text().splitlines()]
-        self.assertEqual([x['phase'] for x in rows],['transition'],'no samples')
+        self.assertEqual([x['phase'] for x in rows],['transition','window'],'no samples')
         self.assertEqual(r.asked,'0xtx','the wait falls back to the transition transaction')
     def _secret_generation(self):
         gen=Path(tempfile.mkdtemp())
@@ -390,11 +1155,16 @@ class ProofOfStake(unittest.TestCase):
         import rehearse
         kept=[]
         class Fake(rehearse.Rehearsal):
-            def __init__(self): self.n,self.pods,self.manifest,self.evidence,self.target=3,[1],{'faucet_address':'0x'+'11'*20},Path(tempfile.mkdtemp()),2
+            def __init__(self): self.n,self.pods,self.manifest,self.evidence,self.target=3,[1],{'funder_address':'0x'+'11'*20},Path(tempfile.mkdtemp()),2
             def say(self,*a): pass
             def expect(self,ok,what,detail=''): assert ok,what
             def compose(self,*a,**k): return ''
-            def http(self,*a,**k): return (503,'')
+            chain_id=1
+            def http(self,*a,**k): return (200,'')
+            def call(self,method,params=()):
+                if method=='eth_getTransactionReceipt': return {'blockHash':'0xb'}
+                if method=='eth_sendRawTransaction': return '0xtx'
+                return '0x1'
             def ureth(self,j,method,params=None): return '0x1'
             def raw_tx(self,*a): return '0xraw'
             def cast_run(self,*a): return '0xtx'
@@ -404,10 +1174,16 @@ class ProofOfStake(unittest.TestCase):
                 if 'mines it' in what: return {'status':'0x1','blockHash':'0xb'}
                 if 'catches up' in what: raise rehearse.Failure('stop after the mining check')
                 return True
-        for limit,expect in ((rehearse.MINE_SECONDS,1),(rehearse.MINE_SECONDS_ROTATED,0)):
+        for rotated,expect in ((False,1),(True,0)):
             kept.clear()
-            with self.assertRaises(rehearse.Failure): Fake().pod_restart(mine_within=limit)
-            self.assertEqual(len(kept),expect,limit)
+            with self.assertRaises(rehearse.Failure): Fake().pod_restart(rotated=rotated)
+            self.assertEqual(len(kept),expect,rotated)
+    def test_the_window_is_tagged_with_its_t2_repeats(self):
+        import rehearse
+        line=lambda node,shard,root: f'{node}-1  | '+json.dumps({'message':'certificate admitted','round':shard,'rootRound':root,'time':f't{root}'})
+        log='\n'.join([line('shard1',177,612),line('shard3',177,612),'root1-1  | not json',line('shard1',177,624),line('shard3',177,624),line('shard1',179,628),line('shard3',179,628),line('shard1',179,628)])
+        self.assertEqual(rehearse.repeated_certificates(log),[{'shardRound':177,'rootRound':624,'firstRootRound':612,'time':'t624'}],'one repeat, once; the same certificate logged again is not one')
+        self.assertEqual(rehearse.repeated_certificates(line('shard1',1,2)+'\n'+line('shard1',2,3)),[])
     def test_pos_owner_names_the_revert_selector_it_expects(self):
         import json,rehearse,pos_owner
         class Fake:   # the two helpers it needs: a selector table and an eth_call that fails with a given revert data
@@ -446,13 +1222,13 @@ class ProofOfStake(unittest.TestCase):
         full=pos.profile_args(d,{'election':'/m.json','hook':'/h.jsonl'})
         self.assertEqual(sorted(set(full)-set(args)),sorted(['--election','--elect-measurement','0xe','/m.json']))
     def test_the_caps_are_covered_by_the_per_record_reservation(self):
-        # the cold RecoveryAck: 2,281,165 for 6 members of one lot (3,629,888 for 8 members of 2 lots); the guard's margin is 1.25
+        # Hosted CI reported 3,174,198 after margin for the cold RecoveryAck at the legacy caps.
         self.assertEqual(pos.CAPS,(16,1,6))
-        self.assertLessEqual(2_281_165*125//100,pos.HOOK_RECORD_GAS)
+        self.assertLessEqual(3_174_198,pos.HOOK_RECORD_GAS)
         self.assertGreater(3_629_888*125//100,pos.HOOK_RECORD_GAS)
     def test_pos_refuses_more_validators_than_the_caps_cover_before_any_key(self):
         done=subprocess.run([sys.executable,str(Path(__file__).parent/'generate.py'),'--out','/nonexistent/tn-x','--validators',str(pos.CAPS[2]+1),'--ubft','x','--keygen','x','--b1genesis','x',
-            '--images','x','--captcha-sitekey','a','--captcha-secret-file','x','--pos','--pos-contracts','x'],text=True,capture_output=True)
+            '--images','x','--captcha-sitekey','a','--captcha-secret-file','x','--first-generation','--pos','--pos-contracts','x'],text=True,capture_output=True)
         self.assertEqual(done.returncode,2);self.assertIn('cover at most %d genesis identities'%pos.CAPS[2],done.stderr)
     def test_genesis_weights_default_to_one_and_nothing_else_is_buildable(self):
         self.assertEqual(pos.genesis_weights(4),[1,1,1,1]);self.assertEqual(pos.genesis_weights(3,['1','1','1']),[1,1,1])
@@ -477,7 +1253,7 @@ class ProofOfStake(unittest.TestCase):
                 cfg=generate.topology(out,3,ids,images,'captcha',(),30000000,with_pos)
                 for i in (1,2,3):
                     root=cfg['services']['root%d'%i]['entrypoint']
-                    self.assertIn('--q3-lane',root);self.assertIn('--profile-3',root)
+                    self.assertIn('--q3-lane',root);self.assertIn('--b1-registry',root);self.assertIn('--profile-3',root)
                     if with_pos:
                         self.assertEqual(root[root.index('--pos-deployment')+1],'/network/pos-deployment.json')
                         self.assertEqual(root[root.index('--pos-genesis-identities')+1],'/network/pos-genesis-identities.json')
@@ -610,15 +1386,15 @@ class ProofOfStake(unittest.TestCase):
             self.assertEqual(pos.code_hash(genesis,'0xaa'),'0xabcd');self.assertEqual(run.call_args[0][0],['cast','keccak','0x6001'])
         for address in ('0xbb','0xcc'):
             with self.assertRaisesRegex(pos.PosError,'no code'): pos.code_hash(genesis,address)
-        d=pos.Genesis.__new__(pos.Genesis);d.deployment={'custody':'0xaa','custodyCodeHash':'0xdead','election':'0xaa','electionCodeHash':'0xabcd'}
+        d=pos.Genesis.__new__(pos.Genesis);d.deployment={'custody':'0xaa','custodyCodeHash':'0xdead','election':'0xaa','electionCodeHash':'0xabcd','electionPublication':'0xaa'}
         with patch('pos.subprocess.run',return_value=R):
             with self.assertRaisesRegex(pos.PosError,'custody code'): d.alloc_code_hashes(genesis)
     def test_the_reward_pool_code_and_funding_are_checked_against_the_genesis_state(self):
         class R: returncode=0;stdout='0xABCD\n';stderr=''
         dep={'custody':'0xaa','custodyCodeHash':'0xabcd','election':'0xaa','electionCodeHash':'0xabcd','policy':'0xaa','policyCodeHash':'0xabcd',
-             'rewardPool':'0xcc','rewardPoolCodeHash':'0xabcd','rewardFunding':'1000'}
-        def genesis(balance):
-            return {'alloc':{'0xAA':{'code':'0x6001'},'0xCC':{'code':'0x6001','balance':balance}}}
+             'rewardPool':'0xcc','rewardPoolCodeHash':'0xabcd','rewardFunding':'1000','electionPublication':'0xdd','electionPublicationCodeHash':'0xabcd'}
+        def genesis(balance, publication=True):
+            return {'alloc':{'0xAA':{'code':'0x6001'},'0xCC':{'code':'0x6001','balance':balance},**({'0xDD':{'code':'0x6001'}} if publication else {})}}
         d=pos.Genesis.__new__(pos.Genesis);d.deployment=dep
         with patch('pos.subprocess.run',return_value=R):
             d.alloc_code_hashes(genesis(hex(1000)))
@@ -628,6 +1404,13 @@ class ProofOfStake(unittest.TestCase):
             with self.assertRaisesRegex(pos.PosError,'rewardPool code'): d.alloc_code_hashes(genesis(hex(1000)))
             d.deployment=dict(dep,policyCodeHash='0xdead')
             with self.assertRaisesRegex(pos.PosError,'policy code'): d.alloc_code_hashes(genesis(hex(1000)))
+            # the election's publication implementation (PoPs, finalization): recorded, allocated and the recorded code (contracts P85Genesis)
+            d.deployment=dict(dep,electionPublicationCodeHash='0xdead')
+            with self.assertRaisesRegex(pos.PosError,'electionPublication code'): d.alloc_code_hashes(genesis(hex(1000)))
+            d.deployment=dep
+            with self.assertRaisesRegex(pos.PosError,'no code at 0xdd'): d.alloc_code_hashes(genesis(hex(1000),publication=False))
+            d.deployment={k:v for k,v in dep.items() if not k.startswith('electionPublication')}
+            with self.assertRaisesRegex(pos.PosError,'records no electionPublication'): d.alloc_code_hashes(genesis(hex(1000)))
 
 class EntityNamespace(unittest.TestCase):
     def cfg(self,n=4):
@@ -686,7 +1469,7 @@ class EntityNamespace(unittest.TestCase):
     def test_the_generator_refuses_a_non_loopback_bind_before_any_key(self):
         for bad in ('0.0.0.0','10.1.2.3','example.org'):
             done=subprocess.run([sys.executable,str(Path(__file__).parent/'generate.py'),'--out','/nonexistent/tn-x','--validators','4','--ubft','x','--keygen','x','--b1genesis','x',
-                '--images','x','--captcha-sitekey','a','--captcha-secret-file','x','--rpc-bind',bad],text=True,capture_output=True)
+                '--images','x','--captcha-sitekey','a','--captcha-secret-file','x','--first-generation','--rpc-bind',bad],text=True,capture_output=True)
             self.assertEqual(done.returncode,2,bad);self.assertIn('--rpc-bind',done.stderr)
     def test_every_root_must_carry_the_same_operator_address(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -705,7 +1488,7 @@ class EntityNamespace(unittest.TestCase):
     def test_the_validator_count_is_capped_at_the_registry_ceiling_with_the_reason(self):
         for n,ok in ((2,False),(3,True),(16,True),(17,False),(32,False)):
             done=subprocess.run([sys.executable,str(Path(__file__).parent/'generate.py'),'--out','/nonexistent/tn-x','--validators',str(n),'--ubft','/nonexistent/ubft','--keygen','x','--b1genesis','x',
-                '--images','x','--captcha-sitekey','a','--captcha-secret-file','x'],text=True,capture_output=True)
+                '--images','x','--captcha-sitekey','a','--captcha-secret-file','x','--first-generation'],text=True,capture_output=True)
             if ok: self.assertNotIn('validators must be 3..16',done.stderr,n)
             else:
                 self.assertEqual(done.returncode,2,n);self.assertIn('validators must be 3..16, got %d'%n,done.stderr);self.assertIn('at most 16 committee members',done.stderr)
@@ -933,6 +1716,75 @@ class HandoffDryForm(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError,'lacks --c'): dry.check_cli(fake,{'known cmd':['a','c']})
             with self.assertRaisesRegex(AssertionError,'does not exist'): dry.check_cli(fake,{'other cmd':['a']})
 
+class TokenBucket(unittest.TestCase):
+    """gateway.Limiter: a token bucket per address under a total bucket, on a controlled clock."""
+    def limiter(self, *args, **kw):
+        self.now=1000.0
+        clock=patch('gateway.time.monotonic',side_effect=lambda: self.now); clock.start(); self.addCleanup(clock.stop)
+        return gateway.Limiter(*args, **kw)
+    def test_a_burst_of_sixty_passes_and_the_sixty_first_in_the_same_instant_is_refused(self):
+        lim=self.limiter(*gateway.RPC_LIMIT)
+        self.assertEqual(gateway.RPC_LIMIT,(20,60,400,400))
+        self.assertEqual([lim.allowed('a') for _ in range(61)],[True]*60+[False])
+        self.assertTrue(lim.allowed('b'),'another address has its own bucket')
+    def test_the_bucket_refills_at_its_rate_up_to_its_burst(self):
+        lim=self.limiter(20,60,400,400)
+        for _ in range(60): lim.allowed('a')
+        self.assertFalse(lim.allowed('a'))
+        self.now+=0.049; self.assertFalse(lim.allowed('a'),'under one token after 49 ms at 20/s')
+        self.now+=0.002; self.assertTrue(lim.allowed('a'),'one token after 50 ms'); self.assertFalse(lim.allowed('a'))
+        self.now+=1.0; self.assertEqual(sum(lim.allowed('a') for _ in range(30)),20,'20 tokens a second')
+        self.now+=3600; self.assertEqual(sum(lim.allowed('a') for _ in range(100)),60,'never more than the burst')
+    def test_refused_requests_take_nothing_and_sustained_traffic_gets_the_rate(self):
+        lim=self.limiter(20,60,400,400)
+        served=0
+        for _ in range(100):           # ten seconds of 100 requests a second, most of them refused
+            served+=sum(lim.allowed('a') for _ in range(100)); self.now+=1.0
+        self.assertEqual(served,60+20*99)
+    def test_the_total_holds_and_one_address_cannot_take_more_of_it_than_its_bucket(self):
+        lim=self.limiter(20,60,400,400)
+        self.assertEqual(sum(lim.allowed('greedy') for _ in range(10000)),60)
+        # the greedy address's refused requests cost the total nothing: other addresses still get the rest of it
+        self.assertEqual(sum(lim.allowed(f'10.0.{i//60}.{i%60}') for i in range(400)),340)
+        self.assertFalse(lim.allowed('fresh'),'the total is spent: a fresh address is refused too')
+        self.now+=0.5
+        self.assertEqual(sum(lim.allowed(f'192.0.2.{i}') for i in range(250)),200,'the total refills at 400/s')
+        self.now+=1.0
+        self.assertEqual(sum(lim.allowed('greedy') for _ in range(100)),30,'and the greedy address only its own 20/s: 1.5 s of tokens')
+    def test_the_total_refusal_does_not_spend_the_address_bucket(self):
+        lim=self.limiter(5,5,3,3)
+        self.assertEqual([lim.allowed('a') for _ in range(4)],[True,True,True,False])
+        self.now+=1.0   # three more total tokens; the address has two left and gains five
+        self.assertEqual(sum(lim.allowed('a') for _ in range(10)),3)
+    def test_the_client_table_is_bounded_least_recently_seen_first(self):
+        lim=self.limiter(1,1,10**9,10**9,clients=3)
+        for ip in 'abc': self.assertTrue(lim.allowed(ip))
+        self.assertFalse(lim.allowed('a'))   # a is now the most recent
+        self.assertTrue(lim.allowed('d'))    # drops b
+        self.assertEqual(list(lim.clients),['c','a','d'])
+        self.assertEqual(len(gateway.Limiter(*gateway.RPC_LIMIT).clients),0); self.assertEqual(gateway.CLIENTS,10000)
+        big=self.limiter(1,1,10**9,10**9)
+        for i in range(gateway.CLIENTS+500): big.allowed(i)
+        self.assertEqual(len(big.clients),gateway.CLIENTS)
+    def test_the_limiter_is_thread_safe(self):
+        # a frozen clock: every bucket is exact, so one lost update under 16 threads that switch as often as possible would show
+        interval=sys.getswitchinterval(); sys.setswitchinterval(1e-6); self.addCleanup(sys.setswitchinterval,interval)
+        one=self.limiter(1,500,10**9,10**9)
+        total=gateway.Limiter(1,500,700,700)
+        with concurrent.futures.ThreadPoolExecutor(16) as pool:
+            self.assertEqual(sum(pool.map(lambda _: one.allowed('a'),range(4000))),500,'one address: its burst')
+            self.assertEqual(sum(pool.map(lambda i: total.allowed(i),range(4000))),700,'4000 addresses: the total')
+    def test_the_defaults(self):
+        self.assertEqual((gateway.HEAVY_LIMIT,gateway.AGG_LIMIT),((4,20,40,80),(20,60,200,200)))
+        server=gateway.Server(('127.0.0.1',0),gateway.Handler,FakeRelay())
+        self.addCleanup(server.server_close); self.addCleanup(server.pool.shutdown)
+        for lim,want in ((server.rpc_limit,gateway.RPC_LIMIT),(server.heavy_limit,gateway.HEAVY_LIMIT),(server.agg_limit,gateway.AGG_LIMIT)):
+            self.assertEqual((lim.rate,lim.burst,lim.total,lim.total_burst),want)
+        gateway.guard_limits(server)
+        self.assertEqual(server.rpc_limit.rate,4*gateway.RPC_LIMIT[2],'the guard sees all public reads as one address, each up to four calls')
+        self.assertEqual(server.heavy_limit.total,2*gateway.HEAVY_LIMIT[2])
+        self.assertEqual(gateway.Server.request_queue_size,gateway.SOCKETS)
+
 class PublicRPC(unittest.TestCase):
     def setUp(self):
         self.relay=FakeRelay()
@@ -962,10 +1814,146 @@ class PublicRPC(unittest.TestCase):
     def test_public_preserves_id(self):
         status,result=self.rpc('eth_sendRawTransaction')
         self.assertEqual((status,result['id']),(200,17))
+    def call(self, method, params, rid=1):
+        return self.send(json.dumps({'jsonrpc':'2.0','id':rid,'method':method,'params':params}))
+    def test_wallet_evidence_reads_are_public(self):
+        # bft-core#1102: the native bridge v2 wallet builds every proof from these, with no bridge-specific service
+        block='0x'+'11'*32
+        for method,params in [('eth_getBlockByHash',[block,False]),('eth_getBlockReceipts',[block]),('unicity_getSealCompanionV1',[block]),
+                              ('unicity_sealCompanionHorizonV1',[]),('eth_getLogs',[{'address':'0x'+'22'*20,'blockHash':block}])]:
+            self.assertEqual(self.call(method,params,9)[0],200,method)
+            self.assertEqual(self.relay.calls[-1],(method,params))
+    def test_log_queries_name_one_address_and_a_bounded_window(self):
+        self.server.rpc_limit=self.server.heavy_limit=gateway.Limiter(1000,1000,1000)   # this test is about the filter, not the limit
+        vault='0x'+'aB'*20
+        topics=[['0x'+'06'*32],['0x'+'00'*31+'05','0x'+'00'*31+'06']]
+        ok=[{'address':vault,'fromBlock':'0x0','toBlock':hex(gateway.LOG_BLOCK_RANGE-1),'topics':topics},
+            {'address':vault,'fromBlock':'0x10','toBlock':'0x10'},
+            {'address':vault,'blockHash':'0x'+'33'*32,'topics':[None,'0x'+'00'*32]}]
+        for f in ok:
+            self.assertEqual(self.call('eth_getLogs',[f])[0],200,f)
+        sent=len(self.relay.calls)
+        bad=[{'fromBlock':'0x0','toBlock':'0x1'},                                          # no address: every contract's logs
+             {'address':[vault,vault],'fromBlock':'0x0','toBlock':'0x1'},                  # a list of addresses
+             {'address':vault},                                                            # no window
+             {'address':vault,'fromBlock':'0x0','toBlock':hex(gateway.LOG_BLOCK_RANGE)},  # one block over the range
+             {'address':vault,'fromBlock':'0x5','toBlock':'0x4'},
+             {'address':vault,'fromBlock':'earliest','toBlock':'latest'},                 # tags: the window is fixed before it is asked for
+             {'address':vault,'fromBlock':'0x00','toBlock':'0x1'},                        # not a canonical quantity
+             {'address':vault,'fromBlock':'0x0','toBlock':'0x1','blockHash':'0x'+'33'*32},
+             {'address':vault,'fromBlock':'0x0','toBlock':'0x1','topics':'0x06'},
+             {'address':vault,'fromBlock':'0x0','toBlock':'0x1','extra':1}]
+        for f in bad:
+            status,result=self.call('eth_getLogs',[f])
+            self.assertEqual(status,400,f)
+            self.assertIn(str(gateway.LOG_BLOCK_RANGE),result['error'],'the refusal names the window a wallet pages by')
+        for params in [[],[ok[0],ok[0]],['0x1']]:
+            self.assertEqual(self.call('eth_getLogs',params)[0],400)
+        self.assertEqual(len(self.relay.calls),sent)
+    def refused(self, cases, status=400):
+        """Every (method, params) or raw body in CASES is refused with STATUS and reaches no upstream."""
+        sent=len(self.relay.calls)
+        for case in cases:
+            body=case if isinstance(case,str) else json.dumps({'jsonrpc':'2.0','id':3,'method':case[0],'params':case[1]})
+            self.assertEqual(self.send(body)[0],status,case)
+        self.assertEqual(len(self.relay.calls),sent,'a refused request reached the upstream')
+    def test_evidence_reads_take_exactly_their_params(self):
+        self.server.rpc_limit=self.server.heavy_limit=gateway.Limiter(1000,1000,1000)
+        h='0x'+'ab'*32
+        for case in [('eth_getBlockByHash',[h,False]),('eth_getBlockReceipts',[h]),('eth_getBlockReceipts',['0x1f']),
+                     ('unicity_getSealCompanionV1',[h]),('unicity_sealCompanionHorizonV1',[])]:
+            self.assertEqual(self.call(*case)[0],200,case)
+        self.refused([('eth_getBlockByHash',[h,True]),             # full transactions
+                      ('eth_getBlockByHash',[h]),('eth_getBlockByHash',[h,False,1]),('eth_getBlockByHash',[h,0]),
+                      ('eth_getBlockByHash',['0x'+'ab'*31,False]),('eth_getBlockByHash',['0x'+'zz'*32,False]),
+                      ('eth_getBlockReceipts',[]),('eth_getBlockReceipts',[h,h]),('eth_getBlockReceipts',['latest']),
+                      ('eth_getBlockReceipts',['0x01']),('eth_getBlockReceipts',[31]),('eth_getBlockReceipts',['0x'+'g'*64]),
+                      ('unicity_getSealCompanionV1',[]),('unicity_getSealCompanionV1',[h,False]),('unicity_getSealCompanionV1',[h[:-1]+'x']),
+                      ('unicity_getSealCompanionV1',[{'hash':h}]),('unicity_sealCompanionHorizonV1',[1])])
+        status,result=self.call('eth_getBlockByHash',[h,True])
+        self.assertIn('[blockHash, false]',result['error'],'the refusal names the accepted shape')
+    def test_nb2_imported_tip_read_requires_fixed_slot_and_canonical_block_hash(self):
+        method = 'eth_getStorageAt'
+        registry, slot = gateway.B1_REGISTRY, gateway.B1_IMPORTED_TIP_SLOT
+        block_hash = '0x' + 'ab' * 32
+        block = {'blockHash': block_hash, 'requireCanonical': True}
+        self.assertEqual(self.call(method, [registry, slot, block])[0], 200)
+        self.refused([
+            (method, ['0x' + '11' * 20, slot, block]),
+            (method, [registry, '0x' + '00' * 32, block]),
+            (method, [registry, slot, 'finalized']),
+            (method, [registry, slot, {'blockHash': block_hash}]),
+            (method, [registry, slot, {**block, 'requireCanonical': False}]),
+            (method, [registry, slot, {**block, 'requireCanonical': 1}]),
+            (method, [registry, slot, {**block, 'blockNumber': '0x1'}]),
+            (method, [registry, slot, {**block, 'blockHash': '0x0'}]),
+        ])
+
+    def test_log_filter_edges_are_refused_before_any_upstream_call(self):
+        self.server.rpc_limit=self.server.heavy_limit=gateway.Limiter(1000,1000,1000)
+        vault='0x'+'cd'*20; h='0x'+'11'*32
+        self.refused([json.dumps([{'jsonrpc':'2.0','id':1,'method':'eth_getLogs','params':[{'address':vault,'blockHash':h}]}]),   # a batch
+                      ('eth_getLogs',[{'address':vault,'fromBlock':'10','toBlock':'0x20'}]),        # decimal
+                      ('eth_getLogs',[{'address':vault,'fromBlock':'0x1','toBlock':'pending'}]),
+                      ('eth_getLogs',[{'address':vault,'fromBlock':'safe','toBlock':'0x2'}]),
+                      ('eth_getLogs',[{'address':vault,'fromBlock':'0x1'}]),                        # toBlock missing
+                      ('eth_getLogs',[{'address':vault,'toBlock':'0x1'}]),
+                      ('eth_getLogs',[{'address':vault,'blockHash':'0x'+'zz'*32}]),                 # malformed hashes
+                      ('eth_getLogs',[{'address':vault,'blockHash':'0x'+'11'*31+'1'}]),
+                      ('eth_getLogs',[{'address':vault,'blockHash':'11'*33}]),
+                      ('eth_getLogs',[{'address':'0x'+'zz'*20,'blockHash':h}]),
+                      ('eth_getLogs',[{'address':vault,'blockHash':h,'topics':[None]*5}]),          # topics
+                      ('eth_getLogs',[{'address':vault,'blockHash':h,'topics':['0x06']}]),
+                      ('eth_getLogs',[{'address':vault,'blockHash':h,'topics':[[]]}]),
+                      ('eth_getLogs',[{'address':vault,'blockHash':h,'topics':[[h]*(gateway.LOG_TOPIC_ALTERNATIVES+1)]}]),
+                      ('eth_getLogs',[{'address':vault,'blockHash':h,'topics':[[h,[h]]]}]),
+                      ('eth_getLogs',[{'address':vault,'blockHash':h,'topics':[7]}]),
+                      ('ETH_getLogs',[{'address':vault,'blockHash':h}]),                            # method spellings
+                      ('eth_getLogsX',[{'address':vault,'blockHash':h}]),('Eth_GetLogs',[{'address':vault,'blockHash':h}]),
+                      ('unicity_getSealCompanionV2',[h]),('unicity_getSealCompanion',[h]),('UNICITY_getSealCompanionV1',[h])])
+        ok={'address':vault,'blockHash':h,'topics':[None,h,[h]*gateway.LOG_TOPIC_ALTERNATIVES,None]}
+        self.assertEqual(self.call('eth_getLogs',[ok])[0],200)
+    def test_heavy_reads_have_their_own_rate_limit(self):
+        h='0x'+'ab'*32
+        self.server.rpc_limit=gateway.Limiter(1000,1000,1000)
+        with patch('gateway.time.monotonic',return_value=1000.0):
+            self.server.heavy_limit=gateway.Limiter(2,2,20)
+            self.assertEqual([self.call('eth_getBlockReceipts',[h])[0] for _ in range(3)],[200,200,429])
+            self.assertEqual(self.call('eth_getLogs',[{'address':'0x'+'cd'*20,'blockHash':h}])[0],429)
+            self.assertEqual(self.call('unicity_getSealCompanionV1',[h])[0],200,'the light reads keep the general limit')
+        self.assertEqual(sum(1 for m,_ in self.relay.calls if m in gateway.HEAVY_METHODS),2)
+    def test_an_answer_above_the_size_cap_is_refused_with_413(self):
+        self.server.rpc_limit=self.server.heavy_limit=gateway.Limiter(1000,1000,1000)
+        h='0x'+'ab'*32
+        self.relay.too_large=True
+        status,result=self.call('eth_getBlockReceipts',[h])
+        self.assertEqual(status,413)
+        self.assertIn(str(gateway.MAX_RESULT_BYTES),result['error'])
+        self.assertEqual(self.relay.max_bytes[-1],gateway.MAX_RESULT_BYTES,'the relay reads at most the cap')
     def test_privileged_never_reaches_upstream(self):
         for method in ['admin_nodeInfo','engine_newPayloadV3','personal_sign','eth_sign','debug_traceTransaction','eth_sendTransaction']:
             self.assertEqual(self.rpc(method)[0],400)
         self.assertEqual(self.relay.calls,[])
+    def test_the_nb2_limits_stage_reads_the_over_bound_refusal_as_the_gateway_gives_it(self):
+        # #1126's limits stage (rehearse_nb2.py): the accepted eth_call body plus whitespace to one byte over MAX_RAW_TX_BODY, through Rehearsal.http.
+        # gateway.py refuses it on the declared length with 400, unread; the client sees the 400 or a broken pipe. It expected a 413 once and
+        # passed only while the pipe broke first (8fdf699f8), failing when the 400 arrived (a84f4ce18).
+        import importlib.util
+        for d in ('bridge','bridge/nb2'):
+            sys.path.insert(0,str(Path(__file__).parent/d)); self.addCleanup(sys.path.remove,str(Path(__file__).parent/d))
+        spec=importlib.util.spec_from_file_location('rehearse_nb2',Path(__file__).parent/'bridge/nb2/rehearse_nb2.py')
+        m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+        big=json.dumps({'jsonrpc':'2.0','id':1,'method':'eth_call','params':[{'to':'0x'+'11'*20,'data':'0x'+'00'*(gateway.MAX_RAW_TX_BODY//2-200)},'latest']}).encode()
+        host='%s:%d'%self.server.server_address
+        status,text=m.Rehearsal.http(host,'POST','/',big+b' '*(gateway.MAX_RAW_TX_BODY-len(big)+1),{'Content-Type':'application/json'})
+        self.assertTrue(m.gateway_size_refusal(status,text),(status,text[:120]))
+        self.assertEqual(self.relay.calls,[],'nothing relayed')
+        status,text=m.Rehearsal.http(host,'POST','/',big,{'Content-Type':'application/json'})
+        self.assertEqual(status,200,'the same body at the bound is read and relayed')
+        for status,text in ((413,'{"error": "body too large"}'),(200,'{"result": "0x"}'),(400,'{"error": "eth_getLogs: ..."}'),(400,'not json'),(0,'TimeoutError'),(0,'RemoteDisconnected')):
+            self.assertFalse(m.gateway_size_refusal(status,text),(status,text))
+        self.assertTrue(m.gateway_size_refusal(0,'ConnectionResetError'))
+        self.assertTrue(m.gateway_size_refusal(400,'{"error": "invalid or forbidden JSON-RPC request"}'),'the answer a84f4ce18\'s lane saw (run 43973406475)')
     def test_malformed_batch_and_size(self):
         for body in ['{','[]','null',json.dumps([{'method':'eth_chainId'}])]:
             self.assertEqual(self.send(body)[0],400)
@@ -1000,7 +1988,7 @@ class PublicRPC(unittest.TestCase):
         finally:
             for _ in range(gateway.LARGE_SLOTS): self.server.large.release()
     def test_the_aggregator_route_forwards_the_sdk_methods_only(self):
-        self.server.agg_limit=gateway.Limiter(1000,1000)   # this test is about routing, not the limit
+        self.server.agg_limit=gateway.Limiter(1000,1000,1000)   # this test is about routing, not the limit
         seen=[]
         def fake(url, payload=None, content_type='application/json'):
             seen.append((url,payload)); return 200,'application/json',b'{"jsonrpc":"2.0","id":1,"result":{"blockNumber":"7"}}'
@@ -1025,17 +2013,39 @@ class PublicRPC(unittest.TestCase):
     def test_the_aggregator_route_has_its_own_rate_limit_and_answers_unavailable(self):
         body=json.dumps({'jsonrpc':'2.0','id':1,'method':'get_block_height','params':{}})
         with patch('gateway.upstream',return_value=(200,'application/json',b'{"result":1}')):
-            with patch('gateway.time.monotonic',return_value=self.server.agg_limit.window):
-                for _ in range(10): self.assertEqual(self.send(body,'/aggregator')[0],200)
+            with patch('gateway.time.monotonic',return_value=1000.0):
+                self.server.agg_limit=gateway.Limiter(*gateway.AGG_LIMIT)
+                for _ in range(60): self.assertEqual(self.send(body,'/aggregator')[0],200)
                 self.assertEqual(self.send(body,'/aggregator')[0],429)
+                self.assertEqual(self.get('/api/v1/trustbases')[0],429,'the trust-base pages share the aggregator route\'s bucket')
                 self.assertEqual(self.rpc('eth_chainId')[0],200)   # the execution route's limit is separate
-        self.server.agg_limit=gateway.Limiter(10,50)
+        self.server.agg_limit=gateway.Limiter(*gateway.AGG_LIMIT)
         with patch('gateway.upstream',side_effect=OSError('down')):
             self.assertEqual(self.send(body,'/aggregator')[0],503)
     def test_rate_limit(self):
-        with patch('gateway.time.monotonic',return_value=self.server.rpc_limit.window):
-            for _ in range(10): self.assertEqual(self.rpc('eth_chainId')[0],200)
+        with patch('gateway.time.monotonic',return_value=1000.0):
+            self.server.rpc_limit=gateway.Limiter(*gateway.RPC_LIMIT)
+            for _ in range(60): self.assertEqual(self.rpc('eth_chainId')[0],200)
             self.assertEqual(self.rpc('eth_chainId')[0],429)
+    def test_a_request_that_waited_past_the_queue_bound_is_closed_unanswered(self):
+        sock=unittest.mock.Mock()
+        with patch.object(self.server,'finish_request') as finish, patch.object(self.server,'shutdown_request') as shut:
+            self.server.slots.acquire(); self.server.worker(sock,('127.0.0.1',1),time.monotonic()-gateway.QUEUE_WAIT-1)
+            finish.assert_not_called(); shut.assert_called_once_with(sock)
+            self.server.slots.acquire(); self.server.worker(sock,('127.0.0.1',1),time.monotonic())
+            finish.assert_called_once()
+        self.assertLess(gateway.QUEUE_WAIT,45,'under nginx proxy_read_timeout')
+    def test_fifteen_parallel_reads_from_one_address_are_all_served(self):
+        # a plan's return in the demo wallet: about fifteen eth_getCode at once, then eth_getBlockByNumber (2026-11-26, nginx 503 then gateway 429)
+        start=threading.Barrier(15)
+        def code(i):
+            start.wait(3)
+            return self.send(json.dumps({'jsonrpc':'2.0','id':i,'method':'eth_getCode','params':['0x'+'%040x'%i,'latest']}))
+        with concurrent.futures.ThreadPoolExecutor(15) as clients:
+            answers=list(clients.map(code,range(15)))
+        self.assertEqual([(s,r['id']) for s,r in answers],[(200,i) for i in range(15)])
+        self.assertEqual(self.rpc('eth_getBlockByNumber')[0],200)
+        self.assertEqual(sum(1 for m,_ in self.relay.calls if m=='eth_getCode'),15)
     def test_partial_broadcast_is_not_retried(self):
         with patch.object(self.relay,'call',side_effect=ValueError('partial')) as call:
             self.assertEqual(self.rpc('eth_sendRawTransaction')[0],503)
@@ -1080,6 +2090,9 @@ class Topology(unittest.TestCase):
                 self.assertEqual(agg['depends_on'],{'mongo':{'condition':'service_healthy'}})
                 self.assertIn('aggregator',cfg['services']['pod1']['networks']['validators']['aliases'])
                 self.assertFalse(any('aggregator' in cfg['services']['pod%d'%i]['networks']['validators']['aliases'] for i in range(2,n+1)))
+                # #905: at the shared limit a restore's thread spike aborts the node in pthread_create
+                self.assertEqual({cfg['services']['shard%d'%i]['pids_limit'] for i in range(1,n+1)},{512})
+                self.assertEqual(cfg['services']['root1']['pids_limit'],128)
                 mongo=cfg['services']['mongo']
                 self.assertEqual(mongo['image'],generate.PINS['mongo']);self.assertRegex(mongo['image'],r'^mongo:[0-9.]+@sha256:[0-9a-f]{64}$')
                 self.assertEqual(mongo['networks'],['aggregator']);self.assertNotIn('ports',mongo);self.assertTrue(cfg['networks']['aggregator']['internal'])
@@ -1184,62 +2197,664 @@ class TesterCheck(unittest.TestCase):
         self.assertEqual(self.run_check(self.serve(),'--chain-id','31337','--genesis-hash','0x12')[0],2)
         self.assertEqual(self.run_check('http://127.0.0.1:1/','--chain-id','31337','--genesis-hash',self.GEN)[0],2)
 
-class BridgeRelease(unittest.TestCase):
-    """bridge/release.py on a fake generation, with the image's files and the chain served by a stub of the tools image."""
-    CORPUS='9c'*32;VAULT='0x'+'aa'*20;VERIFIER='0x'+'bb'*20;IMAGE='sha256:'+'11'*32
+class NB2Release(unittest.TestCase):
+    """bridge/nb2/release_nb2.py on a fake generation: the wallets' pins, the limits read where they are in force, and the refusals."""
+    IMAGE='sha256:'+'11'*32
     def module(self):
         import importlib.util
-        spec=importlib.util.spec_from_file_location('release',Path(__file__).parent/'bridge/release.py')
+        sys.path.insert(0,str(Path(__file__).parent/'bridge'))
+        self.addCleanup(sys.path.remove,str(Path(__file__).parent/'bridge'))
+        spec=importlib.util.spec_from_file_location('release_nb2',Path(__file__).parent/'bridge/nb2/release_nb2.py')
         m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m);return m
-    def generation(self,tmp,image=None,vault=None):
-        gen=Path(tmp)/'gen';(gen/'bridge').mkdir(parents=True);(gen/'network').mkdir();art=Path(tmp)/'artifacts';art.mkdir()
+    def generation(self,tmp):
+        gen=Path(tmp)/'gen';(gen/'bridge/nb2').mkdir(parents=True);(gen/'network').mkdir();art=Path(tmp)/'artifacts';art.mkdir()
         (gen/'manifest.json').write_text(json.dumps({'generation':'tn-x','chain_id':31337,'genesis_hash':'0x'+'ab'*32,'validators':4,'artifacts':{'sources':{'ureth':'u'},'images':{'node':'n'}}}))
-        (art/'bridge-images.json').write_text(json.dumps({'sources':{'contracts':'c'*40,'native-bridge-plugins':'p'*40},'dnb_tool_sha256':'d'*64,'images':{'bridge':image or self.IMAGE}}))
-        (gen/'bridge/bridge-addresses.json').write_text(json.dumps({'BridgeVault':vault or self.VAULT,'TokenVerifier':self.VERIFIER,'CFG':'0x'+'cf'*32}))
-        txs=[{'contractName':'TokenVerifier','transactionType':'CREATE','contractAddress':self.VERIFIER,'hash':'0x01'},
-             {'contractName':'BridgeVault','transactionType':'CREATE','contractAddress':self.VAULT,'hash':'0x02'},
-             {'contractName':'BridgeVault','transactionType':'CALL','contractAddress':self.VAULT,'hash':'0x03'}]   # a later call to the vault is not its deployment
-        (gen/'bridge/bridge-broadcast.json').write_text(json.dumps({'transactions':txs,'receipts':[{'transactionHash':h,'blockNumber':hex(b)} for h,b in (('0x01',7),('0x02',8),('0x03',9))]}))
+        (art/'bridge-images.json').write_text(json.dumps({'sources':{'contracts':'c'*40,'native-bridge-plugins':'p'*40},'images':{'bridge':self.IMAGE}}))
         (gen/'network/b1-profile.json').write_text(json.dumps({'maxGas':269547540+60000000,'ordinaryCapacity':60000000}))
-        return gen,art
-    def tools(self,pinned=None):
-        files={'/opt/bridge/native-bridge-plugins/protocol/vectors/MANIFEST.sha256':self.CORPUS+'\n',
-               '/opt/bridge/contracts/script/bridge-golden/corpus-pin.json':json.dumps({'corpus':{'manifestSha256':pinned or self.CORPUS}}),
-               '/opt/bridge/native-bridge-plugins/node_modules/@unicitylabs/state-transition-sdk/package.json':json.dumps({'version':'4.0.0-utb.x'}),
-               '/opt/bridge/native-bridge-plugins/package-lock.json':json.dumps({'packages':{'node_modules/@unicitylabs/state-transition-sdk':{'resolved':'file:sdk.tgz','integrity':'sha512-x'}}}),
-               '/opt/bridge/native-bridge-plugins/node_modules/@unicitylabs/state-transition-sdk/lib/api/IBatchAggregatorClient.js':'export const BATCH_MAX_STATE_IDS = 256;\n'}
-        def run(*args):
-            if args[0]=='cat': return files[args[1]]
-            if args[:2]==('cast','codehash'): return '0x'+args[-1][2:4]*32+'\n'
-            raise AssertionError(args)
-        return run
-    def build(self,gen,art,tools=None,image=None):
+        record={'build':'production','gamma':'0x9301','domain':'0x'+'dd'*32,'firstBlock':11,
+                'contracts':{'vault':{'address':'0x'+'aa'*20,'block':12,'runtimeCodeHash':'0x'+'a1'*32},
+                             'recovery':{'address':'0x'+'bb'*20,'runtimeCodeHash':'0x'+'b1'*32}},
+                'descriptors':{'semantic-profile':'0x'+'a9'*32},
+                'salt':'0x'+'a8'*32,'pins':'0x'+'a7'*32,'trustPin':'0x'+'99'*32}
+        return gen,art,record
+    URETH=['unicity-reth','node','--txpool.max-tx-gas=60000000','--txpool.max-tx-input-bytes=4194304']   # the B1 profile's ureth flags (ubft engine-api b1-profile)
+    def svc(self,entrypoint=None,**extra):
+        """One execution-client service in generate.py's form (every key topology() writes), with ENTRYPOINT and EXTRA keys."""
+        base={'cap_drop':['ALL'],'cpus':1.0,'entrypoint':list(entrypoint if entrypoint is not None else self.URETH),'image':'sha256:'+'a'*64,'logging':{},'mem_limit':'1536m',
+              'networks':{'validators':{}},'pids_limit':128,'read_only':True,'restart':'unless-stopped','security_opt':[],'stop_grace_period':'60s','tmpfs':[],'volumes':[]}
+        return {**base,**extra}
+    def services(self,**changed):
+        """compose.yaml services of the 4 validators' execution clients, with ureth<i>=COMMAND replaced (None: the service is missing)."""
+        out={f'ureth{i}':self.svc() for i in range(1,5)}
+        for name,command in changed.items():
+            if command is None: out.pop(name)
+            else: out[name]=self.svc(command)
+        return out
+    def build(self,gen,art,record,services=None):
         m=self.module()
         with patch.object(m,'ARTIFACTS',art):
-            return m.build(gen,tools or self.tools(),image or self.IMAGE,['unicity-reth','node','--rpc.eth-proof-window','64'],m.gateway_limits())
-    def test_the_manifest_joins_the_pins_the_deployment_the_profile_and_the_limits(self):
+            return m.build(gen,record,self.IMAGE,services or self.services())
+    def test_the_pins_are_the_wallets_deployment_pins(self):
         with tempfile.TemporaryDirectory() as tmp:
             r=self.build(*self.generation(tmp))
-        self.assertEqual(r['contracts']['BridgeVault'],{'address':self.VAULT,'transaction':'0x02','block':8,'codeHash':'0x'+'aa'*32})
-        self.assertEqual(r['contracts']['TokenVerifier']['block'],7);self.assertEqual(r['contracts']['commit'],'c'*40);self.assertEqual(r['contracts']['cfg'],'0x'+'cf'*32)
-        self.assertEqual((r['profile']['corpusDigest'],r['profile']['nativeBridgePlugins'],r['profile']['sdk']['version']),(self.CORPUS,'p'*40,'4.0.0-utb.x'))
-        limits={k:v['value'] for k,v in r['limits'].items()}
-        self.assertEqual((limits['D1envelopeBytes'],limits['D3ordinaryCapacity'],limits['blockGasLimit'],limits['proofWindowBlocks'],limits['gatewayMaxBodyBytes'],limits['aggregatorBatchStateIds']),
-                         (2097152,60000000,329547540,64,16384,256))
-        # the gateway's bounds are read from gateway.py, and a redemption up to D1 fits the raw-transaction one as hex with its framing
-        self.assertEqual((limits['gatewayMaxRawTxBodyBytes'],limits['gatewayAggregatorMaxBodyBytes']),(gateway.MAX_RAW_TX_BODY,gateway.AGG_MAX_BODY))
-        self.assertGreater(limits['gatewayMaxRawTxBodyBytes'],2*limits['D1envelopeBytes']+4096)
-        self.assertIn('at most 254 transfers',r['limits']['aggregatorBatchStateIds']['source'])
-        self.assertEqual((r['package']['generation'],r['bridge']['image']),('tn-x',self.IMAGE))
+        self.assertEqual(r['limits']['poolMaxTxInputBytes']['value'],4194304);self.assertEqual(r['limits']['poolMaxTxGas']['value'],60000000)
+        self.assertIn('ureth1, ureth2, ureth3, ureth4',r['limits']['poolMaxTxInputBytes']['source'])
+        self.assertEqual(r['pins'],{'gamma':'0x9301','build':'production','vaultRuntimeCodeHash':'0x'+'a1'*32,
+                                    'maxEncodedTxBytes':524288,'userGasLimit':'24000000','gasReserve':'500000',
+                                    'returnReserveSegments':64,'deploymentBlock':12,'stateReadOnly':False})
+        self.assertEqual(r['deployment']['firstBlock'],11)
+        self.assertEqual(r['trust']['freshnessMs'], 900000)
+        self.assertNotIn('origin', r['trust'])
+        self.assertEqual(r['recovery']['address'],'0x'+'bb'*20)
+        self.assertEqual(r['recovery']['pins'],'0x'+'a7'*32)
+        self.assertEqual(r['recovery']['backlog'],r['peakWindowEnvelope']['backlog'])
+        self.assertEqual(r['status'],'testnet-provisional')
+        self.assertFalse(r['realValueAuthorized'])
+        self.assertEqual(r['feeEnvelope']['status'],'testnet-provisional')
+        self.assertEqual(r['peakWindowEnvelope']['status'],'testnet-provisional')
+        for name, transactions, gas in (('transfer-600',39,247746775),('split-20',4,24166979)):
+            measured=r['feeEnvelope']['workloads'][name]
+            self.assertEqual(measured['includedTransactions'],transactions)
+            self.assertEqual(int(measured['includedGas']),gas)
+            self.assertGreaterEqual(measured['budgetTransactions'] * 2,transactions * 3)
+            self.assertGreaterEqual(int(measured['budgetGas']) * 2,gas * 3)
+        self.assertTrue(any(x['max']['entry']=='redeemRecovered' for x in r['recovery']['ranges']))
+        self.assertEqual(r['limits']['blockGasLimit']['value'],329547540)
+        self.assertGreaterEqual(r['limits']['gatewayMaxRawTxBodyBytes']['value'],2*524288+(64<<10))   # section 12.7
+        self.assertEqual(r['limits']['gatewayLogBlockRange']['value'],gateway.LOG_BLOCK_RANGE)
+        self.assertEqual(r['limits']['gatewayMaxResultBytes']['value'],gateway.MAX_RESULT_BYTES)
+    def test_any_validator_that_is_not_pinned_or_not_a_proof_source_is_refused(self):
+        u=self.URETH
+        cases={
+            'proof source':dict(ureth2=u+['--unicity.no-proof-source']),                                       # only a non-primary validator is wrong
+            'proof source ':dict(ureth4=u+['--prune.receipts.distance=64']),                                  # the NAME=VALUE form
+            'max-tx-input-bytes':dict(ureth3=['unicity-reth','node','--txpool.max-tx-gas=60000000']),           # no pool byte pin
+            'below L_max':dict(ureth4=['unicity-reth','node','--txpool.max-tx-gas=60000000','--txpool.max-tx-input-bytes=131072']),
+            'max-tx-gas':dict(ureth2=['unicity-reth','node','--txpool.max-tx-gas=50000000','--txpool.max-tx-input-bytes=4194304']),
+            'no ureth4':dict(ureth4=None),                                                                    # a missing validator
+            'differ':dict(ureth3=['unicity-reth','node','--txpool.max-tx-gas=60000000','--txpool.max-tx-input-bytes=8388608']),
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            g=self.generation(tmp)
+            for want,changed in cases.items():
+                with self.subTest(want):
+                    with self.assertRaisesRegex(SystemExit,want.strip()): self.build(*g,services=self.services(**changed))
+            # only the form generate.py writes is judged: exactly its keys, an entrypoint list of plain strings (Compose's splitting, escapes,
+            # ${VAR} interpolation and extends are never emulated). sol's reproductions, each on ureth3 only:
+            cmd=['--unicity.no-proof-source','--unicity.companion-retention-depth=1000']
+            refused={
+                'command list':(self.svc(command=cmd),'not the generated service form'),
+                'command string':(self.svc(command=' '.join(cmd)),'not the generated service form'),
+                'extends (an inherited command)':(self.svc(extends={'file':'other.json','service':'evil'}),'not the generated service form'),
+                'an x- merge key':(self.svc(**{'x-merge':{'command':cmd}}),'not the generated service form'),
+                'a key missing':({k:v for k,v in self.svc().items() if k!='image'},'not the generated service form'),
+                'backslash':(self.svc(u+['--unicity.no-\\proof-source']),'would rewrite'),
+                'interpolation in a list':(self.svc(u+['${NO_PROOF}']),'would rewrite'),
+                'interpolation in a string':({**self.svc(),'entrypoint':' '.join(u)+' ${NO_PROOF}'},'not a list of strings'),
+                'quote':(self.svc(u+['"--unicity.no-proof-source"']),'would rewrite'),
+            }
+            for what,(svc,want) in refused.items():
+                with self.subTest(form=what):
+                    with self.assertRaisesRegex(SystemExit,want): self.build(*g,services={**self.services(),'ureth3':svc})
+            # a joiner's execution client (ureth5, cloned by joiner.py) is a validator too: judged like the genesis ones
+            with self.assertRaisesRegex(SystemExit,'ureth5 is not a full proof source'): self.build(*g,services={**self.services(),'ureth5':self.svc(u+['--unicity.no-proof-source'])})
+            # ureth1 alone being healthy is not enough, and every validator healthy passes
+            self.assertEqual(self.build(*g)['limits']['poolMaxTxInputBytes']['value'],4194304)
+    def write_compose(self,gen,base,joiner=None,restore=None):
+        (gen/'compose.yaml').write_text(json.dumps({'services':base}))
+        for name,doc in (('compose.joiner.json',joiner),('compose.joiner-restore.json',restore)):
+            if doc is not None: (gen/name).write_text(json.dumps({'services':doc}))
+    def test_every_compose_file_the_package_selects_is_judged(self):
+        m=self.module();u=self.URETH
+        with tempfile.TemporaryDirectory() as tmp:
+            gen,art,record=self.generation(tmp)
+            self.write_compose(gen,self.services())
+            self.assertEqual(sorted(m.active_services(gen)),['ureth1','ureth2','ureth3','ureth4'])
+            # an override that adds --unicity.no-proof-source to a genesis validator (Compose would merge it in): refused
+            self.write_compose(gen,self.services(),joiner={'ureth2':{'entrypoint':u+['--unicity.no-proof-source']}})
+            with self.assertRaisesRegex(SystemExit,'overrides ureth2'): m.active_services(gen)
+            self.write_compose(gen,self.services(),joiner={'ureth2':{'command':['--unicity.no-proof-source']}})
+            with self.assertRaisesRegex(SystemExit,'overrides ureth2'): m.active_services(gen)
+            # the joiner's own execution client is added, and judged by build
+            self.write_compose(gen,self.services(),joiner={'ureth5':self.svc(u+['--unicity.no-proof-source']),'shard5':{'entrypoint':['ubft']}})
+            svc=m.active_services(gen)
+            self.assertEqual(sorted(svc),['ureth1','ureth2','ureth3','ureth4','ureth5'])
+            with self.assertRaisesRegex(SystemExit,'ureth5 is not a full proof source'): self.build(gen,art,record,services=svc)
+            self.write_compose(gen,self.services(),joiner={'ureth5':self.svc()})
+            self.assertIn('ureth5',self.build(gen,art,record,services=m.active_services(gen))['limits']['poolMaxTxInputBytes']['source'])
+            # the restore override never touches an execution client
+            self.write_compose(gen,self.services(),joiner={'ureth5':self.svc()},restore={'ureth5':{'entrypoint':u+['--unicity.no-proof-source']}})
+            with self.assertRaisesRegex(SystemExit,'overrides ureth5'): m.active_services(gen)
+            self.write_compose(gen,self.services(),joiner={'ureth5':self.svc()},restore={'shard5':{'entrypoint':['ubft','shard-node']}})
+            self.assertEqual(len(m.active_services(gen)),5)
+            # every other override beside compose.yaml (an install-epoch one, the bridge overlay) may not define an execution client
+            (gen/'compose.install-epoch-2.json').write_text(json.dumps({'services':{'root1':{'entrypoint':['ubft']}}}))
+            self.assertEqual(len(m.active_services(gen)),5)
+            (gen/'compose.install-epoch-3.json').write_text(json.dumps({'services':{'ureth6':self.svc()}}))
+            with self.assertRaisesRegex(SystemExit,'only the joiner override'): m.active_services(gen)
+            (gen/'compose.install-epoch-3.json').unlink();(gen/'compose.extra.yaml').write_text('services:\n  ureth2:\n    command: [--unicity.no-proof-source]\n')
+            with self.assertRaisesRegex(SystemExit,'not the generated JSON form'): m.active_services(gen)
+    def test_the_key_allowlist_is_what_topology_writes(self):
+        m=self.module()
+        with tempfile.TemporaryDirectory() as tmp:
+            out=Path(tmp)/'tn-fixture';out.mkdir()
+            images={k:'sha256:'+'a'*64 for k in ['node','rpc','guard','signer']}
+            cfg=generate.topology(out,4,{'root':['r%d'%i for i in range(4)],'evm':['e%d'%i for i in range(4)]},images,'captcha',['--x=1'],123456)
+        for i in range(1,5):
+            self.assertEqual(set(cfg['services'][f'ureth{i}']),set(m.URETH_KEYS),'release_nb2.URETH_KEYS must be exactly the keys topology() writes')
+        self.assertEqual(set(self.svc()),set(m.URETH_KEYS))   # the fixture is the generated form too
+    def test_the_ureth_services_generate_py_writes_are_accepted(self):
+        m=self.module()
+        with tempfile.TemporaryDirectory() as tmp:
+            out=Path(tmp)/'tn-fixture';out.mkdir()
+            images={k:'sha256:'+'a'*64 for k in ['node','rpc','guard','signer']}
+            cfg=generate.topology(out,4,{'root':['r%d'%i for i in range(4)],'evm':['e%d'%i for i in range(4)]},images,'captcha',
+                                  ['--unicity.network-id=3','--txpool.max-tx-gas=60000000','--txpool.max-tx-input-bytes=4194304'],123456)
+        import ureth_key
+        head=['/bin/sh','-c',ureth_key.PREFLIGHT,'ureth']
+        for i in range(1,5):
+            ep=cfg['services'][f'ureth{i}']['entrypoint']
+            self.assertEqual(ep[:4],head,'generate.py writes the node key preflight (bft-core#1148) ahead of ureth')
+            self.assertEqual(m.effective_argv(f'ureth{i}',cfg['services'][f'ureth{i}']),ep[4:],'the judged argv is ureth\'s own, behind the preflight')
+            self.assertEqual(ep[4:6],['unicity-reth','node'])
+    def test_only_the_generated_key_preflight_is_stripped(self):
+        # #1155's /bin/sh -c '<preflight>; exec "$@"' wrapper: exactly ureth_key's text is recognised; any other wrapper or text Compose would rewrite is refused
+        import ureth_key
+        m=self.module();u=self.URETH
+        pre=ureth_key.PREFLIGHT
+        self.assertEqual(m.effective_argv('ureth1',self.svc(ureth_key.entrypoint(u))),u)
+        self.assertEqual(m.effective_argv('ureth1',self.svc(u)),u,'the bare generated form still judges')
+        self.assertIsNone(m.COMPOSE_REWRITES.search(pre),'Compose leaves the preflight as written: its one $ is "$@"')
+        for name,ep,msg in (
+                ('$$-escaped preflight (Compose renders it the same, generate.py never writes it)',['/bin/sh','-c',pre.replace('"$@"','"$$@"'),'ureth',*u],'other than the generated'),
+                ('a changed preflight',['/bin/sh','-c',pre.replace('exit 78','exit 0'),'ureth',*u],'other than the generated'),
+                ('a preflight that runs something else',['/bin/sh','-c','exec "$@"','ureth',*u],'other than the generated'),
+                ('another $0',['/bin/sh','-c',pre,'sh',*u],'other than the generated'),
+                ('the preflight alone',['/bin/sh','-c',pre,'ureth'],'no command after it'),
+                ('interpolation behind the preflight',[*ureth_key.entrypoint(u),'${NO_PROOF}'],'would rewrite'),
+                ('an escaped $ behind the preflight',[*ureth_key.entrypoint(u),'--x=$$y'],'would rewrite'),
+                ('sh by another path',['sh','-c',pre,'ureth',*u],'would rewrite')):
+            with self.subTest(name):
+                with self.assertRaisesRegex(SystemExit,msg): m.effective_argv('ureth1',self.svc(ep))
+        with patch.object(ureth_key,'PREFLIGHT',pre.replace('"$@"','"${@}"')):
+            with self.assertRaisesRegex(SystemExit,'would interpolate'): m.effective_argv('ureth1',self.svc(u))
     def test_another_image_than_the_recorded_one_is_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaisesRegex(SystemExit,'records'): self.build(*self.generation(tmp,image='sha256:'+'22'*32))
-    def test_plugins_whose_corpus_is_not_the_contracts_pin_are_refused(self):
+            gen,art,record=self.generation(tmp)
+            m=self.module()
+            with patch.object(m,'ARTIFACTS',art):
+                with self.assertRaisesRegex(SystemExit,'records'): m.build(gen,record,'sha256:'+'22'*32,self.services())
+    def test_the_driver_runs_read_only_with_the_lane_directory_mounted(self):
+        m=self.module()
+        with patch('deploy_bridge.image',return_value=self.IMAGE),patch('deploy_bridge.validators_network',return_value='tn_validators'):
+            cmd=m.driver_cmd(Path('/srv/g'),'state',env_file=Path('/srv/g/bridge/nb2/driver.env'))
+        self.assertIn('--read-only',cmd);self.assertIn(f'{Path(__file__).parent/"bridge/nb2"}:/opt/bridge/native-bridge-plugins/tests/live/nb2lane:ro',cmd)
+        self.assertEqual(cmd[cmd.index('--env-file')+1],'/srv/g/bridge/nb2/driver.env');self.assertEqual(cmd[-2:],['tests/live/nb2lane/driver.ts','state'])
+
+class NB2DriverKeys(unittest.TestCase):
+    """bridge/nb2/rehearse_nb2.py's driver keys (sol's review of #1126): never in the console or the evidence, deleted at the end of a run unless --keep-keys."""
+    KEY='0x'+'5a7e'*16
+    def module(self):
+        import importlib.util
+        for d in ('bridge','bridge/nb2'):
+            sys.path.insert(0,str(Path(__file__).parent/d)); self.addCleanup(sys.path.remove,str(Path(__file__).parent/d))
+        spec=importlib.util.spec_from_file_location('rehearse_nb2',Path(__file__).parent/'bridge/nb2/rehearse_nb2.py')
+        m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m);return m
+    def generation(self,tmp):
+        gen=Path(tmp)/'gen';(gen/'faucet-secrets').mkdir(parents=True)
+        (gen/'faucet-secrets/password').write_text('not-a-real-faucet-password\n')
+        (gen/'manifest.json').write_text(json.dumps({'generation':'tn-x','chain_id':31337,'genesis_hash':'0x'+'ab'*32,'validators':4}))
+        return gen
+    def run_main(self,m,gen,evidence,*extra):
+        out=__import__('io').StringIO()
+        argv=['rehearse_nb2.py','--generation',str(gen),'--evidence',str(evidence),'--nb2-evidence','/bin/true','--cast','/bin/false',*extra]
+        with patch.object(sys,'argv',argv),patch('sys.stdout',out):
+            code=m.main()
+        return code,out.getvalue()
+    def write_keys(self,r):
+        r.nb2.mkdir(parents=True,exist_ok=True);(r.nb2/'driver.env').write_text(f'NB2_KEY_MAIN={self.KEY}\nNB2_KEY_ROT=0x{"11"*32}\n')
+    def test_a_failed_command_carrying_a_key_publishes_it_nowhere_and_the_keys_are_deleted(self):
+        m=self.module()
+        key=self.KEY
+        def fund(r):
+            self.write_keys(r)
+            r.say(f'  $ cast mktx --private-key {key} (a command line, as a failure would print it)')
+            raise subprocess.CalledProcessError(1,['cast','mktx','--private-key',key,'--legacy'],output=f'error with {key[2:]}')
+        with tempfile.TemporaryDirectory() as tmp, patch.object(m.NB2Rehearsal,'fund',fund):
+            gen=self.generation(tmp);ev=Path(tmp)/'ev'
+            code,console=self.run_main(m,gen,ev,'--stages','fund')
+            self.assertEqual(code,1)
+            for text in (console,(ev/'rehearsal.log').read_text(),(ev/'nb2-result.json').read_text()):
+                self.assertNotIn(key[2:],text);self.assertNotIn(key[2:].upper(),text);self.assertNotIn('11'*32,text)
+            self.assertIn('FAIL fund',console)
+            self.assertFalse((gen/'bridge/nb2/driver.env').exists(),'a failed run deletes its driver keys')
+    def test_the_keys_outlive_an_invocation_only_with_keep_keys(self):
+        m=self.module()
+        with tempfile.TemporaryDirectory() as tmp, patch.object(m.NB2Rehearsal,'fund',lambda r: self.write_keys(r)), patch.object(m.NB2Rehearsal,'custody',lambda r: None):
+            gen=self.generation(tmp)
+            code,_=self.run_main(m,gen,Path(tmp)/'ev1','--stages','fund','--keep-keys')
+            self.assertEqual(code,0);self.assertTrue((gen/'bridge/nb2/driver.env').exists(),'--keep-keys hands the keys to the next invocation')
+            code,console=self.run_main(m,gen,Path(tmp)/'ev2','--stages','custody')   # the PoS sequence's last invocation
+            self.assertEqual(code,0);self.assertFalse((gen/'bridge/nb2/driver.env').exists(),'the last invocation deletes them')
+            self.assertIn('driver keys are deleted',console)
+            code,_=self.run_main(m,gen,Path(tmp)/'ev3','--stages','fund')   # a complete standalone run
+            self.assertEqual(code,0);self.assertFalse((gen/'bridge/nb2/driver.env').exists(),'a successful run deletes its keys')
+    def test_the_keys_are_deleted_when_reporting_itself_fails(self):
+        m=self.module()
+        with tempfile.TemporaryDirectory() as tmp, patch.object(m.NB2Rehearsal,'fund',lambda r: self.write_keys(r)):
+            gen=self.generation(tmp)
+            # the result file cannot be written (a directory in its place)
+            ev=Path(tmp)/'ev1';(ev/'nb2-result.json').mkdir(parents=True)
+            with self.assertRaises(IsADirectoryError): self.run_main(m,gen,ev,'--stages','fund')
+            self.assertFalse((gen/'bridge/nb2/driver.env').exists(),'a failing result write still deletes the keys')
+            # the RESULT log line fails
+            real=m.NB2Rehearsal.say
+            def say(r,text):
+                if text.startswith('RESULT'): raise OSError(28,'No space left on device')
+                return real(r,text)
+            with patch.object(m.NB2Rehearsal,'say',say):
+                with self.assertRaises(OSError): self.run_main(m,gen,Path(tmp)/'ev2','--stages','fund')
+            self.assertFalse((gen/'bridge/nb2/driver.env').exists(),'a failing RESULT line still deletes the keys')
+            # and --keep-keys still keeps them through a reporting failure
+            with patch.object(m.NB2Rehearsal,'say',say):
+                with self.assertRaises(OSError): self.run_main(m,gen,Path(tmp)/'ev3','--stages','fund','--keep-keys')
+            self.assertTrue((gen/'bridge/nb2/driver.env').exists())
+    def test_deploy_runs_before_fund_and_fund_before_the_rest(self):
+        # every driver command reads lane.json, which deploy writes; fund derives the keys' addresses through the driver (#1126's lane, ENOENT)
+        m=self.module()
+        for stages,want in (('fund,limits,deploy',['deploy','fund','limits']),('limits,fund',['fund','limits']),('deploy,fund,pos-deposit',['deploy','fund','pos-deposit']),('pos-return,custody',['pos-return','custody'])):
+            ran=[]
+            rec=lambda name:(lambda r:ran.append(name))
+            with tempfile.TemporaryDirectory() as tmp, patch.object(m.NB2Rehearsal,'deploy',rec('deploy')), patch.object(m.NB2Rehearsal,'fund',rec('fund')), \
+                    patch.object(m.NB2Rehearsal,'limits',rec('limits')), patch.object(m.NB2Rehearsal,'pos_deposit',rec('pos-deposit')), \
+                    patch.object(m.NB2Rehearsal,'pos_return',rec('pos-return')), patch.object(m.NB2Rehearsal,'custody',rec('custody')):
+                code,_=self.run_main(m,self.generation(tmp),Path(tmp)/'ev','--stages',stages)
+            self.assertEqual((code,ran),(0,want),stages)
+    def test_the_keys_exist_before_any_driver_command(self):
+        m=self.module()
         with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaisesRegex(SystemExit,'corpus'): self.build(*self.generation(tmp),tools=self.tools(pinned='00'*32))
-    def test_addresses_that_are_not_the_broadcast_deployments_are_refused(self):
+            gen=self.generation(tmp);r=m.NB2Rehearsal(gen,Path(tmp)/'ev','/bin/false')
+            r.make_keys();env=gen/'bridge/nb2/driver.env';first=env.read_text()
+            self.assertEqual(oct(env.stat().st_mode&0o777),'0o600');self.assertEqual(len(first.splitlines()),len(m.WALLETS))
+            r.make_keys();self.assertEqual(env.read_text(),first,'made once: deploy and fund share the keys')
+        src=(Path(__file__).parent/'bridge/nb2/rehearse_nb2.py').read_text()
+        deploy=src[src.index('    def deploy(self):'):src.index('    def ',src.index('    def deploy(self):')+10)]
+        self.assertLess(deploy.index('self.make_keys()'),deploy.index("self.driver('gamma-check')"),'deploy makes the keys before its driver commands open a wallet')
+    # the boundary stage (the owner's default claim): every probe executed as the preflight judged it, and the bound within the margin
+    LIM=60_000_000
+    def boundary_run(self,tmp,tries,search,redeem=None,preflight=None,ledger=None,code=0,exits=None,hooks=None):
+        """rehearse_nb2.boundary() against a driver that plays the search's file (TRIES, SEARCH) and the burns, redemptions, preflights and ledger
+        reads it asks (LEDGER[label]: the ledger file, None for none written; EXITS[(command, label)]: the driver's exit status)."""
+        m=self.module()
+        gen=self.generation(tmp);r=m.NB2Rehearsal(gen,Path(tmp)/'ev','/bin/false')
+        (r.nb2/'public').mkdir(parents=True,exist_ok=True);(r.nb2/'public/nb2-release.json').write_text(json.dumps({'pins':{'userGasLimit':str(self.LIM)}}))
+        asked=[]
+        def driver(rr,*args,check=True,timeout=None):
+            out=rr.nb2/'out';out.mkdir(parents=True,exist_ok=True);asked.append(args)
+            if args[0]!='boundary-estimate' and args[0]!='boundary': self.assertIsNotNone(timeout,f'{args[0]} runs under a timeout')
+            if hooks and args[0] in hooks: hooks[args[0]](args)
+            if args[0]=='boundary-estimate': (out/'boundary-estimate-ge.json').write_text(json.dumps({'estimate':255}));return 0,''
+            if args[0]=='boundary':
+                self.assertFalse(check,'the search runs unchecked, so its file is kept first')
+                (out/'boundary-g.json').write_text(json.dumps({'tries':tries,**search}));return code,''
+            l=args[2]
+            if args[0]=='ledger':
+                self.assertFalse(check);self.assertEqual(len(args),4,'the refusal time is passed')
+                v=(ledger or {}).get(l,{'verdict':'unspent','snapshot':{'rootRound':'900','sealTimestampSeconds':args[3]}})
+                if callable(v): v=v(args)
+                if v is not None: (out/f'ledger-{l}.json').write_text(json.dumps(v))
+            if args[0]=='burn': (out/f'burn-{l}.json').write_text(json.dumps({'preflightGas':str(self.LIM-1)}))
+            if args[0]=='redeem': (out/f'redeem-{l}.json').write_text(json.dumps((redeem or {}).get(l,{'result':'paid','paid':{'gasLimit':str(self.LIM),'gasUsed':'36607007'}})))
+            if args[0]=='preflight': (out/f'preflight-{l}.json').write_text(json.dumps((preflight or {}).get(l,{'ok':False,'rule':'CapacityPreflight','detail':'over'})))
+            return (exits or {}).get((args[0],l),0),''
+        return m,r,driver,asked
+    def probe(self,label,k,gas,real,detail=None):
+        # a refused probe records why (boundary_search.ts refusalOf): over by its own gas unless the test says otherwise
+        if detail is None and real=='CapacityPreflight': detail={'over':'gas'}
+        p={'label':label,'transfers':k,'conditions':'30 certificates ab, need 64','gas':None if gas is None else str(gas),'up':'265000','down':'265000','real':real,'shape':{}}
+        if detail is not None: p['detail']=detail
+        return p
+    def tries(self):
+        L=self.LIM
+        return [self.probe('g0c',255,L+11_000_000,'CapacityPreflight'),self.probe('g1c',208,L+260_000,'CapacityPreflight'),
+                self.probe('g2c',204,L-350_000,'passes'),self.probe('g3c',206,L+600_000,'CapacityPreflight')]
+    def test_the_boundary_stage_executes_every_probe_as_judged_and_locates_the_bound_within_the_margin(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaisesRegex(SystemExit,'not bridge-addresses'): self.build(*self.generation(tmp,vault='0x'+'cc'*20))
+            t=self.tries();search={'admitted':t[2],'refused':t[3],'spread':2,'margin':2,'window':['g1c','g2c','g3c']}
+            m,r,driver,asked=self.boundary_run(tmp,t,search)
+            with patch.object(m.NB2Rehearsal,'driver',driver): r.boundary()
+            self.assertEqual([a[:3] for a in asked if a[0] in ('burn','redeem','preflight','ledger')],
+                             [('preflight','big','g0c'),('ledger','big','g0c'),('preflight','big','g1c'),('ledger','big','g1c'),('burn','big','g2c'),('redeem','big','g2c'),
+                              ('preflight','big','g3c'),('ledger','big','g3c')],
+                             'every probe: the admitted one burned and redeemed, every refused one judged again and read from the ledger, never burned')
+            self.assertEqual([a[0] for a in asked].count('burn'),1)
+            sound=json.loads((Path(tmp)/'ev/nb2/boundary-soundness.json').read_text())
+            self.assertEqual([(x['label'],x['verdict'],x['status']) for x in sound],[('g0c','refused','sound'),('g1c','refused','sound'),('g2c','admitted','sound'),('g3c','refused','sound')])
+            self.assertEqual([x.get('ledger') for x in sound if x['verdict']=='refused'],['unspent']*3)
+            for f in ('boundary-g','boundary-estimate-ge','burn-g2c','redeem-g2c','preflight-g0c','preflight-g3c','ledger-g0c','ledger-g3c'): self.assertTrue((Path(tmp)/f'ev/nb2/{f}.json').is_file(),f)
+    def test_any_probe_that_execution_contradicts_fails_the_stage(self):
+        L=self.LIM
+        cases={
+            'an admitted token not paid':({'redeem':{'g2c':{'result':'unconfirmed'}}},'g2c .* admitted'),
+            'an admitted token whose redemption needs more than userGasLimit':({'redeem':{'g2c':{'result':'paid','paid':{'gasLimit':str(L+1),'gasUsed':'36607007'}}}},'g2c .* admitted'),
+            'a refused token the wallet admits when asked again':({'preflight':{'g3c':{'ok':True}}},'g3c .* refused'),
+            'a refused token refused for another rule':({'preflight':{'g1c':{'ok':False,'rule':'StaleEndpoint'}}},'g1c .* refused'),
+            # sol r12: a certified burn with no local burn report: the ledger shows the state spent
+            'a refused token whose state the ledger shows spent':({'ledger':{'g1c':{'verdict':'included','reason':'a verified proof that the state is certified'}}},'g1c .* refused'),
+            'a refused token with no ledger evidence':({'ledger':{'g1c':None},'exits':{('ledger','g1c'):1}},'g1c .* refused'),
+            'a refused token whose ledger proof does not verify':({'ledger':{'g3c':{'verdict':'rejected','reason':'authority_rejected'}}},'g3c .* refused'),
+            'a refused token whose ledger snapshot is older than the refusal':({'ledger':{'g0c':{'verdict':'stale'}}},'g0c .* refused'),
+            'a refused token whose preflight command failed':({'exits':{('preflight','g3c'):1}},'g3c .* refused'),
+            'an admitted token whose burn command failed':({'exits':{('burn','g2c'):1}},'g2c .* admitted'),
+        }
+        for name,(kw,msg) in cases.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                t=self.tries();m,r,driver,_=self.boundary_run(tmp,t,{'admitted':t[2],'refused':t[3],'spread':2,'margin':2,'window':['g1c','g2c','g3c']},**kw)
+                with patch.object(m.NB2Rehearsal,'driver',driver):
+                    with self.assertRaisesRegex(m.Failure,msg): r.boundary()
+        # a refused probe whose own gas is within the limit: the preflight's verdict and its gas disagree
+        with tempfile.TemporaryDirectory() as tmp:
+            t=self.tries();t[1]=self.probe('g1c',208,L,'CapacityPreflight')
+            m,r,driver,_=self.boundary_run(tmp,t,{'admitted':t[2],'refused':t[3],'spread':2,'margin':2,'window':['g1c','g2c','g3c']})
+            with patch.object(m.NB2Rehearsal,'driver',driver):
+                with self.assertRaisesRegex(m.Failure,'g1c .* refused'): r.boundary()
+    def test_a_refusal_is_sound_only_by_its_recorded_gas_or_a_genuine_byte_overflow(self):
+        # sol's round 2 on #1186: the Python oracle, not only the driver's refusalOf(); g1c is the probe under test
+        L=self.LIM
+        cases={
+            'an unbounded gas (null), the bytes fitting':(self.probe('g1c',208,None,'CapacityPreflight',{'over':'unbounded','need':'64','pMax':'70','baseFits':'true'}),False),
+            'a byte refusal without its counts':(self.probe('g1c',208,None,'CapacityPreflight',{'over':'bytes'}),False),
+            'a byte refusal whose counts fit':(self.probe('g1c',208,L-1,'CapacityPreflight',{'over':'bytes','need':'64','pMax':'70','baseFits':'true'}),False),
+            'a gas refusal without its gas':(self.probe('g1c',208,None,'CapacityPreflight',{'over':'gas'}),False),
+            'a genuine byte overflow (more proofs needed than fit)':(self.probe('g1c',208,L-1,'CapacityPreflight',{'over':'bytes','need':'64','pMax':'63','baseFits':'true'}),True),
+            'a genuine byte overflow (not even the evidence fits)':(self.probe('g1c',208,None,'CapacityPreflight',{'over':'bytes','need':'64','pMax':'0','baseFits':'false'}),True),
+        }
+        for name,(probe,sound) in cases.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                t=self.tries();t[1]=probe
+                m,r,driver,_=self.boundary_run(tmp,t,{'admitted':t[2],'refused':t[3],'spread':2,'margin':2,'window':['g1c','g2c','g3c']})
+                with patch.object(m.NB2Rehearsal,'driver',driver):
+                    if sound: r.boundary()
+                    else:
+                        with self.assertRaisesRegex(m.Failure,'g1c .* refused'): r.boundary()
+                verdicts={x['label']:x['status'] for x in json.loads((Path(tmp)/'ev/nb2/boundary-soundness.json').read_text())}
+                self.assertEqual(verdicts['g1c'],'sound' if sound else 'contradicted')
+    def test_a_contradicted_probe_leaves_its_evidence_and_the_soundness_file_so_far(self):
+        # sol r12: the admitted g2c is not paid: the stage fails, with g2c's burn and redeem outputs and the soundness file kept, g0c and g1c
+        # sound, g2c contradicted, g3c not executed
+        with tempfile.TemporaryDirectory() as tmp:
+            t=self.tries();m,r,driver,asked=self.boundary_run(tmp,t,{'admitted':t[2],'refused':t[3],'spread':2,'margin':2,'window':['g1c','g2c','g3c']},
+                                                              redeem={'g2c':{'result':'unconfirmed'}})
+            with patch.object(m.NB2Rehearsal,'driver',driver):
+                with self.assertRaisesRegex(m.Failure,'g2c .* admitted'): r.boundary()
+            ev=Path(tmp)/'ev/nb2'
+            self.assertEqual(json.loads((ev/'redeem-g2c.json').read_text())['result'],'unconfirmed')
+            self.assertTrue((ev/'burn-g2c.json').is_file())
+            sound=json.loads((ev/'boundary-soundness.json').read_text())
+            self.assertEqual([(x['label'],x['status']) for x in sound],[('g0c','sound'),('g1c','sound'),('g2c','contradicted'),('g3c','not executed')])
+            self.assertEqual(sound[2]['result'],'unconfirmed')
+            self.assertNotIn(('preflight','big','g3c'),[a[:3] for a in asked])
+        # a refused probe the ledger shows spent: its ledger file is kept beside the soundness file
+        with tempfile.TemporaryDirectory() as tmp:
+            t=self.tries();m,r,driver,_=self.boundary_run(tmp,t,{'admitted':t[2],'refused':t[3],'spread':2,'margin':2,'window':['g1c','g2c','g3c']},
+                                                           ledger={'g1c':{'verdict':'included','reason':'certified'}})
+            with patch.object(m.NB2Rehearsal,'driver',driver):
+                with self.assertRaisesRegex(m.Failure,'g1c'): r.boundary()
+            ev=Path(tmp)/'ev/nb2'
+            self.assertEqual(json.loads((ev/'ledger-g1c.json').read_text())['verdict'],'included')
+            sound=json.loads((ev/'boundary-soundness.json').read_text())
+            self.assertEqual([(x['label'],x['status']) for x in sound],[('g0c','sound'),('g1c','contradicted'),('g2c','not executed'),('g3c','not executed')])
+            self.assertEqual(sound[1]['ledger'],'included')
+    def test_the_ledger_snapshot_must_be_sealed_after_the_refusal_completed(self):
+        # sol r13: a preflight that starts at 1000.2 and completes at 1005.4 asks the ledger for a seal at 1006 or later; a snapshot sealed at
+        # 1005 (while it ran, in its last second) is not fresh. Completing exactly at 1005.0 still asks for 1006: the seal second is whole
+        for done,snapshot,fresh in ((1005.4,1005,False),(1005.4,1006,True),(1005.0,1005,False),(1005.0,1006,True),(1005.4,1001,False)):
+            with self.subTest(done=done,snapshot=snapshot), tempfile.TemporaryDirectory() as tmp:
+                clock=[1000.2]
+                def preflight_runs(args,clock=clock,done=done): clock[0]=done
+                def chain_ledger(args,snapshot=snapshot):   # the driver's rule: unspent only when sealed at or after the threshold it is given
+                    return {'verdict':'unspent' if snapshot>=int(args[3]) else 'stale','snapshot':{'sealTimestampSeconds':str(snapshot)}}
+                t=[self.probe('g0c',206,self.LIM+260_000,'CapacityPreflight'),self.probe('g1c',204,self.LIM-300_000,'passes')]
+                m,r,driver,asked=self.boundary_run(tmp,t,{'admitted':t[1],'refused':t[0],'spread':2,'margin':2,'window':['g0c','g1c']},
+                                                   ledger={'g0c':chain_ledger},hooks={'preflight':preflight_runs})
+                with patch.object(m.NB2Rehearsal,'driver',driver), patch.object(m.time,'time',lambda clock=clock: clock[0]):
+                    if fresh:
+                        r.boundary()
+                    else:
+                        with self.assertRaisesRegex(m.Failure,'g0c .* refused'): r.boundary()
+                self.assertEqual([a[3] for a in asked if a[0]=='ledger'],['1006'])
+                sound=json.loads((Path(tmp)/'ev/nb2/boundary-soundness.json').read_text())
+                self.assertEqual((sound[0]['ledgerNotBefore'],sound[0]['status']),(1006,'sound' if fresh else 'contradicted'))
+    def test_a_driver_command_over_its_timeout_is_killed_and_reported(self):
+        # sol r13: a stalled command (a ledger read whose transport never completes) cannot hold the stage: its container is killed and the
+        # command reports 124. sol r14: the kill is bounded too, and whether it took is recorded: confirmed, failed (rc), or timeout
+        m=self.module()
+        for name,kill,cleanup in (('confirmed',lambda cmd,kw: subprocess.CompletedProcess(cmd,0,'',''),'confirmed'),
+                                  ('a failed kill',lambda cmd,kw: subprocess.CompletedProcess(cmd,1,'','Error response from daemon: cannot kill container'),'failed (rc 1: Error response from daemon: cannot kill container)'),
+                                  ('a stalled daemon',lambda cmd,kw: (_ for _ in ()).throw(subprocess.TimeoutExpired(cmd,kw['timeout'])),'timeout (docker kill over 30 s)')):
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                gen=self.generation(tmp);r=m.NB2Rehearsal(gen,Path(tmp)/'ev','/bin/false')
+                ran=[]
+                def run(cmd,*a,kill=kill,**kw):
+                    ran.append((cmd,kw.get('timeout')))
+                    if cmd[:2]==['docker','kill']: return kill(cmd,kw)
+                    raise subprocess.TimeoutExpired(cmd,kw['timeout'],output=b'polling the aggregator',stderr=b'')
+                with patch.object(m.subprocess,'run',run), patch.object(m.os,'getuid',lambda: 1000), \
+                        patch.object(m.release_nb2,'driver_cmd',lambda gen,*args,env_file=None,extra=(): ['docker','run',*extra,'img',*args]):
+                    code,text=r.driver('ledger','big','g0c','1006',check=False,timeout=240)
+                    with self.assertRaisesRegex(m.Failure,'the driver failed'): r.driver('ledger','big','g0c','1006',timeout=240)   # checked: the stage stops
+                self.assertEqual(code,124);self.assertIn('polling the aggregator',text);self.assertIn(f'cleanup: {cleanup}]',text)
+                container=ran[0][0][ran[0][0].index('--name')+1]
+                self.assertEqual(ran[0][1],240);self.assertEqual(ran[1],(['docker','kill',container],30),'the kill runs under its own timeout')
+                self.assertEqual(r.timeouts[0],{'command':['ledger','big','g0c','1006'],'container':container,'timeout':240,'cleanup':cleanup})
+        # in the stage: the probe's entry keeps the timed-out command and its cleanup, the probe is contradicted, the rest is not executed
+        with tempfile.TemporaryDirectory() as tmp:
+            t=self.tries()
+            m,r,driver,_=self.boundary_run(tmp,t,{'admitted':t[2],'refused':t[3],'spread':2,'margin':2,'window':['g1c','g2c','g3c']},
+                                           ledger={'g0c':None},exits={('ledger','g0c'):124},
+                                           hooks={'ledger':lambda args: r.timeouts.append({'command':list(args),'container':'nb2-driver-x','timeout':240,'cleanup':'timeout (docker kill over 30 s)'})})
+            with patch.object(m.NB2Rehearsal,'driver',driver):
+                with self.assertRaisesRegex(m.Failure,'g0c .* refused'): r.boundary()
+            sound=json.loads((Path(tmp)/'ev/nb2/boundary-soundness.json').read_text())
+            self.assertEqual((sound[0]['status'],sound[0]['ledgerExit'],sound[0]['ledger']),('contradicted',124,None))
+            self.assertEqual(sound[0]['timeouts'][0]['cleanup'],'timeout (docker kill over 30 s)')
+            self.assertEqual([x['status'] for x in sound[1:]],['not executed']*3)
+    def test_a_spread_over_the_margin_fails_the_location(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t=self.tries();m,r,driver,_=self.boundary_run(tmp,t,{'admitted':t[2],'refused':t[1],'spread':4,'margin':2,'window':['g1c','g2c','g3c']})
+            with patch.object(m.NB2Rehearsal,'driver',driver):
+                with self.assertRaisesRegex(m.Failure,'within 2 transfers'): r.boundary()
+    def test_a_failed_boundary_search_keeps_every_probe_in_the_evidence_and_still_executes_them(self):
+        # the console keeps the driver's last lines only: run 43985010186 lost all but two of its twenty probes
+        with tempfile.TemporaryDirectory() as tmp:
+            t=self.tries();m,r,driver,asked=self.boundary_run(tmp,t,{'admitted':None,'refused':None,'margin':2,'error':'no bound within 2'},code=1)
+            with patch.object(m.NB2Rehearsal,'driver',driver):
+                with self.assertRaisesRegex(m.Failure,'boundary-g.json'): r.boundary()
+            self.assertEqual(len(json.loads((Path(tmp)/'ev/nb2/boundary-g.json').read_text())['tries']),4)
+            self.assertTrue((Path(tmp)/'ev/nb2/boundary-estimate-ge.json').is_file())
+            self.assertIn(('redeem','big','g2c'),[a[:3] for a in asked],'soundness is judged on every probe even when the search failed')
+    def deploy_module(self):
+        import importlib.util
+        nb2_dir = Path(__file__).parent / 'bridge/nb2'
+        spec = importlib.util.spec_from_file_location('deploy_nb2', nb2_dir / 'deploy_nb2.py')
+        sys.path.insert(0, str(nb2_dir))
+        self.addCleanup(sys.path.remove, str(nb2_dir))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_nb2_deployment_binds_the_imported_tip_profile(self):
+        m = self.deploy_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = Path(tmp)
+            (gen / 'public').mkdir()
+            (gen / 'network').mkdir()
+            pins = json.loads((m.REPO / 'deploy/testnet/pins.json').read_bytes())
+            manifest = {'utb': True, 'artifacts': {'sources': {'ureth': pins['ureth']},
+                                                  'binary_sha256': {}, 'images': {}}}
+            (gen / 'manifest.json').write_text(json.dumps(manifest))
+            hashes = m.descriptors(gen, manifest, 'bridge', gen)
+            cert = json.loads((gen / 'public/descriptors/cert-batch-v2.json').read_bytes())
+            profile = (gen / 'public/descriptors/semantic-profile.json').read_bytes()
+            self.assertEqual(cert['ureth'], pins['ureth'])
+            self.assertEqual(hashes['semantic-profile'], '0x' + hashlib.sha256(profile).hexdigest())
+            self.assertEqual(json.loads(profile)['b1ExecutionRevision'], 2)
+            for name, sha in json.loads(profile)['specification'].items():
+                self.assertEqual(hashlib.sha256((m.REPO / name).read_bytes()).hexdigest(), sha)
+            for revision in ({}, {'executionRevision': 1}):
+                (gen / 'network/b1-profile.json').write_text(json.dumps(revision))
+                with self.assertRaisesRegex(SystemExit, 'require B1 execution revision 2'):
+                    m.run_deployment(gen, gen / 'evidence', 1, gen / 'output')
+
+    @unittest.skipUnless(os.getenv('TN_PINNED_URETH'), 'requires the pinned ureth checkout')
+    def test_nb2_descriptors_match_paired_source_revisions(self):
+        m = self.deploy_module()
+        pins = json.loads((m.REPO / 'deploy/testnet/pins.json').read_bytes())
+        bft = (os.getenv('TN_PINNED_BFT', m.REPO), pins['bft'])
+        ureth = (os.environ['TN_PINNED_URETH'], pins['ureth'])
+        historical = m.REPO / 'testvectors/nb2-continuation-v1.1-supplement/descriptors'
+        manifest = {'artifacts': {'sources': {'bft': pins['bft'], 'ureth': pins['ureth']},
+                                  'binary_sha256': {}, 'images': {}}}
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / 'public').mkdir()
+            hashes = m.descriptors(work, manifest, 'bridge', work)
+            release = m.HERE
+            for name, template, sections in (
+                ('cert-batch-v2', release / 'cert-batch-v2-tip.json', {'sources': ureth}),
+                ('rsmt-member-v1', historical / 'rsmt-member-v1.json', {'sources': ureth}),
+                ('execution', historical / 'execution.json', {'rules': ureth}),
+                ('primitive-vectors', historical / 'primitive-vectors.json', {'artifacts': bft}),
+                ('registry-layout', historical / 'registry-layout.json', {'sources': bft, 'native': ureth}),
+                ('semantic-profile', release / 'semantic-profile-tip.json', {'specification': bft}),
+            ):
+                with self.subTest(descriptor=name):
+                    expected = json.loads(template.read_bytes())
+                    if 'ureth' in expected:
+                        expected['ureth'] = pins['ureth']
+                    for section, (checkout, revision) in sections.items():
+                        for path in expected[section]:
+                            blob = subprocess.check_output(
+                                ['git', '-C', str(checkout), 'show', f'{revision}:{path}'])
+                            expected[section][path] = hashlib.sha256(blob).hexdigest()
+                    data = (work / 'public/descriptors' / f'{name}.json').read_bytes()
+                    self.assertEqual(json.loads(data), expected)
+                    self.assertEqual(hashes[name], '0x' + hashlib.sha256(data).hexdigest())
+
+    def test_graph_readback_uses_the_recorded_finalized_hash(self):
+        m = self.deploy_module()
+        roles = ['registry', 'receipts', 'lineage', 'ordinary', 'recovery', 'vault']
+        graph = {role: {'address': f'0x{i+1:040x}', 'runtimeCodeHash': f'0x{i+1:064x}'}
+                 for i, role in enumerate(roles)}
+        head = {'hash': '0x' + 'f1' * 32, 'number': '0x20'}
+        latest = {'hash': '0x' + 'f2' * 32, 'number': '0x21'}
+        expected_selector = {'blockHash': head['hash'], 'requireCanonical': True}
+        for i, role in enumerate(roles[1:], 1):
+            graph[role].update(block=i, blockHash=f'0x{i+8:064x}', transaction=f'0x{i+20:064x}')
+        want = {
+            'LINEAGE()': graph['lineage']['address'], 'LINEAGE_HASH()': graph['lineage']['runtimeCodeHash'],
+            'RECEIPTS()': graph['receipts']['address'], 'RECEIPTS_HASH()': graph['receipts']['runtimeCodeHash'],
+            'REGISTRY_HASH()': graph['registry']['runtimeCodeHash'], 'PROFILE_HASH()': '0x56',
+            'ORDINARY()': graph['ordinary']['address'], 'ORDINARY_HASH()': graph['ordinary']['runtimeCodeHash'],
+            'VAULT()': graph['vault']['address'], 'DOMAIN()': '0x12', 'PINS()': '0x34', 'GENERATION()': '0x78',
+            'config()': '0xab', 'domain()': '0x12', 'RECOVERY()': graph['recovery']['address'],
+            'RECOVERY_RUNTIME()': graph['recovery']['runtimeCodeHash'], 'RECOVERY_PINS()': '0x34',
+            'RECOVERY_GENERATION()': '0x78',
+        }
+        record = {'contracts': graph, 'gamma': '0xab', 'domain': '0x12', 'pins': '0x34',
+                  'recoveryGeneration': '0x78', 'descriptors': {'semantic-profile': '0x56'}}
+        by_addr = {node['address']: node['runtimeCodeHash'] for node in graph.values()}
+        creation_hashes = {hex(node['block']): node['blockHash'] for node in graph.values() if 'block' in node}
+
+        def code_hash(gen, target, addr, at):
+            self.assertEqual(at, expected_selector)
+            return by_addr[addr]
+
+        def response(gen, target, method, *params):
+            if method == 'eth_getBlockByNumber':
+                if params[0] == 'latest':
+                    return latest
+                self.assertIn(params[0], creation_hashes)
+                return {'hash': creation_hashes[params[0]]}
+            self.assertEqual(params[-1], expected_selector)
+            self.assertEqual(method, 'eth_call')
+            return want[params[0]['data']]
+
+        def cast(gen, operation, *args):
+            if operation == 'sig':
+                return args[0]
+            self.assertEqual(operation, 'abi-decode')
+            return args[-1]
+
+        with patch.object(m, 'code_hash', side_effect=code_hash), \
+             patch.object(m, 'rpc', side_effect=response) as call, \
+             patch.object(m, 'cast', side_effect=cast):
+            m.verify_graph(Path('/srv/g'), record, head)
+            self.assertFalse(any(c.args[2] == 'eth_getStorageAt' for c in call.call_args_list))
+            self.assertFalse(any('latest' in c.args for c in call.call_args_list))
+            want['RECOVERY_PINS()'] = '0x00'
+            with self.assertRaisesRegex(SystemExit, 'vault RECOVERY_PINS'):
+                m.verify_graph(Path('/srv/g'), record, head)
+            creation_hashes['0x1'] = latest['hash']
+            with self.assertRaisesRegex(SystemExit, 'receipts canonical creation block'):
+                m.verify_graph(Path('/srv/g'), record, head)
+
+    def test_a_failed_creation_reports_casts_own_reason(self):
+        m = self.deploy_module()
+        def tools(gen,*args,capture=False):
+            raise subprocess.CalledProcessError(1,['docker','run','cast','send','--create','0x'+'60'*4000],output='',stderr='Error: server returned an error response: error code -32000: nonce too low\n')
+        with patch.object(m,'tools',tools):
+            with self.assertRaises(SystemExit) as e: m.create(Path('/srv/g'),'0x6060','production vault')
+        self.assertIn('the production vault creation failed: cast exited 1: Error: server returned an error response: error code -32000: nonce too low',str(e.exception))
+        self.assertNotIn('6060606060',str(e.exception),'not the initcode')
+        initcode = '0x' + '60' * 4000
+        error = 'server returned an error response: error code -32000: nonce too low'
+        structured = json.dumps({'schema_version': 1, 'success': False, 'data': None, 'errors': [
+            {'code': 'cast.error', 'message': error},
+            {'code': 'cast.error.context', 'message': error},
+            {'code': 'cast.error.context', 'message': f'transaction input {initcode}'},
+        ]})
+        with patch.object(m, 'tools', side_effect=subprocess.CalledProcessError(
+            1, ['docker', 'run', 'cast', 'send', '--create', initcode], output=structured, stderr='',
+        )):
+            with self.assertRaises(SystemExit) as e:
+                m.create(Path('/srv/g'), initcode, 'production verifier')
+        self.assertEqual(
+            str(e.exception), f'the production verifier creation failed: cast exited 1: {error}; '
+                              'transaction input [creation bytecode redacted]',
+        )
+    def test_creation_retries_only_the_moving_estimate_head(self):
+        m = self.deploy_module()
+        def cast_error(message):
+            return subprocess.CalledProcessError(1, ['cast'], output=json.dumps({
+                'schema_version': 1, 'success': False, 'errors': [{'code': 'cast.error', 'message': message}],
+            }), stderr='')
+
+        refusal = 'error code -32603: bound execution input rejected the block: bound parent hash mismatch'
+        transient = cast_error('Failed to estimate gas: server returned an error response: ' + refusal)
+        receipt = {'status': '0x1', 'contractAddress': '0x1234', 'transactionHash': '0x5678', 'blockNumber': '0x8'}
+        with patch.object(m, 'tools', side_effect=[transient, json.dumps(receipt)]) as send, patch.object(m.time, 'sleep') as sleep:
+            self.assertEqual(m.create(Path('/srv/g'), '0x6060', 'production verifier'), receipt)
+            self.assertEqual(send.call_count, 2)
+            self.assertEqual(send.call_args_list[0], send.call_args_list[1])
+            sleep.assert_called_once_with(2)
+
+        with patch.object(m, 'tools', side_effect=transient) as send, patch.object(m.time, 'sleep') as sleep:
+            with self.assertRaisesRegex(SystemExit, 'bound parent hash mismatch'):
+                m.create(Path('/srv/g'), '0x6060', 'production vault')
+            self.assertEqual(send.call_count, m.ESTIMATE_ATTEMPTS)
+            self.assertEqual(sleep.call_count, m.ESTIMATE_ATTEMPTS - 1)
+
+        for permanent in ('Failed to estimate gas: execution reverted', 'Failed to send transaction: ' + refusal):
+            with self.subTest(permanent=permanent), patch.object(m, 'tools', side_effect=cast_error(permanent)) as send, patch.object(m.time, 'sleep') as sleep:
+                with self.assertRaises(SystemExit):
+                    m.create(Path('/srv/g'), '0x6060', 'production verifier')
+                send.assert_called_once()
+                sleep.assert_not_called()
+
+    def test_no_key_is_given_to_a_command_line(self):
+        src=(Path(__file__).parent/'bridge/nb2/rehearse_nb2.py').read_text()
+        self.assertNotIn('--private-key',src);self.assertNotIn('self.key(',src)
 
 class LoadGenerator(unittest.TestCase):
     """deploy/testnet/loadgen.py against an in-memory node and a fake clock."""
@@ -1335,6 +2950,122 @@ class LoadGenerator(unittest.TestCase):
 
 
 
+class UrethKey(unittest.TestCase):
+    """bft-core#1148: the execution client's devp2p node key is made once per entity, kept outside its data directory, mounted read-only into that
+    entity's ureth only, and a missing key stops ureth instead of giving it a new identity."""
+    def cfg(self,n=4):
+        tmp=tempfile.mkdtemp();self.addCleanup(shutil.rmtree,tmp)
+        out=Path(tmp)/'tn-fixture';out.mkdir()
+        images={k:'sha256:'+'a'*64 for k in ['node','rpc','guard','signer']}
+        return generate.topology(out,n,{'root':['r%d'%i for i in range(n)],'evm':['e%d'%i for i in range(n)]},images,'captcha',['--unicity.network-id','3'])
+    def test_the_generated_config_mounts_each_entitys_key_persistently_and_read_only(self):
+        import ureth_key
+        services=self.cfg()['services']
+        for i in (1,2,3,4):
+            svc=services['ureth%d'%i];entry=svc['entrypoint']
+            self.assertIn('./validator%d/ureth-key:/ureth-key:ro'%i,svc['volumes'],'a bind mount of the generation directory: it outlives every restart and recreate')
+            self.assertIn('./validator%d/ureth:/state'%i,svc['volumes'])
+            self.assertEqual(entry[entry.index('--p2p-secret-key')+1],'/ureth-key/p2p-secret')
+            self.assertFalse(ureth_key.PATH.startswith('/state/'),'not in the data directory a cold restore empties')
+            self.assertNotIn('--p2p-secret-key-hex',entry)   # the key is never in the manifest
+            self.assertEqual(entry[:2]+entry[3:6],['/bin/sh','-c','ureth','unicity-reth','node'],'the preflight runs first, then execs the client with its arguments')
+            self.assertIn('-s /ureth-key/p2p-secret',entry[2]);self.assertIn('exec "$@"',entry[2])
+            self.assertEqual(entry[-5:-2],['--unicity.network-id','3','--unicity.fee-collector='+generate.FEE])
+        for name,svc in services.items():   # each service keeps its own key: no other service (nor another entity's ureth) mounts it
+            mounts=[m for m in svc.get('volumes',[]) if 'ureth-key' in m]
+            self.assertEqual(mounts,['./validator%s/ureth-key:/ureth-key:ro'%name[5:]] if name.startswith('ureth') else [],name)
+        self.assertEqual(services['ureth1']['restart'],'unless-stopped')
+    def test_the_joiner_clone_mounts_its_own_key(self):
+        services=joiner.joiner_services(self.cfg(),5,'r5','e5')
+        self.assertIn('./validator5/ureth-key:/ureth-key:ro',services['ureth5']['volumes'])
+        self.assertNotIn('./validator4/ureth-key:/ureth-key:ro',services['ureth5']['volumes'])
+    def test_the_laptop_entity_keeps_the_key_in_a_volume_of_its_own_that_a_cold_restore_never_mounts(self):
+        import remote_joiner
+        self.assertEqual(remote_joiner.volume_mount('./validator5/ureth-key:/ureth-key:ro',5),'ureth-key:/ureth-key:ro')
+        self.assertIn('ureth-key',remote_joiner.PRIVATE);self.assertNotIn('ureth-key',remote_joiner.COLD_RESTORE_VOLUMES)
+        self.assertNotIn('ureth-key',remote_joiner.COLD_RESTORE_WIPE)
+    def test_create_makes_one_private_key_and_never_replaces_it(self):
+        import stat,ureth_key
+        with tempfile.TemporaryDirectory() as d:
+            old=os.umask(0o022)   # a permissive caller
+            try: path=ureth_key.create(Path(d)/'ureth-key')
+            finally: os.umask(old)
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode),0o600);self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode),0o700)
+            text=path.read_text();self.assertRegex(text,r'^[0-9a-f]{64}$','64 hex digits, no newline: reth parses the whole file')
+            self.assertTrue(0<int(text,16)<ureth_key.N)
+            with self.assertRaises(FileExistsError): ureth_key.create(Path(d)/'ureth-key')
+            self.assertEqual(path.read_text(),text)
+    def test_the_preflight_refuses_a_missing_or_empty_key_and_otherwise_execs_the_client(self):
+        import ureth_key
+        with tempfile.TemporaryDirectory() as d:
+            key=Path(d)/'p2p-secret'
+            def run():
+                entry=ureth_key.entrypoint(['echo','started','--p2p-secret-key',str(key)])
+                return subprocess.run([entry[0],entry[1],entry[2].replace(ureth_key.PATH,str(key)),*entry[3:]],capture_output=True,text=True)
+            for state in ('missing','empty'):
+                if state=='empty': key.write_text('')
+                r=run();self.assertEqual(r.returncode,78,state);self.assertEqual(r.stdout,'')
+                self.assertIn('refusing to start under a new identity',r.stderr);self.assertIn('never regenerated',r.stderr)
+            key.write_text('ab'*32)
+            r=run();self.assertEqual((r.returncode,r.stdout),(0,'started --p2p-secret-key %s\n'%key))
+            # sol on #1155: test -s follows a link, so a non-empty key linked into the writable /state passed; a link is refused whatever it points to
+            target=Path(d)/'state-discovery-secret';target.write_text('cd'*32)
+            key.unlink();key.symlink_to(target)
+            r=run();self.assertEqual((r.returncode,r.stdout),(78,''),'a link to a readable non-empty file');self.assertIn('symbolic link is refused',r.stderr)
+            target.unlink()
+            r=run();self.assertEqual((r.returncode,r.stdout),(78,''),'a dangling link (reth would write a new key through it)')
+            key.unlink();key.mkdir()
+            r=run();self.assertEqual((r.returncode,r.stdout),(78,''),'a directory');key.rmdir()
+            key.write_text('ab'*32);key.chmod(0o000)
+            try:
+                if os.geteuid()!=0:   # root reads anything; the service runs as 10001
+                    r=run();self.assertEqual((r.returncode,r.stdout),(78,''),'an unreadable key');self.assertIn('unreadable',r.stderr)
+            finally: key.chmod(0o600)
+            r=run();self.assertEqual(r.returncode,0,'the readable regular file again')
+    def test_a_repeated_laptop_init_never_replaces_a_lost_key(self):
+        import remote_joiner
+        class Lap:
+            rpc_image='sha256:rpc'
+            def __init__(self): self.state={};self.saved=[];self.made=[]
+            def vol(self,v): return 'p_'+v
+            def save(self): self.saved.append(dict(self.state))
+            def one(self,image,args,mounts,**kw): self.made.append(mounts);volume['key']=True
+        with tempfile.TemporaryDirectory() as d:
+            compose=Path(d)/'compose.json';volume={'key':False}
+            have=lambda v,rel:(v,rel)==('ureth-key','p2p-secret') and volume['key']
+            lap=Lap()
+            self.assertEqual(remote_joiner.ensure_ureth_key(lap,have,compose),'created')   # the first init
+            self.assertEqual(lap.made,[['p_ureth-key:/k']]);self.assertIn(remote_joiner.URETH_KEY_MARK,lap.saved[-1],'the marker is saved at once')
+            compose.write_text(json.dumps({'services':{'ureth5':{'volumes':['ureth:/state','ureth-key:/ureth-key:ro']}}}))
+            self.assertEqual(remote_joiner.ensure_ureth_key(lap,have,compose),'kept');self.assertEqual(len(lap.made),1)   # init again: the key is there
+            volume['key']=False   # the file (or the whole volume) lost
+            with self.assertRaises(remote_joiner.Failure) as e: remote_joiner.ensure_ureth_key(lap,have,compose)
+            self.assertIn('restore the file',str(e.exception));self.assertEqual(len(lap.made),1,'no new key')
+            fresh=Lap()   # state.json lost too: the compose that mounts the key still says the entity was initialized with one
+            with self.assertRaises(remote_joiner.Failure): remote_joiner.ensure_ureth_key(fresh,have,compose)
+            self.assertEqual(fresh.made,[])
+            compose.unlink()   # the marker alone suffices
+            with self.assertRaises(remote_joiner.Failure): remote_joiner.ensure_ureth_key(lap,have,compose)
+            self.assertEqual(len(lap.made),1)
+            volume['key']=True;old=Lap()   # an entity whose key predates the marker: kept, and marked
+            self.assertEqual(remote_joiner.ensure_ureth_key(old,have,compose),'kept');self.assertIn(remote_joiner.URETH_KEY_MARK,old.state);self.assertEqual(old.made,[])
+    def test_reruns_of_generate_and_prepare_cannot_make_a_second_key(self):
+        import ureth_key
+        source=(Path(__file__).parent/'generate.py').read_text()
+        self.assertIn("if out.exists(): p.error('output exists: choose a new generation directory')",source)   # a generation is made once, into a new directory
+        with tempfile.TemporaryDirectory() as d:
+            gen=Path(d)/'gen';gen.mkdir();(gen/'compose.yaml').write_text(json.dumps(generate.topology(gen,4,{'root':['r%d'%i for i in range(4)],'evm':['e%d'%i for i in range(4)]},
+                {k:'sha256:'+'a'*64 for k in ['node','rpc','guard','signer']},'captcha')))
+            (gen/'validator5'/'ureth-key').mkdir(parents=True)   # a prepared joiner whose key was lost
+            with self.assertRaisesRegex(ValueError,'validator5 exists'): joiner.prepare(gen,'/nonexistent/ubft',5)
+            self.assertFalse((gen/'validator5'/'ureth-key'/'p2p-secret').exists())
+            ureth_key.create(gen/'k')
+            with self.assertRaises(FileExistsError): ureth_key.create(gen/'k')
+    def test_generate_and_prepare_make_the_key_before_anything_starts(self):
+        source=(Path(__file__).parent/'generate.py').read_text()
+        self.assertIn("ureth_key.create(val/ureth_key.DIR)",source)
+        self.assertLess(source.index("ureth_key.create(val/ureth_key.DIR)"),source.index("write(out/'compose.yaml',final)"))
+
 class Joiner(unittest.TestCase):
     images={k:'sha256:'+'a'*64 for k in ['node','rpc','guard','signer']}
     def topology(self,n):
@@ -1345,7 +3076,10 @@ class Joiner(unittest.TestCase):
         got=joiner.joiner_services(four,5,'r4','e4')
         want={n:five['services'][n] for n in ('pod5','metrics5','root5','authority5','ureth5','shard5')}
         self.assertEqual(sorted(got),sorted(want))
+        got['shard5'],follow=strip_follow(got['shard5'])
         for name in want: self.assertEqual(got[name],want[name],name)
+        # the one difference: the joiner follows the genesis shard nodes, never a root, until its activation
+        self.assertEqual([a.split('/')[2] for a in follow.split(',')],['shard1','shard2','shard3','shard4'])
     def test_the_relayer_identity_file_has_the_fields_it_reads_and_no_evm_key(self):
         f=pos_join.joiner_file('0x'+'1'*64,'0x'+'2'*64,'0x'+'3'*40,'0x'+'4'*40,'rid','eid')
         self.assertEqual(sorted(f),['evmNodeId','expiry','ownerKey','payee','rootKey','rootNodeId','withdrawal'])
@@ -1355,6 +3089,35 @@ class Joiner(unittest.TestCase):
         for out in (json.dumps(one),json.dumps([one]),json.dumps({'Address':one['address'],'PrivateKey':one['private_key']}),'Address: %s\nPrivate key: %s'%(one['address'],one['private_key'])):
             self.assertEqual(pos_join.new_wallet(type('R',(),{'cast_run':lambda self,*a,out=out:out})()),one)
         with self.assertRaises(RuntimeError): pos_join.new_wallet(type('R',(),{'cast_run':lambda self,*a:'nothing'})())
+    def test_the_heavy_joiner_runs_before_the_slow_restore_stage_and_signing_is_proved_after_it(self):
+        """#1006: pos-restore-repeat outlasts several election cadences; an attempt that came due meanwhile leaves a result open that only the automatic RejectResult
+        clears (16384 progress rounds), so pos-join-heavy, which needs none open, runs straight after pos-advance, before it. pos-join-signs runs after the repeated
+        restores (arch): it proves the joiner still signs after them."""
+        import rehearse
+        names=[n for n,_ in rehearse.POS_STAGES]
+        order=['pos-advance','pos-join-heavy','pos-restore-repeat','pos-join-signs','pos-restart']
+        self.assertEqual([names.index(n) for n in order],sorted(names.index(n) for n in order),'stage order: '+' < '.join(order))
+        self.assertEqual(names.index('pos-advance')+1,names.index('pos-join-heavy'),'nothing slow between the advance and the heavy joiner')
+        self.assertEqual(names.index('pos-join-heavy')+1,names.index('pos-restore-repeat'),'nothing slow between the heavy joiner and the election attempt it provokes')
+        src=Path(pos_join.__file__).read_text()
+        body=src[src.index('def pos_join_heavy'):]
+        self.assertLess(body.index("'openResult()(bytes32)'"),body.index('cursor_before = '),'the cursor is read with no result open')
+    def test_the_pos_stage_boundaries_log_the_election_state(self):
+        import rehearse
+        gen=Path(tempfile.mkdtemp()); (gen/'network').mkdir(); (gen/'network'/'pos-deployment.json').write_text(json.dumps({'election':'0xe'}))
+        said=[]
+        class Fake(rehearse.Rehearsal):
+            def __init__(self,g): self.gen,self.results=g,[]
+            def say(self,m): said.append(m)
+            def view_text(self,*a): return '0x'+'cc'*32
+            def view(self,*a): return [9]
+        r=Fake(gen); r.stage('pos-join-heavy',lambda:None); r.stage('up',lambda:None)
+        self.assertEqual([m for m in said if m.startswith('  election at')],[f'  election at the start of pos-join-heavy: openResult 0x{"cc"*32}, attemptCursor 9',f'  election at the end of pos-join-heavy: openResult 0x{"cc"*32}, attemptCursor 9'],'PoS stages only')
+        said.clear()
+        def boom(): raise rehearse.Failure('x')
+        with self.assertRaises(rehearse.Failure): r.stage('pos-join-heavy',boom)
+        self.assertTrue(any('at the failure of pos-join-heavy' in m for m in said))
+        self.assertIsNone(Fake(Path(tempfile.mkdtemp())).election_state(),'no election: nothing logged, nothing raised')
     def test_the_joiner_override_makes_its_services_part_of_every_compose_operation(self):
         with tempfile.TemporaryDirectory() as d:
             gen=Path(d);compose=self.topology(4);(gen/'compose.yaml').write_text(json.dumps(compose))
@@ -1370,9 +3133,14 @@ class Joiner(unittest.TestCase):
             gen=Path(d)/'gen';gen.mkdir();(gen/'compose.yaml').write_text(json.dumps(self.topology(4)))
             fake=Path(d)/'ubft'   # the three commands prepare runs: init (makes the home), credential (a file), node-id (prints one)
             fake.write_text("#!/usr/bin/env python3\nimport sys,os\na=sys.argv[1:]\n"
-                            "if a[1]=='init': os.makedirs(a[a.index('--home')+1])\n"
+                            "if a[1]=='init': h=a[a.index('--home')+1]; os.makedirs(h); open(h+'/node-info.json','w').write('{\"sigKey\":\"0x02'+'ab'*32+'\"}')\n"
                             "elif a[0]=='signing-authority': open(a[a.index('--out')+1],'w').write('c')\n"
                             "elif a[0]=='node-id': print('id-'+os.path.basename(a[a.index('--home')+1]))\n");fake.chmod(0o755)
+            # #1297: a root key on the generation's retired list is refused, and the half-made entity is removed
+            (gen/'network').mkdir();root_keys.write(gen/'network',{root_keys.key_hash('0x02'+'ab'*32)})
+            with self.assertRaises(root_keys.RetiredKeyError): joiner.prepare(gen,fake)
+            self.assertFalse((gen/'validator5').exists())
+            root_keys.write(gen/'network',set())
             old=os.umask(0o022)   # a permissive caller: prepare must not inherit it
             try: out=joiner.prepare(gen,fake)
             finally: os.umask(old)
@@ -1382,8 +3150,11 @@ class Joiner(unittest.TestCase):
                 mode=stat.S_IMODE(path.stat().st_mode)
                 self.assertEqual(mode&0o077,0,f'{path} is accessible to group or others: {oct(mode)}')
             self.assertTrue((val/'jwt'/'jwt.hex').is_file())
+            key=val/'ureth-key'/'p2p-secret'   # bft-core#1148: the joiner's execution client has its own node key from prepare on
+            self.assertEqual(stat.S_IMODE(key.stat().st_mode),0o600);self.assertRegex(key.read_text(),r'^[0-9a-f]{64}$')
             override=json.loads((gen/'compose.joiner.json').read_text())
             self.assertEqual(sorted(override['services']),['authority5','metrics5','pod5','root5','shard5','ureth5'])
+            self.assertIn('./validator5/ureth-key:/ureth-key:ro',override['services']['ureth5']['volumes'])
             self.assertIn('id-evm',override['services']['authority5']['entrypoint'])
     def test_set_scope_moves_only_the_authority_epochs_and_trust_base(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1484,6 +3255,57 @@ class Observe(unittest.TestCase):
     def test_the_faucet_can_be_left_out(self):
         s=self.sample([1]);del s['faucet']
         self.assertEqual(observe.Watch().step(s,0),[])
+    def test_a_container_near_its_memory_limit_is_an_alert_only_while_it_stalls_on_memory(self):
+        self.assertEqual(observe.memory_use('1.5GiB / 2GiB'),(1.5*2**30,2*2**30))
+        self.assertEqual(observe.memory_use('511.6MiB / 512MiB'),(511.6*2**20,512*2**20))
+        self.assertIsNone(observe.memory_use('--'),'a stopped container has no usage')
+        mem={'p-shard1-1':'1.9GiB / 2GiB','p-root1-1':'100MiB / 384MiB','p-pod1-1':'--'}
+        def run(pressure,samples=6,**kw):
+            w,alerts=observe.Watch(**kw),[]
+            for i in range(samples):
+                cg={'p-shard1-1':{'pressure_full_avg60':pressure,'oom_kill':0}}
+                alerts.append([a for a in w.step(self.sample([i+1],memory=mem,cgroup=cg),i*60) if 'memory' in a])
+            return alerts
+        starving=run(4.2)
+        self.assertEqual(starving[:4],[[]]*4,'four samples near the limit are not yet an alert')
+        self.assertEqual(starving[4],['p-shard1-1 memory 1.9GiB / 2GiB is above 90% of its limit for 5 samples (memory pressure, full avg60: 4.2%)'])
+        self.assertEqual(run(0.0),[[]]*6,'page cache at the limit, nobody stalls: no alert on a 24 h run')
+        self.assertTrue(run(None)[4],'without pressure figures, the samples in a row alone')
+        self.assertEqual(run(4.2,mem_limit=96),[[]]*6)
+    def test_an_oom_kill_is_an_alert(self):
+        w=observe.Watch()
+        cg=lambda n:{'p-shard1-1':{'pressure_full_avg60':0.0,'oom_kill':n}}
+        self.assertEqual(w.step(self.sample([1],cgroup=cg(2)),0),[],'the count when sampling starts is history')
+        self.assertEqual(w.step(self.sample([2],cgroup=cg(2)),60),[])
+        self.assertIn('p-shard1-1 had 1 OOM kill(s)',w.step(self.sample([3],cgroup=cg(3)),120))
+    def test_cgroup_memory_reads_pressure_and_oom_kills_and_tolerates_their_absence(self):
+        with tempfile.TemporaryDirectory() as d:
+            c=Path(d,'system.slice','docker-abc.scope');c.mkdir(parents=True)
+            (c/'memory.pressure').write_text('some avg10=8.00 avg60=6.50 avg300=3.00 total=1\nfull avg10=5.00 avg60=4.25 avg300=2.00 total=1\n')
+            (c/'memory.events').write_text('low 0\nhigh 0\nmax 4700000\noom 0\noom_kill 2\n')
+            self.assertEqual(observe.cgroup_memory('abc',d),{'pressure_full_avg60':4.25,'oom_kill':2})
+            self.assertEqual(observe.cgroup_memory('missing',d),{'pressure_full_avg60':None,'oom_kill':None})
+    def rates(self,w,per_minute):
+        at,block,alerts=0,0,[]
+        for minute,rate in enumerate(per_minute):
+            block+=rate/60
+            alerts.append([a for a in w.step(self.sample([minute+1]*4,gateway={'healthz':200,'block':int(block)}),at) if 'block rate' in a])
+            at+=60
+        return alerts
+    def test_a_falling_block_rate_is_an_alert_before_the_chain_stops(self):
+        # staging, 2026-11-12: 2800/h, then 2000, 1000, 700 and 340 blocks/h an hour each while the chain still moved
+        decline=[2800]*180+[2000]*60+[1000]*60+[700]*60+[340]*60
+        alerts=self.rates(observe.Watch(stall=120,rate_window=3600,rate_drop=0.5),decline)
+        first=next(i for i,a in enumerate(alerts) if a)
+        self.assertTrue(180+60<first<=180+120+30,f'the alert comes during the hour at 1000/h, at minute {first}')
+        usual=int(re.search(r'usual (\d+)/h',alerts[first][0]).group(1))
+        self.assertTrue(2000<=usual<=2800,alerts[first])
+        self.assertFalse(any('execution chain stopped' in a for x in alerts for a in x))
+    def test_a_catch_up_burst_is_not_the_usual_rate(self):
+        start=[20000]*20+[2800]*300
+        self.assertEqual([a for a in self.rates(observe.Watch(rate_window=3600),start) if a],[],'the warm-up hour keeps a burst at the start out')
+        later=[2800]*240+[20000]*20+[2800]*300
+        self.assertEqual([a for a in self.rates(observe.Watch(rate_window=3600),later) if a],[],'the median is not moved by a later burst')
 
 class PosSample(unittest.TestCase):
     def pos(self,**kw):
@@ -1631,180 +3453,555 @@ class PosSample(unittest.TestCase):
         for name,selector in pos_sample.SELECTORS.items():
             self.assertEqual(subprocess.run([cast,'sig',name+'()'],text=True,capture_output=True,check=True).stdout.strip(),selector,name)
 
-class BridgeLoad(unittest.TestCase):
-    """bridge/bridge_load.py without a network: docker stats' text, the summary, and a failed cycle's accounting against a fake rehearsal."""
-    def module(self):
-        sys.path.insert(0,str(Path(__file__).parent/'bridge'))
-        self.addCleanup(sys.path.pop,0)
-        import bridge_load
-        return bridge_load
-    def fake(self,tmp,fail=None,held=None):
-        class Fake:
-            gen=Path(tmp)
-            calls=[]
-            fail=None
-            def say(self,text): pass
-            def bridge_compose(self,*a): return ''
-            def cast_run(self,*a): return '0x'+'a'*40
-            def faucet_send(self,to,wei): pass
-            def call(self,method,params=()): return hex(7)
-            def vault_balance(self):
-                self.reads=getattr(self,'reads',0)+1
-                return 0 if self.reads==1 else self.held
-            def tester(self,*args,check=True,wallet=None,key=None):
-                self.calls.append(args[0])
-                (Path(tmp)/'bridge'/key).read_text()   # the worker's key exists while it runs
-                if args[0]==self.fail: return 1,'some output\nerror: 0xabc holds 5 wei, and this needs 9: get test ether from the faucet'
-                return 0,'ok'
-        (Path(tmp)/'bridge').mkdir()
-        made=Fake();made.fail,made.held,made.calls=fail,held,[]
-        return made
-    def run_load(self,bl,tmp,fake,max_failures=1):
-        out=Path(tmp)/'out';out.mkdir()
-        load=bl.Load(fake,out,duration=0.05,interval=60,max_failures=max_failures)
-        return load.run(1),json.loads((out/'summary.json').read_text()),out
-    def test_stats_line(self):
-        bl=self.module()
-        line=json.dumps({'Name':'x-ureth1-1','MemUsage':'184.5MiB / 1.5GiB','CPUPerc':'12.50%'})
-        self.assertEqual(bl.parse_stats(line),('x-ureth1-1',184.5*2**20,1.5*2**30,12.5))
-        with self.assertRaises(ValueError): bl.size_bytes('12 parsecs')
-    def test_summary(self):
-        bl=self.module()
-        step=lambda w,c,s,t,ok=True:{'worker':w,'cycle':c,'step':s,'seconds':t,'ok':ok}
-        steps=[step(1,1,'lock',1.0),step(1,1,'claim',2.0),step(1,2,'lock',3.0),step(1,2,'mint',9.0,False)]
-        c=lambda m,cpu:{'c':{'mem':m,'memLimit':2**30,'cpuPct':cpu}}
-        samples=[{'containers':c(2**20,50.0),'diskUsed':1000},{'containers':c(2**21,10.0),'diskUsed':4000}]
-        s=bl.summarize(steps,samples,60)
-        self.assertEqual((s['roundTrips'],s['failedCycles'],s['roundTripsPerMinute']),(1,1,1.0))
-        self.assertEqual(s['stepSeconds']['lock'],{'n':2,'p50':2.0,'p95':3.0,'max':3.0})
-        self.assertNotIn('mint',s['stepSeconds'],'a failed step is not a latency')
-        self.assertEqual(s['services']['c'],{'memPeakMiB':2.0,'memLimitMiB':1024,'cpuPeakPct':50.0})
-        self.assertEqual((s['diskGrowthBytes'],s['diskGrowthPerRoundTripBytes']),(3000,3000))
-    def test_clean_run_passes_and_leaves_no_key_or_wallet(self):
-        bl=self.module()
+class StagingKnobs(unittest.TestCase):
+    """The staging generation's settings as generator options (2026-11-12 dev generation workarounds): the faucet's payout, genesis balance, daily cap and
+    per-IP limit; the faucet/edge subnets and their trusted proxies; the public routes (public_routes.py)."""
+    def images(self): return {'node':'sha256:'+'1'*64,'rpc':'sha256:'+'2'*64,'guard':'sha256:'+'3'*64,'signer':'sha256:'+'4'*64}
+    def topo(self,**kw):
+        with tempfile.TemporaryDirectory() as d:
+            return generate.topology(Path(d),4,{'root':['r%d'%i for i in range(4)],'evm':['e%d'%i for i in range(4)]},self.images(),'captcha',**kw)
+    def test_faucet_defaults_cover_demo_claims(self):
+        f=generate.faucet_settings(generate.FAUCET_PAYOUT,generate.FAUCET_BALANCE,generate.FAUCET_DAILY_CLAIMS)
+        self.assertEqual(f['network'],{'payout':'200','minimum_balance_wei':400*10**18,'daily_claims':50,'limit_per_ip':False})
+        self.assertEqual(f['balance_wei'],50000*10**18)
+        self.assertGreaterEqual(f['balance_wei']//(200*10**18),200,'the default balance pays at least 200 claims of 200 UCT')
+        self.assertEqual(generate.faucet_settings('0.01','1000',100,True)['network'],{'payout':'0.01','minimum_balance_wei':2*10**16,'daily_claims':100,'limit_per_ip':True})
+        # keygen's own default is the same balance (a generation made without the flag still pays the default claims)
+        self.assertIn('const DefaultFaucetBalanceWei = "%d"'%(50000*10**18),(Path(__file__).parent/'keygen/main.go').read_text())
+    def test_faucet_settings_refuse_bad_values(self):
+        self.assertEqual(generate.uct_wei('1.5','x'),15*10**17)
+        for bad in ('','0','-1','1e3','.5','5.','abc','0.0000000000000000001',' 1'):
+            with self.assertRaises(ValueError,msg=bad): generate.uct_wei(bad,'x')
+        for args in (('200','10000',50),('200','50000',0),('200','50000',10001),('0','50000',50)):
+            with self.assertRaises(ValueError,msg=args): generate.faucet_settings(*args)
+        generate.faucet_settings('200','10400',50)   # exactly the reserve plus one day
+    def test_only_the_signer_holds_the_faucet_key(self):
+        """bft-core#1287: a transaction from the faucet key outside the eth-faucet signer leaves its nonce stale. The generation's signer service is the only
+        user of faucet-secrets/: every tool signs with funder-secrets/ (the funder account) or an operator's --funder."""
+        here=Path(__file__).parent
+        allowed={'generate.py','validate-pos.py','rehearse.py'}   # making and mounting it for the signer; the captcha-copy check; the secret scan
+        for path in sorted(here.rglob('*.py'))+sorted(here.rglob('*.sh'))+sorted(here.rglob('*.ts')):
+            if path.name.startswith('test_') or path.name.endswith('.test.ts') or 'evidence' in path.parts: continue
+            text=path.read_text()
+            if path.name not in allowed:
+                self.assertFalse('faucet-secrets' in text,f'{path} names faucet-secrets')
+            self.assertFalse('faucet_send' in text,f'{path} sends from the faucet')
+            for line in text.splitlines():
+                if 'faucet-secrets' in line and path.name=='rehearse.py': self.assertIn('funder-secrets',line,'rehearse.py names faucet-secrets only to scan it for secrets')
+                # the faucet address is compared (validate-generation.py, the reset stage), never used as a sender
+                if "['faucet_address']" in line and not (path.name=='validate-generation.py' or 'old_faucet' in line):
+                    self.fail(f'{path.name}: a sender from the faucet account: {line.strip()}')
+        self.assertGreaterEqual(generate.uct_wei(generate.FUNDER_BALANCE,'x'),450*10**18,'the funder pays a full rehearsal')
+        # no service mounts the funder's keys (review of #1304): the compose file names neither its directory nor a secret from it
+        for kw in ({},{'payout':'0.5'}):
+            cfg=self.topo(**kw)
+            self.assertNotIn('funder-secrets',json.dumps(cfg))
+            self.assertEqual(sorted(cfg['secrets']),['faucet_keystore','faucet_password','hcaptcha_secret'])
+            self.assertEqual(sorted(n for n,svc in cfg['services'].items() if svc.get('secrets')),['signer'],'only the signer gets the faucet secrets')
+    def test_payout_reaches_the_signer(self):
+        cfg=self.topo()
+        self.assertEqual(cfg['services']['signer']['environment']['FAUCET_PAYOUT'],'200')
+        self.assertEqual(self.topo(payout='0.5')['services']['signer']['environment']['FAUCET_PAYOUT'],'0.5')
+        entry=(Path(__file__).parent/'faucet/backend-entrypoint.sh').read_text()
+        self.assertIn('-faucet.amount "$FAUCET_PAYOUT"',entry); self.assertNotIn('0.01',entry)
+        self.assertNotIn("!= '0.01'",(Path(__file__).parent/'faucet/gateway.py').read_text(),'the guard checks the configured payout, not a constant')
+    def test_vr_authorities_and_archive_execution_stay_in_their_pod(self):
+        cfg = self.topo(vr_pos=True, utb='0x' + 'aa' * 32, port_offset=1000,
+                        vr_authority_follow='http://127.0.0.2:8002', vr_paired_activation='http://127.0.0.2:8002', rpc_bind='127.0.0.2',
+                        captcha_secret_file='/srv/secrets/captcha')
+        self.assertEqual(cfg['secrets']['hcaptcha_secret'], {'file': '/srv/secrets/captcha'})
+        self.assertEqual(cfg['services']['rpc']['ports'], ['127.0.0.1:9545:8545'])
+        for i in range(1, 5):
+            services = cfg['services']
+            root, authority, ureth, shard, relay = (services[f'{role}{i}'] for role in ('root', 'authority', 'ureth', 'shard', 'evm-rpc'))
+            for service in (root, authority, ureth, shard, relay):
+                self.assertEqual(service['network_mode'], f'service:pod{i}')
+                self.assertNotIn('ports', service)
+            shard_flags = shard['entrypoint']
+            self.assertEqual(shard_flags[shard_flags.index('--paired-activation-rpc') + 1], 'http://127.0.0.2:8002')
+            self.assertIn('--vr-deployment', root['entrypoint'])
+            self.assertIn(f'./validator{i}/auth/pop:/pop:ro', root['volumes'])
+            self.assertNotIn(f'./validator{i}/auth:/authority', root['volumes'])
+            self.assertIn('--fence-provision-file', authority['entrypoint'])
+            auth = authority['entrypoint']
+            self.assertEqual(auth[auth.index('--follow-root-activations') + 1], 'http://127.0.0.2:8002')
+            self.assertEqual(auth[auth.index('--follow-client-credential') + 1], '/authority/client.cred')
+            self.assertEqual(authority['restart'], 'no')
+            for flag in ('--http.addr', '--authrpc.addr'):
+                entry = ureth['entrypoint']
+                self.assertEqual(entry[entry.index(flag) + 1], '127.0.0.1')
+            self.assertIn('--unicity.archive-state-proofs', ureth['entrypoint'])
+            self.assertIn('http://127.0.0.1:8551', shard['entrypoint'])
+            self.assertEqual(relay['environment']['TN_LOCAL_EXECUTION_ALIAS'], f'ureth{i}')
+
+    def test_internal_operator_log_lookup_pins_latest_and_keeps_the_window(self):
+        handler = object.__new__(gateway.ExecutionHandler)
+        handler.server = unittest.mock.Mock()
+        handler.server.relay.call.return_value = {'result': '0x270f'}
+        selector = [{'address': '0x' + 'ab' * 20, 'fromBlock': '0x0', 'toBlock': 'latest'}]
+        with self.assertRaises(ValueError):
+            gateway.check_log_filter(selector)
+        handler.log_filter(selector)
+        self.assertEqual(selector[0]['toBlock'], '0x270f')
+        handler.server.relay.call.assert_called_once_with('eth_blockNumber', [])
+        handler.server.relay.call.return_value = {'result': '0x2710'}
+        selector[0]['toBlock'] = 'latest'
+        with self.assertRaises(ValueError):
+            handler.log_filter(selector)
+
+    def test_role_status_can_check_sync_through_the_gateway(self):
+        self.assertIn('eth_syncing', gateway.PUBLIC)
+
+    def test_operator_registration_lookup_pages_a_pinned_head(self):
+        import validator_rpc
+        logs = {'method': 'eth_getLogs', 'id': 42, 'params': [
+            {'address': '0x' + '12' * 20, 'fromBlock': '0x0', 'toBlock': 'latest'}]}
+        forward = unittest.mock.Mock(side_effect=[(200, {'result': '0x2710'}), (200, {'result': [1]}), (200, {'result': [2]})])
+        self.assertEqual(validator_rpc.operator_request(logs, forward), (200, {'jsonrpc': '2.0', 'id': 42, 'result': [1, 2]}))
+        filters = [entry.args[0]['params'][0] for entry in forward.call_args_list[1:]]
+        self.assertEqual([(f['fromBlock'], f['toBlock']) for f in filters], [('0x0', '0x270f'), ('0x2710', '0x2710')])
+
+    def test_vr_release_checks_staged_network_files_and_rejects_symlinks(self):
+        import hashlib
+        import vr_release
+        sha = lambda value: hashlib.sha256(value).hexdigest()
         with tempfile.TemporaryDirectory() as tmp:
-            ok,s,out=self.run_load(bl,tmp,self.fake(tmp,held=0))
-            self.assertTrue(ok)
-            self.assertGreater(s['roundTrips'],0)
-            self.assertEqual(list((Path(tmp)/'bridge').iterdir()),[],'keys and finished wallets are removed')
-            self.assertNotIn('0x',(out/'cycles.jsonl').read_text().replace('"ok"',''),'no key in the evidence')
-    def test_failed_cycle_after_the_lock_keeps_its_wallet_and_counts_its_lock(self):
-        bl=self.module()
+            net = Path(tmp) / 'network'
+            net.mkdir()
+            pin = '0x' + '31' * 32
+            files = {name: b'{}' for name in vr_release.NETWORK_FILES}
+            files['utb-genesis.id'] = (pin + '\n').encode()
+            files['utb-genesis.cbor'] = b'genesis record'
+            files['ureth-flags.txt'] = f'--unicity.genesis-commitment={pin}\n'.encode()
+            files['fee-collector.txt'] = b'0x00000000000000000000000000000000000000fe\n'
+            for name, data in files.items():
+                (net / name).write_bytes(data)
+            manifest = {'utb': {'genesis_id': pin, 'genesis_sha256': sha(files['utb-genesis.cbor'])},
+                        'config_sha256': {name: sha(data) for name, data in files.items() if not name.startswith('utb-genesis.')}}
+            good = Path(tmp) / 'verified'
+            good.mkdir()
+            vr_release.stage_network_files(net, good, manifest)
+            self.assertFalse((good / root_keys.FILE).exists(), 'a generation that pins no retired-key list ships none')
+            # #1297: the pinned retired-root-keys list ships with the release, checked against its digest
+            listed = b'{"format":"unicity-retired-root-keys/1","keyHashes":[]}\n'
+            (net / root_keys.FILE).write_bytes(listed)
+            manifest['config_sha256'][root_keys.FILE] = sha(listed)
+            shipped = Path(tmp) / 'shipped'
+            shipped.mkdir()
+            vr_release.stage_network_files(net, shipped, manifest)
+            self.assertEqual((shipped / root_keys.FILE).read_bytes(), listed)
+            (net / root_keys.FILE).write_bytes(b'{}')
+            with tempfile.TemporaryDirectory() as out, self.assertRaisesRegex(ValueError, root_keys.FILE):
+                vr_release.stage_network_files(net, Path(out), manifest)
+            (net / root_keys.FILE).write_bytes(listed)
+            for name, stale in (
+                ('utb-genesis.id', b'stale'),
+                ('utb-genesis.cbor', b'stale'),
+                ('trust-base.json', b'stale'),
+                ('ureth-flags.txt', files['ureth-flags.txt'].replace(b'31', b'32')),
+                ('fee-collector.txt', files['fee-collector.txt'].replace(b'fe', b'fd')),
+            ):
+                with self.subTest(name=name), tempfile.TemporaryDirectory() as out:
+                    (net / name).write_bytes(stale)
+                    with self.assertRaisesRegex(ValueError, name):
+                        vr_release.stage_network_files(net, Path(out), manifest)
+                    (net / name).write_bytes(files[name])
+            for name in ('ureth-flags.txt', 'fee-collector.txt'):
+                with self.subTest(missing_digest=name), tempfile.TemporaryDirectory() as out:
+                    expected = manifest['config_sha256'].pop(name)
+                    with self.assertRaisesRegex(ValueError, rf'{re.escape(name)}.*Re-export starts with the next generation'):
+                        vr_release.stage_network_files(net, Path(out), manifest)
+                    manifest['config_sha256'][name] = expected
+            (net / 'genesis.json').unlink()
+            (net / 'genesis.json').symlink_to(good / 'genesis.json')
+            with tempfile.TemporaryDirectory() as out, self.assertRaises(OSError):
+                vr_release.stage_network_files(net, Path(out), manifest)
+    def test_subnets_are_options(self):
+        cfg=self.topo()
+        self.assertEqual(cfg['networks']['faucet']['ipam']['config'],[{'subnet':'172.30.88.0/24','gateway':'172.30.88.1'}])
+        self.assertEqual(cfg['networks']['edge']['ipam']['config'],[{'subnet':'172.30.89.0/24','gateway':'172.30.89.1'}])
+        self.assertEqual(cfg['services']['rpc']['environment']['TRUSTED_PROXY_IP'],'172.30.89.1')
+        nets=generate.bridged_subnets('172.30.90.0/24','172.30.91.0/24')
+        self.assertEqual(nets,{'faucet':{'subnet':'172.30.90.0/24','gateway':'172.30.90.1'},'edge':{'subnet':'172.30.91.0/24','gateway':'172.30.91.1'}})
+        cfg=self.topo(subnets=nets)
+        self.assertEqual(cfg['networks']['edge']['ipam']['config'],[{'subnet':'172.30.91.0/24','gateway':'172.30.91.1'}])
+        self.assertEqual(cfg['services']['rpc']['environment']['TRUSTED_PROXY_IP'],'172.30.91.1')
+        self.assertNotIn('172.30.8',json.dumps(cfg))
+        for f,e in (('172.30.90.0/24','172.30.90.0/25'),('8.8.8.0/24','172.30.91.0/24'),('172.30.90.1/24','172.30.91.0/24'),('172.30.0.0/8','172.30.91.0/24'),('fd00::/64','172.30.91.0/24'),('x','172.30.91.0/24')):
+            with self.assertRaises(ValueError,msg=(f,e)): generate.bridged_subnets(f,e)
+    def test_subnet_preflight_names_the_conflict(self):
+        nets=generate.bridged_subnets()
+        existing={'tn-old_faucet':['172.30.88.0/24'],'bridge':['172.17.0.0/16'],'tn-old_validators':['172.30.0.0/16','fd00::/64'],'none':[]}
+        self.assertEqual(generate.subnet_conflicts(nets,existing),[('faucet','tn-old_faucet','172.30.88.0/24'),('faucet','tn-old_validators','172.30.0.0/16'),('edge','tn-old_validators','172.30.0.0/16')])
+        self.assertEqual(generate.subnet_conflicts(generate.bridged_subnets('10.250.1.0/24','10.250.2.0/24'),existing),[])
+        with patch.object(generate.subprocess,'check_output',side_effect=['a b\n',json.dumps([{'Name':'x','IPAM':{'Config':[{'Subnet':'172.30.88.0/24','Gateway':'172.30.88.1'}]}},{'Name':'host','IPAM':{'Config':None}}])]):
+            self.assertEqual(generate.docker_subnets(),{'x':['172.30.88.0/24'],'host':[]})
+    def test_the_generator_refuses_bad_faucet_and_subnet_options_before_any_key(self):
+        base=[sys.executable,str(Path(__file__).parent/'generate.py'),'--out','/nonexistent/tn-x','--validators','4','--ubft','x','--keygen','x','--b1genesis','x','--images','x','--captcha-sitekey','a','--captcha-secret-file','x','--first-generation']
+        for extra,want in ((['--faucet-payout','0'],'--faucet-payout'),(['--faucet-balance','100'],'--faucet-balance'),(['--funder-balance','0'],'--funder-balance'),(['--funder-balance','1e3'],'--funder-balance'),(['--faucet-subnet','172.30.89.0/24'],'overlap'),(['--edge-subnet','8.8.8.0/24'],'--edge-subnet')):
+            done=subprocess.run(base+extra,text=True,capture_output=True)
+            self.assertEqual(done.returncode,2,extra); self.assertIn(want,done.stderr)
+    def generation(self,tmp):
+        gen=Path(tmp)/'tn-pos-staging-x'; (gen/'bridge/public').mkdir(parents=True)
+        (gen/'compose.yaml').write_text(json.dumps(self.topo()))
+        # a generation of the removed protocol 6/7 bridge: its overlay and tester files are not published any more (#1139)
+        (gen/'compose.bridge.yaml').write_text(json.dumps({'services':{'lockproof':{'ports':['127.0.0.1:8090:8090']}}}))
+        (gen/'bridge/public/tester-config.json').write_text(json.dumps({'ethUrl':'http://rpc:8545','lockProofUrl':'http://lockproof:8090'}))
+        return gen
+    def test_public_routes(self):
+        import public_routes
         with tempfile.TemporaryDirectory() as tmp:
-            ok,s,_=self.run_load(bl,tmp,self.fake(tmp,fail='redeem',held=bl.TESTER_LOCK_WEI))
-            self.assertFalse(ok,'a failed cycle fails the run')
-            self.assertEqual(s['vault'],{'heldAfterRun':bl.TESTER_LOCK_WEI,'lockedByFailedCycles':bl.TESTER_LOCK_WEI})
-            self.assertEqual(len(list((Path(tmp)/'bridge').glob('load-*-w1-c1'))),1,'the failed wallet is kept')
-    def test_vault_mismatch_fails_a_clean_run(self):
-        bl=self.module()
+            gen=self.generation(tmp)
+            with patch('builtins.print') as printed:
+                public_routes.main([str(gen),'--hostname','pos.staging.unicity.network'])
+            self.assertIn('/release/', json.loads(printed.call_args.args[0])['routes'])
+            routes=(gen/'public/nginx/routes.conf').read_text(); zones=(gen/'public/nginx/zones.conf').read_text()
+            for loc in ('location = /rpc ','location = /aggregator ','location = /api/v1/trustbases ','location /faucet/ ','location = /api/network ','location = /api/claim ',
+                        'location /demo/ ', 'location /release/ '):
+                self.assertIn(loc,routes)
+            self.assertIn('proxy_pass http://127.0.0.1:8545/;',routes); self.assertIn('proxy_pass http://127.0.0.1:8088/;',routes)
+            self.assertIn('alias /var/www/pos-staging/demo/;',routes)
+            self.assertIn('alias /var/www/pos-staging/release/;\n    autoindex off;\n    disable_symlinks on;',routes)
+            self.assertNotIn('lockproof',routes+zones); self.assertNotIn('/bridge/',routes); self.assertFalse((gen/'public/bridge').exists())
+            self.assertEqual(routes.count('{'),routes.count('}'))
+            # a wallet page's parallel burst (2026-11-26): /rpc 32 open and burst 60, the other routes on the shared zones 16 and burst 60
+            def location(name): return routes[routes.index(name):].split('\n}\n',1)[0]
+            self.assertIn('limit_conn tn_conn 32;\n    limit_req zone=tn_rpc burst=60 nodelay;',location('location = /rpc '))
+            for loc in ('location = /aggregator ','location = /api/v1/trustbases ','location /release/ '):
+                self.assertIn('limit_conn tn_conn 16;\n    limit_req zone=tn_agg burst=60 nodelay;',location(loc),loc)
+            self.assertEqual(routes.count('limit_conn tn_conn'),4)
+            self.assertIn('zone=tn_rpc:10m rate=20r/s;',zones); self.assertIn('zone=tn_agg:10m rate=20r/s;',zones)
+            for zone in set(re.findall(r'zone=(\w+)',routes))|set(re.findall(r'limit_conn (\w+)',routes)):
+                self.assertIn(f'zone={zone}:',zones)
+            with self.assertRaises(SystemExit), patch('sys.stderr'): public_routes.main([str(gen),'--hostname','pos.staging.unicity.network'])   # never overwrites
+    def test_release_stages_only_manifest_regular_files(self):
+        import hashlib
+        import public_routes
         with tempfile.TemporaryDirectory() as tmp:
-            ok,s,_=self.run_load(bl,tmp,self.fake(tmp,held=1))
-            self.assertEqual(s['failedCycles'],0)
-            self.assertFalse(ok,'the vault must hold exactly the locks of the failed cycles')
-    def test_no_round_trip_fails_the_run(self):
-        bl=self.module()
+            base = Path(tmp)
+            source = base / 'source'
+            (source / 'seed').mkdir(parents=True)
+            (source / 'seed/manifest.json').write_bytes(b'{}')
+            (source / 'private').write_bytes(b'not public')
+            digest = hashlib.sha256(b'{}').hexdigest()
+            sums = source / 'SHA256SUMS'
+            sums.write_text(f'{digest}  seed/manifest.json\n')
+            previous = os.umask(0o077)
+            try:
+                public_routes.stage_release(source, base / 'staged')
+            finally:
+                os.umask(previous)
+            self.assertEqual((base / 'staged/seed/manifest.json').read_bytes(), b'{}')
+            self.assertEqual((base / 'staged/SHA256SUMS').read_text(), sums.read_text())
+            self.assertFalse((base / 'staged/private').exists())
+            for directory in ('staged', 'staged/seed'):
+                self.assertEqual((base / directory).stat().st_mode & 0o777, 0o755)
+            for file in ('staged/SHA256SUMS', 'staged/seed/manifest.json'):
+                self.assertEqual((base / file).stat().st_mode & 0o777, 0o644)
+            (source / 'link').symlink_to('seed', target_is_directory=True)
+            (source / 'file-link').symlink_to('seed/manifest.json')
+            for path in ('../source/seed/manifest.json', 'link/manifest.json', 'file-link', 'seed', 'private'):
+                with self.subTest(path=path):
+                    sums.write_text(f'{digest}  {path}\n')
+                    with self.assertRaises((ValueError, OSError)):
+                        public_routes.stage_release(source, base / 'rejected')
+                    self.assertFalse((base / 'rejected').exists())
+    def test_public_routes_retries_after_failed_release_under_restrictive_umask(self):
+        import hashlib
+        import public_routes
         with tempfile.TemporaryDirectory() as tmp:
-            out=Path(tmp)/'out';out.mkdir()
-            load=bl.Load(self.fake(tmp,held=0),out,duration=0,interval=60,max_failures=1)
-            self.assertFalse(load.run(1))
-            self.assertEqual(json.loads((out/'summary.json').read_text())['roundTrips'],0)
-    def test_a_crashed_worker_fails_the_run_and_is_counted(self):
-        bl=self.module()
+            gen = self.generation(tmp)
+            source = Path(tmp) / 'source'
+            (source / 'seed').mkdir(parents=True)
+            artifact = b'{}'
+            (source / 'seed/manifest.json').write_bytes(artifact)
+            sums = source / 'SHA256SUMS'
+            sums.write_text(f'{"0" * 64}  seed/manifest.json\n')
+            out = Path(tmp) / 'public'
+            args = [str(gen), '--hostname', 'pos.example.org', '--out', str(out),
+                    '--release-source', str(source)]
+            previous = os.umask(0o077)
+            try:
+                with self.assertRaises(SystemExit), patch('sys.stderr') as err:
+                    public_routes.main(args)
+                self.assertIn('checksum mismatch', ''.join(call.args[0] for call in err.write.call_args_list))
+                self.assertFalse(out.exists())
+                sums.write_text(f'{hashlib.sha256(artifact).hexdigest()}  seed/manifest.json\n')
+                with patch('builtins.print'):
+                    public_routes.main(args)
+            finally:
+                os.umask(previous)
+            for name in ('.', 'release', 'release/seed'):
+                self.assertEqual((out / name).stat().st_mode & 0o777, 0o755, name)
+            for name in ('release/SHA256SUMS', 'release/seed/manifest.json'):
+                self.assertEqual((out / name).stat().st_mode & 0o777, 0o644, name)
+            self.assertTrue((out / 'nginx/routes.conf').is_file())
+
+    def test_public_routes_web_root_and_bad_input(self):
+        import public_routes
         with tempfile.TemporaryDirectory() as tmp:
-            out=Path(tmp)/'out';out.mkdir()
-            load=bl.Load(self.fake(tmp,held=0),out,duration=60,interval=60,max_failures=1)
-            with patch.object(bl.shutil,'rmtree',side_effect=OSError('busy')):
-                self.assertFalse(load.run(2),'each worker completed a claim, then crashed: its round trip does not hide the crash')
-            self.assertEqual(json.loads((out/'summary.json').read_text())['workerCrashes'],2)
-    def test_a_kept_wallet_does_not_collide_with_a_later_run(self):
-        bl=self.module()
+            gen=self.generation(tmp)
+            with patch('builtins.print'): public_routes.main([str(gen),'--hostname','pos.example.org','--web-root','/srv/www/'])
+            routes=(gen/'public/nginx/routes.conf').read_text()
+            self.assertIn('alias /srv/www/demo/;',routes)
+            self.assertIn('alias /srv/www/release/;',routes)
+            for args in (['--hostname','Pos.Example.org'],['--hostname','x;y'],['--hostname','a.org','--web-root','rel/dir'],['--hostname','a.org','--web-root','/a b'],['--hostname','a.org','--web-root','/a/../b']):
+                with self.assertRaises(SystemExit,msg=args), patch('sys.stderr'): public_routes.main([str(gen),*args,'--out',str(Path(tmp)/'o')])
+            bad=json.loads((gen/'compose.yaml').read_text()); bad['services']['rpc']['ports']=['0.0.0.0:8545:8545']
+            with self.assertRaises(SystemExit): public_routes.loopback_port(bad,'rpc',8545)
+class RootCpus(unittest.TestCase):
+    """The roots' CPU quota (staging slowdown, 2026-11-13): 2 by default, an option, and the only service it changes."""
+    def topo(self,**kw):
+        images={'node':'sha256:'+'1'*64,'rpc':'sha256:'+'2'*64,'guard':'sha256:'+'3'*64,'signer':'sha256:'+'4'*64}
+        with tempfile.TemporaryDirectory() as d:
+            return generate.topology(Path(d),4,{'root':['r%d'%i for i in range(4)],'evm':['e%d'%i for i in range(4)]},images,'captcha',**kw)
+    def test_roots_get_two_cpus_by_default_and_the_option(self):
+        base,custom=self.topo(),self.topo(root_cpus=3.5)
+        for i in range(1,5):
+            self.assertEqual(base['services'][f'root{i}']['cpus'],2.0)
+            self.assertEqual(custom['services'][f'root{i}']['cpus'],3.5)
+        for name,svc in base['services'].items():
+            if not name.startswith('root'): self.assertEqual(svc['cpus'],custom['services'][name]['cpus'],name)
+        self.assertEqual(base['services']['shard1']['cpus'],1.5)
+    def test_the_generator_refuses_an_out_of_range_quota_before_any_key(self):
+        for bad in ('0.1','9'):
+            done=subprocess.run([sys.executable,str(Path(__file__).parent/'generate.py'),'--out','/nonexistent/tn-x','--validators','4','--ubft','x','--keygen','x','--b1genesis','x',
+                '--images','x','--captcha-sitekey','a','--captcha-secret-file','x','--first-generation','--root-cpus',bad],text=True,capture_output=True)
+            self.assertEqual(done.returncode,2,bad); self.assertIn('--root-cpus',done.stderr)
+
+
+
+class PosInstallAfterAnInProcessSwitch(unittest.TestCase):
+    """bft-core#1086: the rehearsal's pos-install restarts only the roots that did not switch into the epoch in process, after the check that each of those holds
+    no certificate of the epoch; a switched root (q3/status: the switch published Running or Following in it) is installed and is neither checked nor restarted."""
+
+    class Stop(Exception):
+        pass
+
+    def run_install(self, statuses, signers):
+        import rehearse
+        gen = Path(tempfile.mkdtemp())
+        (gen / 'network' / 'handoff').mkdir(parents=True)
+        (gen / 'network' / 'handoff' / 'v3-body-id.txt').write_text('ab' * 32)
+        asked, restarted = [], []
+
+        class Transport:
+            def post(self, i, path, body):
+                if path == '/api/v1/q3/status':
+                    s = statuses[i]
+                    return (503, b'') if s is None else (200, json.dumps(s).encode())
+                asked.append(i)
+                return (200, json.dumps({'epoch': signers[i]}).encode())
+
+        class Fake(rehearse.Rehearsal):
+            def __init__(self):
+                self.n, self.gen, self.target, self.joiners = len(statuses), gen, 2, set()
+            def say(self, *a): pass
+            def expect(self, ok, what, detail=''):
+                if not ok: raise rehearse.Failure(what)
+
+        def run(cmd, **k):
+            if 'stop' in cmd:
+                restarted.append(cmd[-1])
+                raise self.Stop()   # the restarts are not under test
+            return unittest.mock.Mock(returncode=0, stderr='', stdout='')
+        with unittest.mock.patch.object(handoff_ops, 'DockerTransport', lambda gen: Transport()), \
+                unittest.mock.patch.object(handoff_ops, 'load_compose', return_value={'services': {}}), \
+                unittest.mock.patch.object(handoff_ops, 'compose_files', return_value=[]), \
+                unittest.mock.patch.object(handoff, 'install_override', return_value={}), \
+                unittest.mock.patch.object(handoff, 'SWITCH_WAIT_SECONDS', 0), unittest.mock.patch('subprocess.run', side_effect=run):
+            try:
+                Fake().pos_install()
+            except self.Stop:
+                pass
+        return asked, restarted
+
+    def test_switched_roots_are_not_restarted(self):
+        published = {'activeEpoch': 2, 'switch': {'phase': 'running', 'epoch': 2, 'target': 2}}
+        statuses = {1: published, 2: published, 3: published, 4: {'activeEpoch': 1, 'switch': {'phase': 'running', 'epoch': 1, 'declined': 2}}}
+        asked, restarted = self.run_install(statuses, {1: None, 2: None, 3: None, 4: 1})
+        self.assertEqual(asked, [4], 'only the root to restart is checked for a certificate of the epoch (a switched one answers 422)')
+        self.assertEqual(restarted, ['root4'])
+
+    def test_an_older_image_or_a_faulted_switch_is_restarted_after_the_check(self):
+        import rehearse
+        statuses = {1: {'activeEpoch': 1}, 2: {'activeEpoch': 2, 'switch': {'phase': 'faulted', 'epoch': 1, 'target': 2}}}
+        asked, restarted = self.run_install(statuses, {1: 1, 2: 1})
+        self.assertEqual(asked, [1, 2])
+        self.assertEqual(restarted, ['root1'])
+        with self.assertRaises(rehearse.Failure):
+            self.run_install({1: {'activeEpoch': 1}}, {1: 2})   # a certificate of the epoch before the restart: the barrier fails
+
+
+
+class PosTooLateAfterAnInProcessSwitch(unittest.TestCase):
+    """bft-core#1095: pos-too-late after the commit. A root that switched into the epoch at its commit certifies it and the Abort does not move it; a root that did not
+    switch still certifies the old epoch, before and after; a root read mid-switch is not taken for either."""
+
+    def run_too_late(self, statuses, signers, after_signers=None):
+        import rehearse
+        gen = Path(tempfile.mkdtemp())
+        phase = {'after': False}
+
+        class Transport:
+            def post(self, i, path, body):
+                if path == '/api/v1/q3/status':
+                    s = statuses[i]
+                    if isinstance(s, list):   # answers in turn, the last one repeating
+                        s = s.pop(0) if len(s) > 1 else s[0]
+                    return (503, b'') if s is None else (200, json.dumps(s).encode())
+                epochs = after_signers if (phase['after'] and after_signers) else signers
+                return (422, b'{}') if epochs[i] is None else (200, json.dumps({'epoch': epochs[i]}).encode())
+
+        class Fake(rehearse.Rehearsal):
+            def __init__(self):
+                self.n, self.gen, self.target, self.joiners = len(statuses), gen, 2, set()
+                self.committed_target = {'network': 3, 'oldEpoch': 1, 'predecessorBodyId': '0x' + '11' * 32, 'attempt': 1, 'nextBodyId': '0x' + '22' * 32}
+            def say(self, *a): pass
+            def evh(self): return gen
+            def keep_redacted(self, path, text): path.write_text(text)
+            def expect(self, ok, what, detail=''):
+                if not ok: raise rehearse.Failure(f'{what}: {detail}')
+
+        out = ''.join(f'entity {i}: exit 1\ntoo late: matching handoff H is committed as record 0xab at round 7; Abort was not ordered\n' for i in statuses)
+
+        def run(cmd, **k):
+            phase['after'] = True
+            return unittest.mock.Mock(returncode=1, stdout=out, stderr='')
+        with unittest.mock.patch.object(handoff_ops, 'DockerTransport', lambda gen: Transport()), \
+                unittest.mock.patch.object(handoff, 'SWITCH_WAIT_SECONDS', 0), unittest.mock.patch('subprocess.run', side_effect=run), \
+                unittest.mock.patch.object(rehearse.time, 'sleep'):
+            Fake().pos_too_late()
+
+    published = {'activeEpoch': 2, 'switch': {'phase': 'running', 'epoch': 2, 'target': 2}}
+
+    def test_every_root_switched_at_the_commit(self):
+        self.run_too_late({i: self.published for i in (1, 2, 3, 4)}, {1: None, 2: None, 3: 2, 4: 2})   # the raw signers mid-switch do not matter
+
+    def test_a_root_that_did_not_switch_stays_in_the_old_epoch(self):
+        import rehearse
+        statuses = {1: {'activeEpoch': 1}, 2: self.published}
+        self.run_too_late(statuses, {1: 1, 2: None})
+        with self.assertRaises(rehearse.Failure):
+            self.run_too_late(statuses, {1: 1, 2: None}, after_signers={1: 2, 2: None})   # it moved during the Abort
+        with self.assertRaises(rehearse.Failure):
+            self.run_too_late(statuses, {1: 2, 2: None})   # it had installed the epoch without a switch
+
+    def test_a_restarted_root_is_not_taken_for_a_switched_one(self):
+        import rehearse
+        restarted = {'activeEpoch': 2, 'switch': {'phase': 'running', 'epoch': 2}}   # Running in the epoch with no switch target: installed by a restart
+        with self.assertRaises(rehearse.Failure) as raised:
+            self.run_too_late({1: restarted, 2: self.published}, {1: 2, 2: None})
+        self.assertIn('installed nothing', str(raised.exception), 'it gets the certificate check, which a root already in the epoch fails')
+
+    def test_a_switched_root_that_stops_answering_fails(self):
+        import rehearse
+        # the first two answers are switched_roots' (handoff.awaits_switch, then handoff.switched_in_process): the root has switched; then it stops answering
+        for name, answers in (('unavailable before and after', [self.published, self.published, None]),
+                              ('unavailable before, good after', [self.published, self.published] + [None] * 10 + [self.published])):
+            with self.assertRaises(rehearse.Failure, msg=name) as raised:
+                self.run_too_late({1: list(answers), 2: self.published}, {1: None, 2: None})
+            self.assertIn('reports its switch into epoch 2 published', str(raised.exception), name)
+
+
+class RootKeyIsolation(unittest.TestCase):
+    """#1297 (astra): a root key signs one root history only. A generation records its root keys and publishes the retired ones of the earlier
+    histories it was generated against; generation, joiners, enrollment and rotation refuse a retired key."""
+    K1 = '0x02' + '11' * 32
+    K2 = '0x03' + '22' * 32
+    K3 = '0x02' + '33' * 32
+
+    def generation(self, tmp, name, keys, published=()):
+        g = Path(tmp) / name
+        (g / 'network').mkdir(parents=True)
+        (g / 'manifest.json').write_text(json.dumps({'generation': name, 'root_signing_keys': root_keys.manifest_entries([f'n{i}' for i in range(len(keys))], keys)}))
+        root_keys.write(g / 'network', set(published))
+        return g
+
+    def test_the_key_hash_is_custody_s_root_key_hash(self):
+        import evm_keys
+        self.assertEqual(root_keys.key_hash(self.K1), '0x' + evm_keys.keccak256(bytes.fromhex(self.K1[2:])).hex())
+        with self.assertRaises(ValueError):
+            root_keys.key_hash('0x04' + '11' * 32)
+
+    def test_prior_generations_name_their_keys_and_their_published_lists(self):
         with tempfile.TemporaryDirectory() as tmp:
-            fake=self.fake(tmp,fail='redeem',held=bl.TESTER_LOCK_WEI)
-            out=Path(tmp)/'out';out.mkdir()
-            self.assertFalse(bl.Load(fake,out,duration=0.05,interval=60,max_failures=1).run(1))
-            fake.fail=None;fake.reads=0;fake.held=0
-            again=Path(tmp)/'again';again.mkdir()
-            self.assertTrue(bl.Load(fake,again,duration=0.05,interval=60,max_failures=1).run(1),'the second run finds the first run\'s wallet there')
-    def test_a_wallet_that_cannot_be_made_is_a_failed_cycle(self):
-        bl=self.module()
+            old = self.generation(tmp, 'tn-1', [self.K1], published=[root_keys.key_hash(self.K3)])
+            want = {root_keys.key_hash(self.K1), root_keys.key_hash(self.K3)}
+            self.assertEqual(root_keys.load(old), want)
+            self.assertEqual(root_keys.load(old / 'manifest.json'), want)
+            self.assertEqual(root_keys.load(old / 'network' / root_keys.FILE), {root_keys.key_hash(self.K3)})
+            root_keys.check_fresh([self.K2], want, 'generate')
+            with self.assertRaises(root_keys.RetiredKeyError) as e:
+                root_keys.check_fresh([self.K2, self.K3], want, 'generate')
+            self.assertIn(root_keys.key_hash(self.K3), str(e.exception))
+            # a manifest from before the list (no root keys) is refused, never read as "nothing retired"
+            keyless = Path(tmp) / 'keyless.json'
+            keyless.write_text(json.dumps({'generation': 'tn-0'}))
+            with self.assertRaises(root_keys.RetiredKeyError):
+                root_keys.load(keyless)
+
+    def test_joiners_refuse_a_retired_or_genesis_key(self):
         with tempfile.TemporaryDirectory() as tmp:
-            out=Path(tmp)/'out';out.mkdir()
-            load=bl.Load(self.fake(tmp,held=0),out,duration=60,interval=60,max_failures=1)
-            with patch.object(bl.Path,'mkdir',side_effect=OSError('no space')):
-                self.assertFalse(load.run(1))
-            summary=json.loads((out/'summary.json').read_text())
-            self.assertEqual((summary['failedCycles'],summary['workerCrashes']),(1,0))
-    def test_unparseable_stats_row_loses_only_that_row(self):
-        bl=self.module()
+            gen = self.generation(tmp, 'tn-2', [self.K2], published=[root_keys.key_hash(self.K1)])
+            root_keys.check_generation(gen, self.K3, 'joiner')
+            for key in (self.K1, self.K2):
+                with self.assertRaises(root_keys.RetiredKeyError):
+                    root_keys.check_generation(gen, key, 'joiner')
+            self.assertEqual(root_keys.published(Path(tmp) / 'none'), set())
+
+    def history(self, tmp, epochs):
+        h = Path(tmp) / 'prior-utb-keys.json'
+        h.write_text(json.dumps({'format': root_keys.HISTORY_FORMAT, 'networkId': 3, 'genesisId': '0x' + '00' * 32, 'tipId': '0x' + '00' * 32,
+                                 'epochs': [{'epoch': e, 'keys': keys} for e, keys in epochs]}))
+        return h
+
+    def test_keys_that_joined_or_rotated_during_the_prior_generation_are_retired_by_default(self):
+        """Generation k: genesis K1, K2; epoch 3 rotates K1 to K3; epoch 4 a joiner with K4. Its manifest names only K1, K2. Generation k+1 is generated
+        against k's verified UTB history: K3 and K4 are refused by generate, by the joiner tooling, and land in the shipped list `ubft validator`
+        apply/rotate read by default."""
+        K4 = '0x03' + '44' * 32
         with tempfile.TemporaryDirectory() as tmp:
-            fake=self.fake(tmp,held=0)
-            fake.bridge_compose=lambda *a:'id1 id2'
-            good=json.dumps({'Name':'good','MemUsage':'1MiB / 1GiB','CPUPerc':'1.00%'})
-            bad=json.dumps({'Name':'bad','MemUsage':'-- / --','CPUPerc':'--'})
-            out=Path(tmp)/'out';out.mkdir()
-            load=bl.Load(fake,out,duration=0,interval=60,max_failures=1)
-            with patch.object(bl.subprocess,'run',return_value=subprocess.CompletedProcess([],0,stdout=good+'\n'+bad+'\n')):
-                load.sample_once()
-            load.cycles_file.close();load.samples_file.close()
-            self.assertEqual(list(load.samples[0]['containers']),['good'])
-    def test_a_failed_address_derivation_names_no_key(self):
-        bl=self.module()
+            prior = self.generation(tmp, 'tn-k', [self.K1, self.K2])
+            hist = self.history(tmp, [(1, [self.K1, self.K2]), (2, [self.K1, self.K2]), (3, [self.K3, self.K2]), (4, [self.K3, self.K2, K4])])
+            self.assertTrue(root_keys.is_history(hist))
+            self.assertFalse(root_keys.is_history(prior / 'manifest.json'))
+            self.assertEqual(root_keys.load(prior), {root_keys.key_hash(self.K1), root_keys.key_hash(self.K2)}, 'the manifest alone misses later keys')
+            retired = root_keys.load(hist) | root_keys.load(prior)
+            for key in (self.K3, K4):
+                with self.assertRaises(root_keys.RetiredKeyError):
+                    root_keys.check_fresh([key], retired, 'generate')
+            nxt = self.generation(tmp, 'tn-k1', ['0x02' + '55' * 32], published=retired)
+            for key in (self.K3, K4):
+                with self.assertRaises(root_keys.RetiredKeyError):
+                    root_keys.check_generation(nxt, key, 'joiner')
+            # the release ships network/retired-root-keys.json as release/retired-root-keys.json: the list `ubft validator` reads by default
+            self.assertTrue({root_keys.key_hash(self.K3), root_keys.key_hash(K4)} <= root_keys.read_list(nxt / 'network' / root_keys.FILE))
+            with self.assertRaises(root_keys.RetiredKeyError):
+                root_keys.load(self.history(tmp, [(1, [])]))
+
+    def test_generate_needs_the_prior_history_or_an_explicit_first_generation(self):
         with tempfile.TemporaryDirectory() as tmp:
-            fake=self.fake(tmp,held=0)
-            key='0x'+'c'*64
-            def boom(*a): raise subprocess.CalledProcessError(1,['cast',*a])
-            fake.cast_run=boom
-            out=Path(tmp)/'out';out.mkdir()
-            load=bl.Load(fake,out,duration=0,interval=60,max_failures=1)
-            with patch.object(bl.secrets,'token_hex',side_effect=lambda n:'c'*(2*n)):
-                with self.assertRaises(RuntimeError) as caught: load.run(1)
-            self.assertNotIn(key,str(caught.exception))
-            self.assertIsNone(caught.exception.__cause__,'a chained cause prints the command line, key included')
-            self.assertTrue(caught.exception.__suppress_context__)
-            self.assertEqual([p for p in (Path(tmp)/'bridge').iterdir()],[],'the key file is removed')
-            for f in out.iterdir(): self.assertNotIn(key,f.read_text())
-    def test_a_failed_step_records_the_testers_reason(self):
-        bl=self.module()
-        with tempfile.TemporaryDirectory() as tmp:
-            ok,s,out=self.run_load(bl,tmp,self.fake(tmp,fail='redeem',held=bl.TESTER_LOCK_WEI))
-            self.assertFalse(ok)
-            row=json.loads(next(l for l in (out/'cycles.jsonl').read_text().splitlines() if '"ok": false' in l))
-            self.assertIn('get test ether from the faucet',row['error'],'out of funds is the tool\'s budget, not the bridge: the reason must show')
-    def test_workers_are_funded_with_the_configured_amount(self):
-        bl=self.module()
-        with tempfile.TemporaryDirectory() as tmp:
-            fake=self.fake(tmp,held=0)
-            funded=[]
-            fake.faucet_send=lambda to,wei: funded.append(wei)
-            out=Path(tmp)/'out';out.mkdir()
-            bl.Load(fake,out,duration=0.05,interval=60,max_failures=1,funds=123).run(2)
-            self.assertEqual(funded,[123,123])
-            self.assertGreaterEqual(bl.WORKER_FUNDS,14*10**18,'twice the gas of a 20-minute run at M=8')
-            self.assertLessEqual(13*bl.WORKER_FUNDS,1000*10**18,'M=1, 4 and 8 fit one generation\'s faucet')
-    def test_main_passes_funds_to_the_load(self):
-        bl=self.module()
-        seen={}
-        class Spy:
-            def __init__(self,r,out,duration,interval,max_failures,funds): seen['funds']=funds
-            def run(self,workers): return True
-        with tempfile.TemporaryDirectory() as tmp,patch.object(bl,'Load',Spy),patch.object(bl,'BridgeRehearsal',lambda *a: object()),\
-             patch.object(sys,'argv',['bridge_load','--generation',tmp,'--out',tmp+'/o','--funds','123']):
-            self.assertEqual(bl.main(),0)
-        self.assertEqual(seen['funds'],123)
-    def test_the_gas_price_is_sampled_and_summarised(self):
-        bl=self.module()
-        with tempfile.TemporaryDirectory() as tmp:
-            fake=self.fake(tmp,held=0)
-            ok,s,out=self.run_load(bl,tmp,fake)
-            self.assertEqual(s['gasPriceWei']['peak'],7)
-            self.assertEqual(json.loads((out/'samples.jsonl').read_text().splitlines()[0])['gasPrice'],7)
-    def test_worker_stops_after_failures_in_a_row(self):
-        bl=self.module()
-        with tempfile.TemporaryDirectory() as tmp:
-            fake=self.fake(tmp,fail='init',held=0)
-            out=Path(tmp)/'out';out.mkdir()
-            load=bl.Load(fake,out,duration=60,interval=60,max_failures=3)
-            self.assertFalse(load.run(1))
-            self.assertEqual(fake.calls,['init']*3)
+            base = [sys.executable, str(generate.HERE / 'generate.py'), '--out', '/nonexistent/tn-x', '--validators', '4', '--ubft', 'x', '--keygen', 'x',
+                    '--b1genesis', 'x', '--images', str(Path(tmp) / 'no-images.json'), '--captcha-sitekey', 'a', '--captcha-secret-file', 'x']
+            prior = self.generation(tmp, 'tn-k', [self.K1])
+            hist = self.history(tmp, [(1, [self.K1])])
+            for extra, want in (([], 'needs the prior generation'), (['--prior-generation', str(prior)], 'needs the prior generation'),
+                                (['--first-generation', '--prior-generation', str(hist)], 'contradict')):
+                done = subprocess.run(base + extra, text=True, capture_output=True)
+                self.assertEqual(done.returncode, 2, extra)
+                self.assertIn(want, done.stderr, extra)
+            for extra in (['--first-generation'], ['--prior-generation', str(hist), '--prior-generation', str(prior)]):
+                done = subprocess.run(base + extra, text=True, capture_output=True)
+                self.assertNotIn('prior generation', done.stderr, extra)   # past the inventory check (it fails later, on the missing image records)
+
+    def test_the_generator_reads_the_prior_histories_before_any_key_and_records_and_publishes(self):
+        source = (generate.HERE / 'generate.py').read_text().split('def main')[1]
+        self.assertLess(source.index('retired|=root_keys.load(prior)'), source.index("'init','--home'"))
+        self.assertLess(source.index("root_keys.check_fresh(root_signing,retired,'generate')"), source.index("cli('trust-base','generate'"))
+        self.assertIn("root_keys.write(out/'network',retired)", source)
+        self.assertIn("'root_signing_keys':root_keys.manifest_entries(roots,root_signing)", source)
+        for name in ('joiner.py', 'pos_join.py', 'remote_joiner.py'):
+            self.assertIn('root_keys.check_', (generate.HERE / name).read_text(), name)
 
 if __name__=='__main__': unittest.main()

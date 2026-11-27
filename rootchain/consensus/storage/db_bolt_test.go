@@ -462,6 +462,8 @@ func Test_BoltDB_VoteMsg(t *testing.T) {
 		require.NoError(t, db.WriteVote(voteTO))
 		msg, err = db.ReadLastVote()
 		require.NoError(t, err)
+		_, decoded := msg.(*abdrc.TimeoutMsg).TakeWireDigest() // the digest of the stored bytes it was decoded from is not part of its value
+		require.True(t, decoded)
 		require.Equal(t, voteTO, msg)
 	})
 }
@@ -745,4 +747,47 @@ func TestHandoffCheckpointSurvivesRestartAndKeepsTheFirstCopy(t *testing.T) {
 	other, err := db.HandoffCheckpoint(3)
 	require.NoError(t, err)
 	require.Empty(t, other)
+}
+
+// LastTCRound answers what ReadLastTC().GetRound() answers through every change of the stored certificate: written, overwritten by an older
+// or a newer one, written through another copy of the store value (they share the memo) and deleted; it decodes only when the stored bytes
+// changed (#982).
+func Test_BoltDB_LastTCRoundFollowsTheStoredCertificate(t *testing.T) {
+	db, err := NewBoltStorage(filepath.Join(t.TempDir(), "last_tc.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+	check := func(want uint64, stored bool) {
+		t.Helper()
+		round, ok, err := db.LastTCRound()
+		require.NoError(t, err)
+		require.Equal(t, stored, ok)
+		require.Equal(t, want, round)
+		tc, err := db.ReadLastTC()
+		require.NoError(t, err)
+		require.Equal(t, stored, tc != nil)
+		require.Equal(t, want, tc.GetRound())
+	}
+	check(0, false)
+	tc := func(round uint64) *rctypes.TimeoutCert {
+		return &rctypes.TimeoutCert{Timeout: rctypes.NewTimeout(round, rctypes.GenesisRootEpoch, &rctypes.QuorumCert{})}
+	}
+	require.NoError(t, db.WriteTC(tc(7)))
+	check(7, true)
+	check(7, true) // from the memo
+	require.NoError(t, db.WriteTC(tc(5)))
+	check(5, true)
+	copied := db
+	require.NoError(t, copied.WriteTC(tc(9)))
+	check(9, true)
+	require.NoError(t, db.db.Update(func(tx *bbolt.Tx) error { return tx.Bucket(bucketCertificates).Delete(keyTimeoutCert) }))
+	check(0, false)
+	require.NoError(t, db.WriteTC(tc(9)))
+	check(9, true)
+
+	// a store value without the memo (not opened by NewBoltStorage) decodes every time and answers the same
+	bare := BoltDB{db: db.db}
+	round, ok, err := bare.LastTCRound()
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.EqualValues(t, 9, round)
 }

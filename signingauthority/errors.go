@@ -14,6 +14,18 @@ var (
 	// that one message for its own key, never anything a caller labels differently.
 	ErrPoPDomain = errors.New("signing-pop-domain-mismatch")
 
+	// ErrRegistrationDomain is a registration-signing request that names neither VR domain (unicity.vr.register, unicity.vr.binding), or
+	// one whose identity id contradicts its domain: the authority signs exactly the two registration digests for its own key.
+	ErrRegistrationDomain = errors.New("signing-registration-domain-mismatch")
+
+	// ErrRegistrationUnauthorized is a registration request the operator has not authorized: no registration policy at this authority, or
+	// an action, owner, identity, root binding or payee that no entry of the policy names.
+	ErrRegistrationUnauthorized = errors.New("signing-registration-unauthorized")
+
+	// ErrRegistrationDeployment is a policy reload made for another VR deployment (network, chain id or registry) than the one this
+	// authority pinned at startup: a staging policy file is not applied to a production authority.
+	ErrRegistrationDeployment = errors.New("signing-registration-deployment-mismatch")
+
 	// ErrUnauthenticated is a request whose certificate, seal quorum, inclusion paths or bound
 	// TechnicalRecord do not verify against the authority's own trust.
 	ErrUnauthenticated = errors.New("signing-unauthenticated-input")
@@ -95,3 +107,15 @@ var (
 
 // ErrNoHashSigner is an authority whose key cannot sign a 32-byte digest: the EVM possession proofs need the key's raw ECDSA over a keccak digest.
 var ErrNoHashSigner = errors.New("signing-key-cannot-sign-a-digest")
+
+// Errors of the proof-verified advance (#1085).
+var (
+	// ErrRetired is an authority excluded from the installed assignment and fenced from signing and issuing sessions.
+	ErrRetired = errors.New("signing-retired")
+	// ErrRecoveryOnly is the operator-trusted advance asked of an authority that verifies its own lineage, without the recovery policy.
+	ErrRecoveryOnly = errors.New("signing-advance-recovery-only")
+	// ErrLineageUnverified is an activation proof the authority could not verify from its own pin and tip.
+	ErrLineageUnverified = errors.New("signing-lineage-unverified")
+	// ErrAdvanceBusy is a proof advance asked while another is being verified.
+	ErrAdvanceBusy = errors.New("signing-advance-busy")
+)

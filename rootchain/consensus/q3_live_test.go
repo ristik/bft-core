@@ -39,17 +39,33 @@ type q3Live struct {
 	lostSig  map[observedKey][]byte // and its signature
 	cancel   map[int]context.CancelFunc
 	done     map[int]chan error
+	// tap, when set, sees every message the network delivers (#1086)
+	tap atomic.Pointer[func(from peer.ID, msg any)]
 }
 
 func newQ3Live(t *testing.T) *q3Live {
 	t.Helper()
-	f := q3fixture.New(t, q3fixture.Options{Assignment: true})
+	return newQ3LiveWith(t, q3fixture.Options{Assignment: true}, nil)
+}
+
+// newQ3LiveWith is newQ3Live over a fixture of the given options; prepare, when set, configures each replica before it is opened.
+func newQ3LiveWith(t *testing.T, o q3fixture.Options, prepare func(int, *q3Replica)) *q3Live {
+	t.Helper()
+	return newQ3LiveFrom(t, q3fixture.New(t, o), prepare)
+}
+
+// newQ3LiveFrom is newQ3LiveWith over a given fixture.
+func newQ3LiveFrom(t *testing.T, f *q3fixture.Fixture, prepare func(int, *q3Replica)) *q3Live {
+	t.Helper()
 	c := &q3Live{t: t, f: f, net: newSkewedNet(t), observed: map[observedKey]map[string]struct{}{}, lost: map[observedKey]string{}, lostSig: map[observedKey][]byte{},
 		cancel: map[int]context.CancelFunc{}, done: map[int]chan error{}}
 	c.cfg = votesig.Config{Scheme: votesig.SchemeDomainBound, Network: q3fixture.Network, Genesis: f.Genesis}
-	for _, n := range f.NewNodes {
+	for i, n := range f.NewNodes {
 		r := newQ3Replica(t, f, n)
 		r.link, r.durable = c.net.connect(n.PeerConf.ID), true
+		if prepare != nil {
+			prepare(i, r)
+		}
 		r.mustOpen(true)
 		t.Cleanup(r.close)
 		c.replicas = append(c.replicas, r)
@@ -69,6 +85,9 @@ func newQ3Live(t *testing.T) *q3Live {
 				c.cutOn.Store("")
 				return true
 			}
+		}
+		if tap := c.tap.Load(); tap != nil {
+			(*tap)(from, msg)
 		}
 		c.observe(msg)
 		return false
@@ -203,7 +222,7 @@ func (c *q3Live) restart(i int) {
 
 func (c *q3Live) committedRound(i int) uint64 {
 	m := c.replicas[i].manager
-	state, err := m.blockStore.GetState()
+	state, err := m.blockStore().GetState()
 	if err != nil {
 		return 0
 	}
@@ -211,7 +230,7 @@ func (c *q3Live) committedRound(i int) uint64 {
 }
 
 func (c *q3Live) highQCRound(i int) uint64 {
-	return c.replicas[i].manager.blockStore.GetHighQc().GetRound()
+	return c.replicas[i].manager.blockStore().GetHighQc().GetRound()
 }
 
 // activate installs the activation in every node and restarts every node, so that the managers are built over the installed epoch
@@ -253,7 +272,7 @@ func TestLiveWeightedEpochHeavyValidatorRestartRebroadcastsItsRecordedTimeout(t 
 	}, 60*time.Second, 50*time.Millisecond, "the four validators commit live in the activated epoch")
 
 	t.Run("the weighted policy and scheme 2 are in force", func(t *testing.T) {
-		qc := heavy.manager.blockStore.GetHighQc()
+		qc := heavy.manager.blockStore().GetHighQc()
 		require.EqualValues(t, 2, qc.VoteInfo.Epoch)
 		require.EqualValues(t, votesig.SchemeDomainBound, qc.Scheme)
 		require.NoError(t, qc.VerifyWith(heavy.trust))
@@ -300,7 +319,7 @@ func TestLiveWeightedEpochHeavyValidatorRestartRebroadcastsItsRecordedTimeout(t 
 	t.Run("the TC is scheme 2, verified under the epoch's weights, and carries the heavy validator's recorded signature", func(t *testing.T) {
 		var tc *rctypes.TimeoutCert
 		require.Eventually(t, func() bool {
-			got, err := c.replicas[2].manager.blockStore.GetLastTC()
+			got, err := c.replicas[2].manager.blockStore().GetLastTC()
 			if err == nil && got != nil && got.Timeout.Round == key.round {
 				tc = got
 			}

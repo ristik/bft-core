@@ -23,9 +23,12 @@ import (
 
 	"github.com/ethereum/go-ethereum/crypto"
 
+	"github.com/unicitynetwork/bft-core/monitoring"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/evmstate"
+	"github.com/unicitynetwork/bft-core/rootchain/vrstate"
+	"github.com/unicitynetwork/bft-core/vrschema"
 )
 
 // Bounds. Every one of them is a cap on work or memory, never a correctness rule.
@@ -63,6 +66,10 @@ type Chain interface {
 	Requests(ctx context.Context, from, to uint64) ([]Request, error)
 }
 
+type finalizedBlockSource interface {
+	finalizedBlockHash(context.Context, [32]byte) ([32]byte, error)
+}
+
 // Proofs returns the eth_getProof source for one EVM block.
 type Proofs func(blockHash [32]byte) evmstate.ProofSource
 
@@ -70,14 +77,15 @@ type Proofs func(blockHash [32]byte) evmstate.ProofSource
 type Config struct {
 	Deployment storage.PosDeployment
 	Pins       evmstate.Pins
+	VR         *vrstate.Pins // emits HolderRetirement for the prototype's P85 holder 0
 	Chain      Chain
 	Proofs     Proofs
-	// Build collects a witness (default evmstate.BuildRetirementWitness); a seam for tests.
-	Build     func(ctx context.Context, src evmstate.ProofSource, pins evmstate.Pins, id, generation uint64) ([]byte, storage.RetirementFacts, error)
-	StatePath string // the persisted cursor and request set
-	Poll      time.Duration
-	Log       *slog.Logger
-	Now       func() time.Time
+	// buildLegacy returns an authenticated witness and facts. Tests can supply synthetic facts.
+	buildLegacy func(ctx context.Context, src evmstate.ProofSource, pins evmstate.Pins, stateRoot [32]byte, id, generation uint64) ([]byte, storage.RetirementFacts, error)
+	StatePath   string // the persisted cursor and request set
+	Poll        time.Duration
+	Log         *slog.Logger
+	Now         func() time.Time
 }
 
 type entry struct {
@@ -134,8 +142,8 @@ func New(cfg Config) (*Service, error) {
 	if cfg.Chain == nil || cfg.Proofs == nil || cfg.StatePath == "" {
 		return nil, errors.New("posretire: a chain, a proof source and a state path are required")
 	}
-	if cfg.Build == nil {
-		cfg.Build = evmstate.BuildRetirementWitness
+	if cfg.buildLegacy == nil {
+		cfg.buildLegacy = buildLegacyWitness
 	}
 	if cfg.Poll <= 0 {
 		cfg.Poll = 2 * time.Second
@@ -335,7 +343,7 @@ func (s *Service) Poll(ctx context.Context) error {
 			return fmt.Errorf("posretire: %d requests pending, the set is full", len(s.pending))
 		}
 		s.pending = append(s.pending, pendingItem{Key: r.Key})
-		s.log.Info("retirement requested", "id", r.ID, "generation", r.Generation, "evmBlock", r.Block)
+		s.log.Info("retirement requested", "id", r.ID, "generation", r.Generation, "evmBlock", r.Block, monitoring.Event(monitoring.EvExitRetirementReq))
 	}
 	s.cursor = max(s.cursor, to)
 	s.persistLocked()
@@ -352,31 +360,32 @@ func cmpU(a, b uint64) int {
 	return 0
 }
 
-// blockHashFor returns the EVM block hash proofs for the parent are fetched at: the certified block's, or for a quiet parent (no block hash
-// in the input record) the block that certified the same state root earlier. The control still names the parent's own (zero) hash.
-func (s *Service) blockHashFor(parent storage.EVMParent) ([32]byte, bool) {
-	if parent.BlockHash != ([32]byte{}) {
-		if _, known := s.roots[parent.StateRoot]; !known {
-			if len(s.rootsOrd) >= maxRootBlocks {
-				delete(s.roots, s.rootsOrd[0])
-				s.rootsOrd = s.rootsOrd[1:]
-			}
-			s.roots[parent.StateRoot] = parent.BlockHash
-			s.rootsOrd = append(s.rootsOrd, parent.StateRoot)
-		}
-		return parent.BlockHash, true
+// rememberBlockHash caches proof locations while holding s.mu.
+func (s *Service) rememberBlockHash(root, block [32]byte) {
+	if _, known := s.roots[root]; known {
+		return
 	}
-	h, ok := s.roots[parent.StateRoot]
-	return h, ok
+	if len(s.rootsOrd) >= maxRootBlocks {
+		delete(s.roots, s.rootsOrd[0])
+		s.rootsOrd = s.rootsOrd[1:]
+	}
+	s.roots[root] = block
+	s.rootsOrd = append(s.rootsOrd, root)
 }
 
 // Prepare implements storage.RetirementProposer.
 func (s *Service) Prepare(parent storage.EVMParent) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// always learn the root -> block mapping, even with nothing pending: a later quiet parent carries the same root
-	fetchAt, ok := s.blockHashFor(parent)
-	if len(s.pending) == 0 || !ok {
+	fetchAt := parent.BlockHash
+	if fetchAt != ([32]byte{}) {
+		// Learn the mapping even when nothing is pending.
+		s.rememberBlockHash(parent.StateRoot, fetchAt)
+	} else {
+		fetchAt = s.roots[parent.StateRoot]
+	}
+	finalized, _ := s.cfg.Chain.(finalizedBlockSource)
+	if len(s.pending) == 0 || (fetchAt == ([32]byte{}) && finalized == nil) {
 		return
 	}
 	started := 0
@@ -395,7 +404,7 @@ func (s *Service) Prepare(parent storage.EVMParent) {
 		s.inflight[ck] = struct{}{}
 		started++
 		s.wg.Add(1)
-		go s.collect(ck, fetchAt)
+		go s.collect(ck, fetchAt, finalized)
 	}
 	s.rotate = (s.rotate + started) % max(n, 1)
 }
@@ -405,13 +414,21 @@ func (s *Service) cachedLocked(ck cacheKey) bool {
 }
 
 // collect builds the witness of one request against one parent, off the consensus loop.
-func (s *Service) collect(ck cacheKey, fetchAt [32]byte) {
+func (s *Service) collect(ck cacheKey, fetchAt [32]byte, finalized finalizedBlockSource) {
 	defer s.wg.Done()
 	started := s.cfg.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), ProofBudget)
 	defer cancel()
-	witness, facts, err := s.cfg.Build(ctx, s.cfg.Proofs(fetchAt), s.cfg.Pins, ck.key.ID, ck.key.Generation)
-
+	var witness []byte
+	var facts storage.RetirementFacts
+	var err error
+	lookup := fetchAt == ([32]byte{})
+	if lookup {
+		fetchAt, err = finalized.finalizedBlockHash(ctx, ck.parent.StateRoot)
+	}
+	if err == nil && fetchAt != ([32]byte{}) {
+		witness, facts, err = s.buildWitness(ctx, ck, s.cfg.Proofs(fetchAt))
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.inflight, ck)
@@ -419,6 +436,14 @@ func (s *Service) collect(ck cacheKey, fetchAt [32]byte) {
 	if err != nil {
 		s.log.Warn("retirement proof not collected", "id", ck.key.ID, "generation", ck.key.Generation, "parentRoot", fmt.Sprintf("%x", ck.parent.StateRoot), "error", err)
 		return
+	}
+	if fetchAt == ([32]byte{}) {
+		return // finalized execution does not yet match this parent
+	}
+	if lookup {
+		// Only cache an available proof location. Keep the quiet parent's zero
+		// block hash in the control and cache key.
+		s.rememberBlockHash(ck.parent.StateRoot, fetchAt)
 	}
 	idx := slices.IndexFunc(s.pending, func(p pendingItem) bool { return p.Key == ck.key })
 	if idx < 0 {
@@ -428,7 +453,7 @@ func (s *Service) collect(ck cacheKey, fetchAt [32]byte) {
 	case !facts.NotImported:
 		// the registry retired the generation: complete (a generation only advances after its predecessor was retired, so a superseded
 		// request ends here too)
-		s.log.Info("retirement request complete (the generation is retired in the registry)", "id", ck.key.ID, "generation", ck.key.Generation)
+		s.log.Info("retirement request complete (the generation is retired in the registry)", "id", ck.key.ID, "generation", ck.key.Generation, monitoring.Event(monitoring.EvExitRetirementDone))
 		s.removeLocked(ck.key, true)
 		return
 	case !facts.Requested || !facts.NoLiveExposures || !facts.NoLotReferences || !facts.RecordsCaughtUp:
@@ -452,6 +477,10 @@ func (s *Service) collect(ck cacheKey, fetchAt [32]byte) {
 		Op: rctypes.OpRetirement, Data: data[:], WitnessHash: sha256.Sum256(witness),
 		Retire: &rctypes.RetireContext{EVMBlockHash: ck.parent.BlockHash, EVMStateRoot: ck.parent.StateRoot},
 	}
+	if s.cfg.VR != nil {
+		c.Registry = true
+		c.Data = (vrschema.HolderRetirement{ID: ck.key.ID, Generation: ck.key.Generation, RefDigest: facts.RefDigest}).Encode()
+	}
 	if err := c.Validate(); err != nil {
 		s.log.Error("a prepared retirement is not a valid control", "id", ck.key.ID, "generation", ck.key.Generation, "error", err)
 		return
@@ -463,7 +492,39 @@ func (s *Service) collect(ck cacheKey, fetchAt [32]byte) {
 		s.cache = s.cache[len(s.cache)-MaxCache:]
 	}
 	s.log.Info("retirement proof ready", "id", ck.key.ID, "generation", ck.key.Generation, "latencyMs", s.cfg.Now().Sub(started).Milliseconds(),
-		"parentRoot", fmt.Sprintf("%x", ck.parent.StateRoot), "parentBlock", fmt.Sprintf("%x", ck.parent.BlockHash), "witnessBytes", len(witness))
+		"parentRoot", fmt.Sprintf("%x", ck.parent.StateRoot), "parentBlock", fmt.Sprintf("%x", ck.parent.BlockHash), "witnessBytes", len(witness), monitoring.Event(monitoring.EvExitRetirementProof))
+}
+
+func (s *Service) buildWitness(ctx context.Context, ck cacheKey, src evmstate.ProofSource) ([]byte, storage.RetirementFacts, error) {
+	if s.cfg.VR == nil {
+		return s.cfg.buildLegacy(ctx, src, s.cfg.Pins, ck.parent.StateRoot, ck.key.ID, ck.key.Generation)
+	}
+	h := vrschema.HolderRetirement{ID: ck.key.ID, Generation: ck.key.Generation}
+	raw, _, err := vrstate.BuildRetirementWitness(ctx, src, *s.cfg.VR, h)
+	if err != nil {
+		return nil, storage.RetirementFacts{}, err
+	}
+	w, err := vrstate.VerifyRetirement(raw, ck.parent.StateRoot, *s.cfg.VR, h, 0, false)
+	if err != nil {
+		return nil, storage.RetirementFacts{}, err
+	}
+	return raw, storage.RetirementFacts{
+		ID: h.ID, Generation: h.Generation, RefDigest: w.Facts.RefDigest,
+		Requested:       w.HolderKnown && w.Facts.Requested,
+		NotImported:     !w.Retired && !w.DedupPresent,
+		NoLiveExposures: w.Facts.LiveExposures == 0,
+		NoLotReferences: w.Facts.LotReferences == 0,
+		RecordsCaughtUp: w.HolderCursor == w.RecordCount && w.RecordCount == w.TargetCount,
+	}, nil
+}
+
+func buildLegacyWitness(ctx context.Context, src evmstate.ProofSource, pins evmstate.Pins, stateRoot [32]byte, id, generation uint64) ([]byte, storage.RetirementFacts, error) {
+	raw, _, err := evmstate.BuildRetirementWitness(ctx, src, pins, id, generation)
+	if err != nil {
+		return nil, storage.RetirementFacts{}, err
+	}
+	facts, err := (evmstate.Authority{Pins: pins}).VerifyRetirement(raw, stateRoot, id, generation)
+	return raw, facts, err
 }
 
 // Ready implements storage.RetirementProposer.

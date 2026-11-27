@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/ainvaltin/httpsrv"
@@ -74,7 +75,11 @@ type (
 		GenesisIdentitiesFile    string
 		PosGenesisIdentitiesFile string
 		PosDeploymentFile        string
+		VRDeploymentFile         string
 		PosEVMRPC                string
+		VRMemberEVMKeys          string
+		VRMemberAuthority        vrEVMAuthority
+		VRShardRPC               string
 		TrustHistoryDBFile       string
 		UTBGenesisFile           string // the canonical genesis entry of the signed trust-base chain (utb-genesis); enables the UTB profile
 		UTBGenesisID             string // its EntryID, the pin
@@ -83,14 +88,27 @@ type (
 		UTBCaptureUCResp         string // lane diagnostics: write each distinct version 2 certification response that carries entries here, before it is sent
 		HandoffProfile           bool
 		InstallHandoffEpoch      uint64
-		Q3Lane                   bool // the Q3 acceptance lane: a verified Q3 history, the install journal and the V3 handoff pipeline
-		Q3JournalDBFile          string
+		InstallHandoffWait       time.Duration // how long an install waits for a root peer to serve an epoch this root does not hold itself (#1080)
+		CommitteeWarmup          time.Duration // how long a member waits for its committee to be connected before its first round (#1082)
+		// InProcessSwitch makes a running root switch into a committed Q3 activation in process (#1086)
+		InProcessSwitch bool
+		// RecordsPublicReads serves record reads (never cuts) of the records feed to any peer under recordsfeed.DefaultPublicLimits (#1048)
+		RecordsPublicReads bool
+		Q3Lane             bool // the Q3 acceptance lane: a verified Q3 history, the install journal and the V3 handoff pipeline
+		Q3JournalDBFile    string
+		B1Registry         bool // the deployment carries the B1 registry: a handoff above its 16 members is refused at admission
 
-		BlockRate        uint32
-		MaxRequests      uint   // certification request channel capacity
-		RPCServerAddress string // address on which http server is exposed with metrics endpoint
+		BlockRate uint32
+		// TargetBlockInterval is this node's local, non-consensus target round length (--target-block-interval): it feeds only the
+		// pacemaker's minRoundLen, never validity, voting or replay.
+		TargetBlockInterval time.Duration
+		MaxRequests         uint   // certification request channel capacity
+		RPCServerAddress    string // address on which http server is exposed with metrics endpoint
+		UTBBundleAddress    string // optional isolated read-only listener of the signed trust-base history (seed export)
 		// OperatorAllowedSources lists the addresses and CIDR prefixes whose requests the operator endpoints answer (default loopback only)
 		OperatorAllowedSources string
+		// OperatorAllowedHosts are the host names, besides IP literals and localhost, the operator endpoints accept in a request's Host header
+		OperatorAllowedHosts string
 	}
 )
 
@@ -127,6 +145,10 @@ func rootNodeRunCmd(baseFlags *baseFlags) *cobra.Command {
 		Use:   "run",
 		Short: "Run a node",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// every configured target, the 450 ms default and an explicit 0 included, is checked at entry (VR design section 5.7)
+			if err := consensus.ValidateTargetBlockInterval(flags.TargetBlockInterval, consensus.NewConsensusParams().LocalTimeout); err != nil {
+				return fmt.Errorf("--target-block-interval: %w", err)
+			}
 			return rootNodeRun(cmd.Context(), flags)
 		},
 	}
@@ -141,6 +163,7 @@ func rootNodeRunCmd(baseFlags *baseFlags) *cobra.Command {
 		`Specifies the TCP address for the RPC server to listen on, in the form "host:port". RPC server isn't initialised if address is empty.`)
 
 	cmd.Flags().StringVar(&flags.OperatorAllowedSources, "operator-allowed-sources", defaultOperatorSources, operatorSourcesUsage)
+	cmd.Flags().StringVar(&flags.OperatorAllowedHosts, "operator-allowed-hosts", "", operatorHostsUsage)
 
 	cmd.Flags().StringVar(&flags.RootDBFile, "root-db", "",
 		fmt.Sprintf("path to the root database (default: %s)", filepath.Join("$UBFT_HOME", rootDBFileName)))
@@ -152,17 +175,36 @@ func rootNodeRunCmd(baseFlags *baseFlags) *cobra.Command {
 		"proof-of-stake: JSON identity records of the genesis committee as the custody genesis seeded them (`ubft pos-relayer genesis`), recorded once as the incumbent baseline K of the first coupled handoff; needs --pos-deployment, refused together with --genesis-identities")
 	cmd.Flags().StringVar(&flags.PosDeploymentFile, "pos-deployment", "",
 		"proof-of-stake: JSON pinning the custody deployment (networkWord, chainId, custody). Turns on the P85 control executor and the mandatory CloseLiability duty (profile 2 only); refused together with --genesis-identities")
+	cmd.Flags().StringVar(&flags.VRDeploymentFile, "vr-deployment", "",
+		"validator-registry generation (VT-14): the roots' VR deployment `ubft vr-genesis verify --out-root-deployment` wrote. Wires the VR-mode control executor (the Freeze v5 witness verifier, the VR-domain closure duty); the genesis EVM PDR must pin the same VR, and the genesis committee comes from --genesis-identities. Profile 3 only; refused together with --pos-deployment")
+	cmd.Flags().StringVar(&flags.VRMemberEVMKeys, "vr-evm-keys", "", "VR mode: the keys.json of this node's EVM shard node: its EVM key signs the possession proof this node sends when an intent names it a successor member (VT-09). The root process then holds the EVM validator key too. vr-member.json in the home is a safety store: preserve it")
+	cmd.Flags().StringVar(&flags.VRMemberAuthority.Socket, "vr-evm-authority-socket", "", "VR mode: the possession-proof socket of this node's EVM signing authority (`signing-authority run --pop-socket`), instead of --vr-evm-keys: the EVM key stays in the authority, which signs only the structured handoff proof and keeps its enrollment checks. With --vr-evm-authority-credential")
+	cmd.Flags().StringVar(&flags.VRMemberAuthority.Credential, "vr-evm-authority-credential", "", "VR mode: the member's credential for --vr-evm-authority-socket (the authority's --pop-credential): it reaches the possession proof and nothing else")
+	cmd.Flags().StringVar(&flags.VRShardRPC, "vr-shard-rpc", "", "VR mode: the local operator RPC (loopback http URL) of this node's paired EVM shard node: the root tells it the EVM validators of the derived handoff intent's successor, which it then serves as staged peers so a joiner's shard node can catch its EVM chain up (VT-09b)")
 	cmd.Flags().StringVar(&flags.PosEVMRPC, "pos-evm-rpc", "",
 		"proof-of-stake: JSON-RPC URL of the execution client that serves eth_getProof and custody's logs; required when the deployment pins an election (the root then builds the storage-proof witness of a primary candidate's Freeze). With it every root also builds the Retirement controls of the identities whose owner requested one (the request cursor and pending set persist in "+posRetirementStateFileName+")")
 	cmd.Flags().StringVar(&flags.OrchestrationDBFile, "orchestration-db", "",
 		fmt.Sprintf("path to the orchestration database (default: %s)", filepath.Join("$UBFT_HOME", orchestrationDBFileName)))
 	cmd.Flags().BoolVar(&flags.HandoffProfile, "profile-3", false, "run the version-3 root handoff network profile (the execution rule with root-applied shard-configuration transitions; a store or peer of profile 2 is refused)")
 	cmd.Flags().Uint64Var(&flags.InstallHandoffEpoch, "install-handoff-epoch", 0, "fetch and verify this successor epoch before starting profile-2 consensus")
+	cmd.Flags().DurationVar(&flags.InstallHandoffWait, "install-handoff-wait", installWaitDefault, "with --install-handoff-epoch: how long to keep asking the root peers "+
+		"for an epoch this root has not committed itself (a peer serves it once it has committed it); 0 asks once")
+	cmd.Flags().DurationVar(&flags.CommitteeWarmup, "committee-warmup", committeeWarmupDefault, "how long a member of the installed root committee waits, "+
+		"before its first round, for every other member to be connected (it dials them itself and keeps them connected; a member down costs at most this, once)")
+	cmd.Flags().BoolVar(&flags.InProcessSwitch, "in-process-epoch-switch", true, "with --q3-lane: a running root switches into a committed activation inside its process instead of waiting for an install restart: "+
+		"a member that stays or leaves (into Following) from its own committed evidence, a joiner, a follower or a member that lagged from an activation "+
+		"a root peer serves, authenticated against its own history (false: every root installs across a restart)")
+	cmd.Flags().BoolVar(&flags.RecordsPublicReads, "records-public-reads", true, "serve the retained source-log records (never the cuts) to any peer, under a bounded public budget: a root "+
+		"that is not a member of this root's committees (one that catches up several epochs behind) completes its checkpoints' record prefixes from it (--profile-3)")
 	cmd.Flags().BoolVar(&flags.Q3Lane, "q3-lane", false, "run the Q3 acceptance lane: verified Q3 history, install journal and V3 handoffs (requires --profile-3)")
 	cmd.Flags().StringVar(&flags.Q3JournalDBFile, "q3-journal-db", "",
 		fmt.Sprintf("Q3 install journal database (default: %s)", filepath.Join("$UBFT_HOME", q3JournalDBFileName)))
+	cmd.Flags().BoolVar(&flags.B1Registry, "b1-registry", false, "the deployment carries the B1 registry: refuse a handoff whose committee is above the registry's 16 members (a gas bound); a no-EVM deployment leaves it off (requires --q3-lane)")
 	cmd.Flags().StringVar(&flags.UTBGenesisFile, "utb-genesis", "", "enable the signed trust-base entry (UTB) profile: the canonical genesis entry file (see: trust-base utb-genesis); requires --utb-genesis-id and profile 2")
 	cmd.Flags().StringVar(&flags.UTBGenesisID, "utb-genesis-id", "", "the EntryID of the UTB genesis entry (0x-prefixed SHA-256): the pin the genesis file must match")
+	cmd.Flags().StringVar(&flags.UTBBundleAddress, "utb-bundle-address", "",
+		"with --utb-genesis: serve the complete signed trust-base history (GET /api/v1/utb/bundle, nothing else) read-only on this separate listener, for `ubft seed export`. "+
+			"The result is built once per trust-base tip and reused, with bounded concurrency; bind loopback or put a cache in front. Never the operator RPC address")
 	cmd.Flags().StringVar(&flags.UTBCaptureUCResp, "utb-capture-ucresp", "", "lane diagnostics: directory to write each distinct version 2 certification response that carries entries to, before it is sent")
 	_ = cmd.Flags().MarkHidden("utb-capture-ucresp")
 	cmd.Flags().StringVar(&flags.UTBEntriesDBFile, "utb-entries-db", "",
@@ -173,6 +215,10 @@ func rootNodeRunCmd(baseFlags *baseFlags) *cobra.Command {
 		fmt.Sprintf("profile-2 trust history database (default: %s)", filepath.Join("$UBFT_HOME", rootTrustHistoryDBFileName)))
 
 	cmd.Flags().Uint32Var(&flags.BlockRate, "block-rate", consensus.BlockRate, "block rate (consensus parameter)")
+	cmd.Flags().DurationVar(&flags.TargetBlockInterval, "target-block-interval", consensus.DefaultTargetBlockInterval,
+		"this node's local target root round length (not a consensus parameter): a round that would be faster waits for it, a slower round "+
+			"gets nothing added; at least 100ms and below half the local timeout. Nodes may run different values; blocks, votes and proofs are "+
+			"judged identically")
 
 	hideFlags(cmd, "block-rate", "q3-lane", "q3-journal-db")
 	return cmd
@@ -191,11 +237,21 @@ func getBootStrapNodes(bootNodesStr []string) ([]peer.AddrInfo, error) {
 }
 
 func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
+	// the command checks the flag at entry (an explicit 0 is refused there); a zero value here only comes from a unit test that drives
+	// this function directly without the command, and keeps the genesis-derived BlockRate/2
+	if flags.TargetBlockInterval != 0 {
+		if err := consensus.ValidateTargetBlockInterval(flags.TargetBlockInterval, consensus.NewConsensusParams().LocalTimeout); err != nil {
+			return err
+		}
+	}
 	operatorLog := slog.Default() // (a unit test drives this function with no base flags)
 	if flags.baseFlags != nil {
 		operatorLog = operatorLogger(flags.observe)
 	}
 	if err := configureOperatorSources(operatorLog, flags.OperatorAllowedSources); err != nil {
+		return err
+	}
+	if err := configureOperatorHosts(flags.OperatorAllowedHosts); err != nil {
 		return err
 	}
 	if flags.baseFlags != nil {
@@ -226,6 +282,8 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 	if err != nil {
 		return fmt.Errorf("partition network initialization failed: %w", err)
 	}
+	// the ingress forwarder stops with the node, releasing whatever is still queued
+	defer libp2pPartitionNet.Close()
 	// a build without the q4shim tag returns the network itself
 	partitionNet, stopShardGate, err := wrapPartitionNet(ctx, libp2pPartitionNet, host.ID(), log)
 	if err != nil {
@@ -307,8 +365,14 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 	consensusParams := consensus.NewConsensusParams()
 	consensusParams.BlockRate = time.Duration(flags.BlockRate) * time.Millisecond
 	var options []consensus.Option
+	if flags.TargetBlockInterval != 0 {
+		options = append(options, consensus.WithTargetBlockInterval(flags.TargetBlockInterval))
+	}
 	if flags.Q3Lane && !flags.HandoffProfile {
 		return errors.New("q3-lane requires profile 3")
+	}
+	if flags.B1Registry && !flags.Q3Lane {
+		return errors.New("b1-registry requires q3-lane")
 	}
 	if flags.UTBGenesisFile != "" {
 		trustBaseStore.EnableUTBProfile() // the first voting epoch is a UTB epoch whether or not a verified Q3 history later takes over the answers
@@ -322,7 +386,7 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		if closer, ok := journalDB.(io.Closer); ok {
 			defer closer.Close()
 		}
-		if q3rt, err = newRootQ3Runtime(journalDB, trustBase, flags.UTBGenesisFile != ""); err != nil {
+		if q3rt, err = newRootQ3Runtime(journalDB, trustBase, flags.UTBGenesisFile != "", flags.B1Registry); err != nil {
 			return err
 		}
 		// the first trust base is the pinned genesis the verified history is rooted in; the store accepts a V3 epoch's projection only
@@ -331,6 +395,12 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 			return fmt.Errorf("q3 runtime: %w", err)
 		}
 		options = append(options, consensus.WithQ3(q3rt))
+	}
+	// #1086: the switch's evidence source and its after-install derivations are wired once the manager exists (below)
+	var epochSwitch *consensus.Q3EpochSwitch
+	if q3rt != nil && flags.InProcessSwitch {
+		epochSwitch = &consensus.Q3EpochSwitch{Runtime: q3rt}
+		options = append(options, consensus.WithEpochSwitch(epochSwitch))
 	}
 	if flags.HandoffProfile {
 		consensusParams.NetworkProfileVersion = storage.ProfileHandoff
@@ -389,7 +459,7 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		options = append(options, consensus.WithFrontierSampler(samplerCfg), consensus.WithFrontierSigning())
 	}
 
-	if flags.PosDeploymentFile != "" {
+	if flags.PosDeploymentFile != "" || flags.VRDeploymentFile != "" {
 		// the witnesses of a block's controls are fetched by hash from the other root nodes before the block is executed
 		options = append(options, consensus.WithWitnessFetcher(func(ctx context.Context, hash [32]byte, peers []peer.ID, maxBytes int) ([]byte, error) {
 			return poswitness.Fetch(ctx, poswitness.FromLibp2p(host), peers, hash, maxBytes)
@@ -423,6 +493,10 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 	if err != nil {
 		return fmt.Errorf("failed initiate distributed consensus manager: %w", err)
 	}
+	registerRootMonitoring(ctx, flags, log, host, cm)
+	// received proposals are admitted from, and prioritized for, the roots the manager names (#1113); the manager sets this itself on an
+	// unwrapped network, a wrapped one (q4shim) is set here
+	libp2pNet.SetRootConsensusGate(cm)
 	if flags.PosDeploymentFile != "" {
 		if !flags.HandoffProfile {
 			return fmt.Errorf("%w: --pos-deployment needs --profile-3", ErrPosDeployment)
@@ -433,6 +507,43 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		}
 		stopWitnesses := serveWitnesses(host, cm)
 		defer stopWitnesses()
+	}
+	if flags.VRDeploymentFile != "" {
+		if !flags.HandoffProfile || flags.PosDeploymentFile != "" || flags.GenesisIdentitiesFile == "" {
+			return fmt.Errorf("%w: --vr-deployment needs --profile-3 and --genesis-identities, and excludes --pos-deployment", ErrVRGenesis)
+		}
+		if err = enableVRServices(cm, orchestration, trustBaseStore, trustBase, shardConfs, flags.VRDeploymentFile); err != nil {
+			return err
+		}
+		stopWitnesses := serveWitnesses(host, cm)
+		defer stopWitnesses()
+	}
+	// VT-05b: the VR handoff root side of a VR-mode root (observer, intent, the staged protocol, the leader path), after its VR services
+	vrHandoffOn, err := enableVRHandoffInVRMode(ctx, cm, shardConfs, flags.PosEVMRPC, flags.PathWithDefault("", ""), flags.VRMemberEVMKeys, flags.VRShardRPC, signer, host, flags.VRMemberAuthority)
+	if err != nil {
+		return err
+	}
+	if (flags.VRMemberEVMKeys != "" || flags.VRShardRPC != "" || !flags.VRMemberAuthority.empty()) && !vrHandoffOn {
+		return fmt.Errorf("%w: --vr-evm-keys, --vr-evm-authority-socket and --vr-shard-rpc need a VR-mode root (--vr-deployment, --pos-evm-rpc): the flag would be ignored", ErrVRHandoffCmd)
+	}
+	if flags.HandoffProfile {
+		// The record fetcher is installed and the bootstrap peers are dialled before the Q3 recovery: an installation interrupted before
+		// its checkpoint's P85 record-log prefix was retained completes in that recovery, which fetches the prefix from the other roots and
+		// verifies it against the checkpoint (#1028). Without the fetcher every restart of such a root failed in the recovery.
+		fetcher, fetchErr := newRootRecordFetcher(host, cm, trustBaseStore, flags.BootstrapAddresses, shardConfs)
+		if fetchErr != nil {
+			return fetchErr
+		}
+		cm.SetRecordFetcher(fetcher)
+	}
+	if err = checkVRHandoffWired(cm.VRServices(), vrHandoffOn); err != nil {
+		return err
+	}
+	if err = checkVRRejectionWired(cm.VRServices(), cm.RejectionProposer()); err != nil {
+		return err
+	}
+	if err = host.BootstrapConnect(ctx, log); err != nil {
+		return err
 	}
 	if q3rt != nil {
 		if err = attachRootQ3(ctx, q3rt, cm); err != nil {
@@ -452,7 +563,7 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		defer stopFrontier()
 	}
 	if flags.HandoffProfile {
-		stopRecords, recErr := serveRootRecords(log, host, cm, shardConfs)
+		stopRecords, recErr := serveRootRecords(log, host, cm, shardConfs, flags.RecordsPublicReads)
 		if recErr != nil {
 			return recErr
 		}
@@ -465,9 +576,6 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		}
 		server.Register(host)
 	}
-	if err = host.BootstrapConnect(ctx, log); err != nil {
-		return err
-	}
 	if flags.InstallHandoffEpoch != 0 {
 		if !flags.HandoffProfile || flags.InstallHandoffEpoch < 2 {
 			return fmt.Errorf("install-handoff-epoch requires profile 2 and epoch >= 2")
@@ -479,15 +587,16 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		if err != nil {
 			return err
 		}
+		retry := defaultInstallRetry(flags.InstallHandoffWait)
 		if q3rt != nil {
-			if err := installQ3Epochs(ctx, host, peers, q3rt, cm, flags.InstallHandoffEpoch); err != nil {
+			if err := installQ3Epochs(ctx, log, host, peers, q3rt, cm, flags.InstallHandoffEpoch, retry); err != nil {
 				return err
 			}
 		}
 		for epoch := cm.InstalledRootEpoch() + 1; q3rt == nil && epoch <= flags.InstallHandoffEpoch; epoch++ {
-			bundle, fetchErr := fetchFromRootPeers(peers, func(id peer.ID) (handoffdelivery.Bundle, error) {
+			bundle, fetchErr := awaitFromRootPeers(ctx, retry, peers, func(ctx context.Context, id peer.ID) (handoffdelivery.Bundle, error) {
 				return handoffdelivery.Request(ctx, host, id, epoch)
-			})
+			}, cm.CheckEpochBundle, installWaitLogger(log, "handoff bundle", epoch))
 			if fetchErr != nil {
 				return fmt.Errorf("no root peer served verified handoff epoch %d: %w", epoch, fetchErr)
 			}
@@ -501,6 +610,44 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		// after the activations this process installed: a root that installs epoch 2 at this very start holds its first activation only now
 		if err = selectRootQ3RequestHistory(q3rt, cm, orchestration, uint64(trustBase.GetNetworkID())); err != nil {
 			return err
+		}
+	}
+
+	// #1082: after the activations this process installed and before its first round in the installed epoch, a member keeps the rest of
+	// the committee connected (it dials them itself, so a member that cannot be dialled is reached too) and waits a bounded warm-up for it
+	var committee *rootCommittee
+	if installed, tbErr := trustBaseStore.GetByEpoch(cm.InstalledRootEpoch()); tbErr == nil && installed != nil {
+		committee = keepRootCommittee(ctx, log, host, installed, flags.CommitteeWarmup)
+	} else {
+		log.Warn("no installed root trust to keep the committee of", "epoch", cm.InstalledRootEpoch(), "error", tbErr)
+	}
+	if epochSwitch != nil {
+		// #1086: the switch installs from this root's own evidence only (the journal's staged bundle, else its committed checkpoint), then
+		// re-derives what this start derived from the installed epoch: the request history, and the committee kept connected
+		epochSwitch.Bundle = q3BundleProvider{cm: cm, rt: q3rt}.Q3Bundle
+		// PR 2: a root that does not hold the commit itself (a joiner, a follower, a member that lagged) asks a root peer for the bundle, as
+		// its install restart does; the manager authenticates it against this root's own history before anything is staged
+		epochSwitch.Fetch = func(ctx context.Context, from peer.ID, epoch uint64) (q3active.Bundle, error) {
+			return q3delivery.Request(ctx, host, from, epoch)
+		}
+		networkID := uint64(trustBase.GetNetworkID())
+		epochSwitch.After = func(ctx context.Context, epoch uint64) error {
+			if err := selectRootQ3RequestHistory(q3rt, cm, orchestration, networkID); err != nil {
+				return err
+			}
+			if committee != nil {
+				installed, err := trustBaseStore.GetByEpoch(epoch)
+				if err != nil {
+					return err
+				}
+				committee.follow(ctx, log, installed)
+			}
+			return nil
+		}
+		if committee != nil {
+			// #1086 PR 2 (#1082): a joiner keeps the successor's committee connected from its staged candidate on, before the commit, so that
+			// the successor's first messages reach it and its own reach the others when it switches; behind NAT, only its own dials do
+			go committee.keepStaged(ctx, log, cm)
 		}
 	}
 
@@ -543,6 +690,9 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		mux.HandleFunc("PUT /api/v1/trustbases", trustBasesPutHandler(flags.HandoffProfile, trustBaseStore.Store))
 		mux.HandleFunc("GET /api/v1/trustbases", getTrustBaseHandler(trustBaseStore, obs))
 		mux.HandleFunc("GET /api/v1/roundInfo", getRoundInfoHandler(cm.GetState, obs))
+		if committee != nil {
+			mux.HandleFunc("POST /api/v1/committee", q3Endpoint(func(context.Context, json.RawMessage) (any, error) { return committee.status(), nil }))
+		}
 		if flags.HandoffProfile {
 			mux.HandleFunc("POST /api/v1/handoff/plan", rootHandoffPlanHandler(cm))
 			mux.HandleFunc("POST /api/v1/handoff/intent", rootHandoffIntentHandler(cm))
@@ -553,12 +703,15 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 				mux.HandleFunc("POST /api/v1/handoff/q3-stage", rootQ3StageHandler(cm))
 				rootQ3API{Status: cm.Q3Status, Rt: q3rt, Bundle: q3BundleProvider{cm: cm, rt: q3rt}.Q3Bundle, State: cm.GetState,
 					Trust: func(epoch uint64) (*types.RootTrustBaseV1, error) { return trustBaseStore.GetByEpoch(epoch) },
-					ShardConfig: func(partition types.PartitionID, epoch uint64) (*types.PartitionDescriptionRecord, error) {
-						return orchestration.ShardConfigByEpoch(partition, types.ShardID{}, epoch)
+					ShardConfig: func(partition types.PartitionID, shard types.ShardID, epoch uint64) (*types.PartitionDescriptionRecord, error) {
+						return orchestration.ShardConfigByEpoch(partition, shard, epoch)
 					}}.register(mux)
 			}
-			if flags.PosDeploymentFile != "" {
+			if flags.PosDeploymentFile != "" || flags.VRDeploymentFile != "" {
 				mux.HandleFunc("POST /api/v1/pos/control", rootPosControlHandler(cm))
+			}
+			if vrHandoffOn {
+				registerVRHandoffRoutes(mux, cm)
 			}
 			mux.HandleFunc("POST /api/v1/handoff/abort", rootHandoffAbortHandler(cm))
 			mux.HandleFunc("POST /api/v1/handoff/abort/status", rootHandoffAbortStatusHandler(cm))
@@ -573,6 +726,15 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 				IdleTimeout:       30 * time.Second,
 			})
 	})
+
+	if flags.UTBBundleAddress != "" {
+		if utbEntries == nil {
+			return errors.New("--utb-bundle-address requires --utb-genesis")
+		}
+		g.Go(func() error {
+			return httpsrv.Run(ctx, newUTBBundleServer(flags.UTBBundleAddress, utbEntries, obs))
+		})
+	}
 
 	return g.Wait()
 }
@@ -914,38 +1076,115 @@ func serveRootFrontier(ctx context.Context, log *slog.Logger, host *network.Peer
 	}, nil
 }
 
-// serveWitnesses serves the retained control witnesses to the other root nodes of the current trust base.
-func serveWitnesses(host *network.Peer, cm *consensus.ConsensusManager) func() {
-	server := poswitness.NewServer(cm, func(id peer.ID) bool { return slices.Contains(cm.Validators(), id) })
+type witnessRoot interface {
+	poswitness.Source
+	Validators() peer.IDSlice
+	IsStagedRoot(string) bool
+}
+
+// serveWitnesses serves installed roots and staged successors that need to follow the current epoch before they can join.
+func serveWitnesses(host *network.Peer, cm witnessRoot) func() {
+	server := poswitness.NewServer(cm, func(id peer.ID) bool {
+		return slices.Contains(cm.Validators(), id) || cm.IsStagedRoot(id.String())
+	})
 	host.RegisterProtocolHandler(poswitness.ProtocolID, server.Handler)
 	return func() { host.RemoveProtocolHandler(poswitness.ProtocolID) }
 }
 
-// rootRecordFetcher fetches source-log records from the other roots of the current trust base, in the order the trust base lists them.
+// rootRecordFetcher fetches the source-log records a checkpoint commits and this root lacks (storage.BlockStore.SetRecordFetcher). Its
+// sources are locators only (bft-core#1048): whatever one serves is verified record by record against the checkpoint, and a source whose
+// records do not verify is skipped for the next one. The list is built, without this root or a repeat (recordSources), from:
+//   - the roots of the installed trust base;
+//   - the roots of the newest trust base this root holds: an epoch install stores the activated epoch's verified trust base before it
+//     completes its checkpoint, so these are the committee that holds the checkpoint's log;
+//   - the bootstrap peers (configured: the current roots of a network this root lags behind, its old committee possibly gone);
+//   - the configured shard validators, which mirror the verified record log where they serve the feed.
+//
+// The prefix collector (storage.fetchFromSources) does not ask them once each in this order: each pass asks every source in turn from a
+// starting index that rotates between fetches, and passes repeat until one serves the verified prefix or the fetch's bound. Sources takes
+// a snapshot of the list at each pass and RecordsFromSource indexes that snapshot, so a source index means the same peer for the whole pass
+// even if a trust base is installed meanwhile.
+//
+// A root that is not a member of the committees they follow is served record reads under their public budget (recordsfeed.PublicLimits).
 type rootRecordFetcher struct {
 	host *network.Peer
 	cm   *consensus.ConsensusManager
+	mu   sync.Mutex
+	snap []peer.ID // the list of the pass in progress (Sources)
+	// newest is the trust base store's newest trust base (TrustBaseStore.LoadLast)
+	newest func() (*types.RootTrustBaseV1, error)
+	// bootstrap and mirrors are the configured locators
+	bootstrap, mirrors []peer.ID
 }
 
-func (f rootRecordFetcher) remote() recordsfeed.P2PRemote {
-	var others []peer.ID
-	for _, id := range f.cm.Validators() {
-		if id != f.host.ID() {
-			others = append(others, id)
+func (f *rootRecordFetcher) remote() recordsfeed.P2PRemote {
+	var newest []peer.ID
+	if f.newest != nil {
+		if tb, err := f.newest(); err == nil && tb != nil {
+			for _, n := range tb.RootNodes {
+				if id, err := peer.Decode(n.NodeID); err == nil {
+					newest = append(newest, id)
+				}
+			}
 		}
 	}
-	return recordsfeed.P2PRemote{Opener: recordsfeed.FromLibp2p(f.host), Roots: others}
+	return recordsfeed.P2PRemote{Opener: recordsfeed.FromLibp2p(f.host), Roots: recordSources(f.host.ID(), f.cm.Validators(), newest, f.bootstrap, f.mirrors)}
 }
 
-func (f rootRecordFetcher) Records(ctx context.Context, from uint64, max int) ([]rootrecords.Record, error) {
+// recordSources is the fetch order of rootRecordFetcher: every list in turn, without self and without a repeat.
+func recordSources(self peer.ID, lists ...[]peer.ID) []peer.ID {
+	seen := map[peer.ID]struct{}{self: {}}
+	var out []peer.ID
+	for _, list := range lists {
+		for _, id := range list {
+			if _, ok := seen[id]; ok || id == "" {
+				continue
+			}
+			seen[id] = struct{}{}
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// newRootRecordFetcher is the production fetcher: the bootstrap peers and the configured shard validators as extra locators.
+func newRootRecordFetcher(host *network.Peer, cm *consensus.ConsensusManager, trustBases *trustbase.TrustBaseStore, bootstrap []string, shardConfs []*types.PartitionDescriptionRecord) (*rootRecordFetcher, error) {
+	nodes, err := getBootStrapNodes(bootstrap)
+	if err != nil {
+		return nil, err
+	}
+	f := &rootRecordFetcher{host: host, cm: cm, newest: trustBases.LoadLast}
+	for _, n := range nodes {
+		f.bootstrap = append(f.bootstrap, n.ID)
+	}
+	if f.mirrors, err = frontierEligiblePeers(shardConfs); err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
+func (f *rootRecordFetcher) Records(ctx context.Context, from uint64, max int) ([]rootrecords.Record, error) {
 	return f.remote().Records(ctx, from, max)
 }
 
-// Sources and RecordsFromSource let the block store ask one root at a time and skip one whose records do not verify (#647).
-func (f rootRecordFetcher) Sources() int { return f.remote().Sources() }
+// Sources and RecordsFromSource let the block store ask one root at a time and skip one whose records do not verify (#647). Sources
+// snapshots the list for the pass; RecordsFromSource indexes the snapshot.
+func (f *rootRecordFetcher) Sources() int {
+	remote := f.remote()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.snap = remote.Roots
+	return len(f.snap)
+}
 
-func (f rootRecordFetcher) RecordsFromSource(ctx context.Context, source int, from uint64, max int) ([]rootrecords.Record, error) {
-	return f.remote().RecordsFromSource(ctx, source, from, max)
+func (f *rootRecordFetcher) RecordsFromSource(ctx context.Context, source int, from uint64, max int) ([]rootrecords.Record, error) {
+	f.mu.Lock()
+	snap := f.snap
+	f.mu.Unlock()
+	if snap == nil {
+		snap = f.remote().Roots
+	}
+	return recordsfeed.P2PRemote{Opener: recordsfeed.FromLibp2p(f.host), Roots: snap}.RecordsFromSource(ctx, source, from, max)
 }
 
 // recordsSource adapts the consensus manager to the records feed's server.
@@ -1010,8 +1249,9 @@ func recordsServerAllowed(static map[peer.ID]struct{}, shardConfs []*types.Parti
 
 // serveRootRecords serves the root's source-log cuts and records to the validators of the shards this root was configured with. The
 // shard pairs an EVM with the root and derives the next prefix of the log from them, verifying everything against the unicity tree
-// root of its certificate, so the service needs no trust in the node it asks.
-func serveRootRecords(log *slog.Logger, host *network.Peer, cm *consensus.ConsensusManager, shardConfs []*types.PartitionDescriptionRecord) (func(), error) {
+// root of its certificate, so the service needs no trust in the node it asks. The root's own fetcher (rootRecordFetcher) is installed
+// by rootNodeRun before the Q3 recovery, not here (#1028).
+func serveRootRecords(log *slog.Logger, host *network.Peer, cm *consensus.ConsensusManager, shardConfs []*types.PartitionDescriptionRecord, publicReads bool) (func(), error) {
 	eligible, err := frontierEligiblePeers(shardConfs)
 	if err != nil {
 		return nil, err
@@ -1026,8 +1266,16 @@ func serveRootRecords(log *slog.Logger, host *network.Peer, cm *consensus.Consen
 	// The other roots of the trust base are served too: a root that installs an epoch checkpoint without the source log it commits
 	// fetches the missing prefix from them (storage.BlockStore.SetRecordFetcher), verifying every record against the checkpoint.
 	server := recordsfeed.NewServer(recordsSource{cm}, recordsServerAllowed(allowed, shardConfs, cm))
+	if publicReads {
+		// record reads (never cuts) of any other peer, under their own bounded budget: a root behind that no committee member authorizes
+		// any more completes its checkpoints' prefixes from them, verifying every record (bft-core#1048)
+		limits := recordsfeed.DefaultPublicLimits()
+		if err := server.SetPublicRecords(limits); err != nil {
+			return nil, err
+		}
+		log.Info("root records feed: public record reads", "pending", limits.Pending, "perPeer", limits.PerPeer, "rate", limits.Rate, "byteRate", limits.ByteRate)
+	}
 	host.RegisterProtocolHandler(recordsfeed.ProtocolID, server.Handler)
-	cm.SetRecordFetcher(rootRecordFetcher{host: host, cm: cm})
 	log.Info("root records feed enabled", "validators", len(eligible))
 	return func() { host.RemoveProtocolHandler(recordsfeed.ProtocolID) }, nil
 }

@@ -1,31 +1,69 @@
 #!/usr/bin/env python3
-"""Deploy the bridge (TokenVerifier + BridgeVault) on a running generation and write the driver's configuration (briefs/tnb-without-host.md).
+"""The bridge tools image and how a generation runs it: what nb2/deploy_nb2.py, nb2/release_nb2.py and sdk_clients.py share.
 
-    deploy_bridge.py GENERATION --agg-conf CONF[,CONF...] --agg-url URL[,URL...] [--agg-shard HEX,...]
+  image(gen)              the bridge tools image by its ID (bft-core#1092): a deployed generation's own record, else the current
+                          artifacts/bridge-images.json, refused unless its dnb-tool was built from the node images' bft pin (bft-core#1075)
+  record_image(gen, id)   the generation's record of the image it was deployed with (GENERATION/bridge/bridge-image.json), written once
+  validators_network(gen) the Compose network of the generation's validators
+  tools(gen, *args)       one command in the image on that network: the public network files and the funder's keystore read-only, GENERATION/bridge
+                          writable at /work
 
-The same steps as scripts/lib/agg-lib.sh bridge_deploy_vault + bridge_write_config, run in the bridge tools image on the generation's internal validators
-network against validator 1's execution client (an operator action: the public gateway takes only its allow-listed methods, with X-Forwarded-For):
-  1. dnb-tool deployment: the deployment document from the B1 identity document (network/b1-identities.json) and the aggregator shard configurations;
-  2. forge script BridgeDeploy.s.sol, which refuses a vault whose rootGenesis, executionGenesis or b1ProfileHash differ from the genesis', signed with the
-     generation's genesis-funded faucet keystore (the key never leaves its file);
-  3. dnb-tool trust-bundle / pdr, then GENERATION/bridge/lane-config.json for tests/live/anyage.ts and GENERATION/bridge/public/, the one directory
-     to publish for testers: the tester page (bridge/tester/index.html), tester-config.json for the bridge tester (native-bridge-plugins tester/), which
-     names the endpoints a tester reaches (--tester-*-url; the defaults are the internal names), and the four public files it names;
-  4. the bridge release manifest (release.py), GENERATION/bridge/public/bridge-release.json.
-Writes everything under GENERATION/bridge/.
+This module deploys nothing itself. The protocol 6/7 bridge it used to deploy (BridgeVault, TokenVerifier, the lock-proof endpoint, the tester) was
+removed by bft-core#1106 and #1139; the native bridge v2 deploy is nb2/deploy_nb2.py.
 """
-import argparse
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
-import release
+ARTIFACTS = Path(__file__).resolve().parent.parent / 'artifacts'
+RECORD = 'bridge/bridge-image.json'   # the generation's own record of its bridge image, written by its deploy
+IMAGE_ID = re.compile(r'sha256:[0-9a-f]{64}')
 
-ETH = 'http://ureth1:8545'
-GATEWAY = 'http://rpc:8545'   # the package's public gateway (gateway.py) as the validators network names it
-TAG = 'tnops-bridge:verified'
-CONTRACTS = '/opt/bridge/contracts'
+
+def bridge_image(record, node_pins):
+    """The verified bridge image of artifacts/bridge-images.json, refused unless its dnb-tool was built from the node images' bft pin: dnb-tool
+    reads the validators' trust base and archives, so it must speak their layout (bft-core#1075)."""
+    image = record.get('images', {}).get('bridge', '')
+    if not IMAGE_ID.fullmatch(image):
+        raise SystemExit('artifacts/bridge-images.json has no verified bridge image (build-bridge-image.py)')
+    built = record.get('sources', {}).get('bft')
+    if built != node_pins['bft']:
+        raise SystemExit(f'artifacts/bridge-images.json: dnb-tool was built from bft {built}, but the node images are pinned at {node_pins["bft"]} '
+                         '(deploy/testnet/pins.json): rebuild it, build-bridge-image.py --bft-source <the pinned bft checkout>')
+    return image
+
+
+def recorded_image(gen):
+    """The bridge image a generation was deployed with (GENERATION/bridge/bridge-image.json); None for a generation not deployed yet."""
+    if gen is None:
+        return None
+    own = Path(gen) / RECORD
+    return json.loads(own.read_text())['image'] if own.is_file() else None
+
+
+def image(gen=None):
+    """The bridge tools image by ID (bft-core#1092), never through a tag a later build can move. A deployed generation keeps the image it was
+    deployed with (recorded_image), so a later rebuild for another pin never changes an older generation's tools. Only a generation being deployed
+    takes the current artifacts/bridge-images.json, which must have been built from the node images' bft pin (bft-core#1075). The image must be
+    present locally."""
+    found = recorded_image(gen)
+    if found is None:
+        record = json.loads((ARTIFACTS / 'bridge-images.json').read_text())
+        found = bridge_image(record, json.loads((ARTIFACTS.parent / 'pins.json').read_text()))
+    elif not IMAGE_ID.fullmatch(str(found)):
+        raise SystemExit(f'{gen}: the recorded bridge image {found!r} is not an image ID')
+    if subprocess.run(['docker', 'image', 'inspect', found], capture_output=True).returncode != 0:
+        raise SystemExit(f'the bridge image {found} is not in the local image store: rebuild it (build-bridge-image.py)')
+    return found
+
+
+def record_image(gen, found):
+    """Written once, at the generation's deploy: the bridge image its tools keep using after later rebuilds."""
+    own = Path(gen) / RECORD
+    if not own.is_file():
+        own.write_text(json.dumps({'image': found}, indent=2) + '\n')
 
 
 def validators_network(gen):
@@ -35,90 +73,12 @@ def validators_network(gen):
 
 
 def tools(gen, *args, capture=False):
-    # only the public network files and the faucet's keystore, read-only (never the validators' or owners' keys); the bridge directory writable at
-    # /work; the image itself is read-only. HOME and every scratch copy live on the tmpfs: GENERATION/bridge is backed up with the generation, and
-    # backup.py restores plain files and directories only
+    # only the public network files and the funder's keystore (funder-secrets/, when the generation has one), read-only: never the faucet's, whose nonces
+    # are the faucet signer's alone (bft-core#1287), nor the validators' or owners' keys; the bridge directory writable at /work; the image itself is
+    # read-only. HOME and every scratch copy live on the tmpfs: GENERATION/bridge is backed up with the generation, and backup.py restores plain files
+    # and directories only
+    keys = ['-v', f'{gen / "funder-secrets"}:/gen/funder-secrets:ro'] if (gen / 'funder-secrets').is_dir() else []
     cmd = ['docker', 'run', '--rm', '--read-only', '--network', validators_network(gen), '--user', f'{os.getuid()}:{os.getgid()}', '-e', 'HOME=/tmp/home',
-           '-v', f'{gen / "network"}:/gen/network:ro', '-v', f'{gen / "faucet-secrets"}:/gen/faucet-secrets:ro', '-v', f'{gen / "bridge"}:/work',
-           '--tmpfs', '/tmp', '-w', '/work', TAG, *args]
+           '-v', f'{gen / "network"}:/gen/network:ro', *keys, '-v', f'{gen / "bridge"}:/work',
+           '--tmpfs', '/tmp', '-w', '/work', image(gen), *args]
     return subprocess.run(cmd, check=True, text=True, capture_output=capture).stdout
-
-
-def main():
-    p = argparse.ArgumentParser()
-    p.add_argument('generation', type=Path)
-    p.add_argument('--agg-conf', required=True, help='aggregator shard configuration files, relative to GENERATION, comma separated, in shard order')
-    p.add_argument('--agg-url', required=True, help='each shard\'s aggregator URL as the driver reaches it, comma separated, same order')
-    p.add_argument('--agg-partition', type=int, default=7, help='the aggregation partition the bridge profile names (7, the fixed one)')
-    p.add_argument('--agg-shard', default='', help='native shard ID bytes of each shard, hex, comma separated (two or more shards)')
-    p.add_argument('--tester-eth-url', default=GATEWAY, help='the JSON-RPC endpoint testers use (default: the package\'s public gateway; its public name on a host)')
-    p.add_argument('--tester-redeem-eth-url', default='', help='where testers send redemptions, when the --tester-eth-url gateway cannot take them (the package gateway can)')
-    p.add_argument('--tester-agg-url', default=GATEWAY + '/aggregator', help='the aggregator endpoint testers use (default: the package gateway\'s /aggregator route)')
-    p.add_argument('--tester-lockproof-url', default='http://lockproof:8090', help='the lock-proof endpoint testers use')
-    a = p.parse_args()
-    gen = a.generation.resolve()
-    manifest = json.loads((gen / 'manifest.json').read_text())
-    work = gen / 'bridge'
-    work.mkdir(parents=True, exist_ok=True)
-    confs = a.agg_conf.split(',')
-    urls = a.agg_url.split(',')
-    shards = [s for s in a.agg_shard.split(',') if s]
-    if len(urls) != len(confs) or (len(confs) > 1 and len(shards) != len(confs)):
-        raise SystemExit('one --agg-url (and, with several shards, one --agg-shard) per --agg-conf')
-
-    tools(gen, 'dnb-tool', 'deployment', '--identities', '/gen/network/b1-identities.json', '--agg-conf', ','.join('/gen/' + c for c in confs),
-          '--out', '/work/bridge-deployment.json')
-    secrets = 'faucet-secrets'
-    # a writable copy of the built contracts on the tmpfs (out/ and cache/ included: nothing recompiles, and the image's solc is linked in for
-    # --offline); only the broadcast record is kept, as bridge-broadcast.json
-    tools(gen, 'bash', '-c', f'set -eo pipefail; cp -R {CONTRACTS} /tmp/contracts && '
-          'for d in .svm .local/share/svm; do [ ! -e /home/bridge/$d ] || { mkdir -p "$(dirname /tmp/home/$d)" && ln -sfn /home/bridge/$d /tmp/home/$d; }; done && '
-          # the script reads its inputs under script/bridge-deploy/ only (foundry.toml fs_permissions), as scripts/lib/agg-lib.sh places them
-          'cp /gen/network/b1-identities.json /tmp/contracts/script/bridge-deploy/genesis.json && '
-          'cp /work/bridge-deployment.json /tmp/contracts/script/bridge-deploy/deployment.json && '
-          'cd /tmp/contracts && BRIDGE_GENESIS=script/bridge-deploy/genesis.json BRIDGE_DEPLOYMENT=script/bridge-deploy/deployment.json '
-          f'forge script script/BridgeDeploy.s.sol --offline --rpc-url {ETH} --keystore /gen/{secrets}/keystore.json --password-file /gen/{secrets}/password '
-          f'--broadcast --slow 2>&1 | tee /work/vault-deploy.log && cp broadcast/BridgeDeploy.s.sol/{manifest["chain_id"]}/run-latest.json /work/bridge-broadcast.json')
-    run = json.loads((work / 'bridge-broadcast.json').read_text())
-    addr = {t['contractName']: t['contractAddress'] for t in run['transactions'] if t.get('contractName') in ('BridgeVault', 'TokenVerifier')}
-    if set(addr) != {'BridgeVault', 'TokenVerifier'}:
-        raise SystemExit(f'the deploy broadcast has no BridgeVault/TokenVerifier: {addr}')
-    # the vault's CFG, which every lock proof names (the lock-proof endpoint takes it at start)
-    addr['CFG'] = tools(gen, 'cast', 'call', '--rpc-url', ETH, addr['BridgeVault'], 'CFG()(bytes32)', capture=True).strip()
-    (work / 'bridge-addresses.json').write_text(json.dumps(addr, indent=2) + '\n')
-
-    tools(gen, 'dnb-tool', 'trust-bundle', '--trust-base', '/gen/network/trust-base.json', '--out', '/work/trust-base.bundle.cbor',
-          '--out-pin', '/work/trust-base.genesis.entryid')
-    tools(gen, 'dnb-tool', 'pdr', '--full-shard-conf', '/gen/network/full-shard-conf.json', '--out', '/work/evm-pdr.cbor')
-    # the driver reads <dir>/evm-full-shard-conf.json (the DN-B lane's name)
-    (work / 'evm-full-shard-conf.json').write_bytes((gen / 'network/full-shard-conf.json').read_bytes())
-    config = {'dir': '/work', 'ethUrls': [f'http://ureth{i}:8545' for i in range(1, manifest['validators'] + 1)], 'aggUrl': urls[0], 'aggUrls': urls, 'vault': addr['BridgeVault'], 'verifier': addr['TokenVerifier'],
-              'chainId': manifest['chain_id'], 'evmPartition': 8, 'aggPartition': a.agg_partition,
-              'archive': '/archive'}   # the driver container mounts one validator's certified-block archive read-only at /archive
-    if len(shards) > 1:
-        config['aggShards'] = [{'shard': s, 'url': u} for s, u in zip(shards, urls)]
-    (work / 'lane-config.json').write_text(json.dumps(config, indent=2) + '\n')
-    # what an operator publishes for testers, and nothing else (bridge/README.md "The bridge tester")
-    public = work / 'public'
-    public.mkdir(exist_ok=True)
-    files = {'trustBundle': 'trust-base.bundle.cbor', 'trustEntryId': 'trust-base.genesis.entryid', 'evmPdr': 'evm-pdr.cbor', 'deployment': 'bridge-deployment.json'}
-    for name in files.values():
-        (public / name).write_bytes((work / name).read_bytes())
-    (public / 'index.html').write_bytes((Path(__file__).parent / 'tester/index.html').read_bytes())
-    # genesisHash: the tester checks block 0 against it before sending anything (a reset generation keeps the chain ID)
-    tester = {'ethUrl': a.tester_eth_url, 'aggUrl': a.tester_agg_url, 'lockProofUrl': a.tester_lockproof_url, 'chainId': manifest['chain_id'],
-              'genesisHash': manifest['genesis_hash'], 'vault': addr['BridgeVault'], 'files': files}
-    if a.tester_redeem_eth_url:
-        tester['redeemEthUrl'] = a.tester_redeem_eth_url
-    (public / 'tester-config.json').write_text(json.dumps(tester, indent=2) + '\n')
-    image = subprocess.check_output(['docker', 'image', 'inspect', '--format={{.Id}}', TAG], text=True).strip()
-    ureth = json.loads((gen / 'compose.yaml').read_text())['services']['ureth1']['entrypoint']
-    manifest_doc = release.build(gen, lambda *args: tools(gen, *args, capture=True), image, ureth, release.gateway_limits())
-    (public / 'bridge-release.json').write_text(json.dumps(manifest_doc, indent=2) + '\n')
-    if os.getuid() == 0:   # the package's services run as 10001 (the lock-proof endpoint reads the trust bundle here)
-        subprocess.run(['chown', '-R', '10001:10001', str(work)], check=True)
-    print(json.dumps(addr))
-
-
-if __name__ == '__main__':
-    main()

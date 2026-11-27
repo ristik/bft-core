@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "networkId": 3,
+  "epoch": 1,
+  "epochStartRound": 1,
+  "rootNodes": [
+    {
+      "nodeId": "16Uiu2HAkw9UhK6USgHfQVQ9jwjDg5k72DXdKoGnrrkdgrVTtZUoJ",
+      "sigKey": "0x02f872370b03a48e9224ce715c054dbc7d39b20ef03334973cdb1ad353ace6e924",
+      "stake": 1
+    },
+    {
+      "nodeId": "16Uiu2HAm15V8iVMcdX4yjGy1HwPq3AfaJCYeZwDgU6KvEy8cacm5",
+      "sigKey": "0x02ab4618c7ab4ba0ba2f291b5f14c142bde23f6d8d0c6d7255c391e0cccde72879",
+      "stake": 1
+    },
+    {
+      "nodeId": "16Uiu2HAmCwvWNT2R9obMcdZ1aJHHU2Ti6ch4rapHwPGPxCoGcyzC",
+      "sigKey": "0x02af02d9a0a9eed17776fbf322ba97ea90e335d93a63ac8b42a40b2c320bda40a9",
+      "stake": 1
+    },
+    {
+      "nodeId": "16Uiu2HAmMboePDuGiCj6LwvgQfZtrV2Rm1AC33e2vU2qrbCCUgec",
+      "sigKey": "0x035ef4418c490e3fb11d632af032604151f1f998309c21e827907d6794bbe2d4c4",
+      "stake": 1
+    }
+  ],
+  "quorumThreshold": 3,
+  "stateHash": "",
+  "changeRecordHash": "",
+  "previousEntryHash": "",
+  "signatures": {
+    "16Uiu2HAkw9UhK6USgHfQVQ9jwjDg5k72DXdKoGnrrkdgrVTtZUoJ": "0x1d9ba2416243f307c420fd8e24e8c47ecdda41e512e64c742fae8d2078326bb7306b37baf7e1184e697e9485ae7f438efb8d70ae9efdffdd22b32fd39e024e7800",
+    "16Uiu2HAm15V8iVMcdX4yjGy1HwPq3AfaJCYeZwDgU6KvEy8cacm5": "0x9a4a547ae99130d74ecec0b2ce8fa8a50f2d4334542992bc1b048715064071dd1880ee09fc7f92cf8f507f6978dabcdbea4a0b404f3c95176c12a0f01ab14cc700",
+    "16Uiu2HAmCwvWNT2R9obMcdZ1aJHHU2Ti6ch4rapHwPGPxCoGcyzC": "0x4e8f728dc61f08e90e1e18785f77b9015319acbd68d8578c2c73deb3bf17427607b4ae464a4d7096718171fb1689bfa78fd302f34901ce7f90f0e2162668fcf700",
+    "16Uiu2HAmMboePDuGiCj6LwvgQfZtrV2Rm1AC33e2vU2qrbCCUgec": "0x4822fec1eede8e4c645060974e68d5e0edf5084340ea36d29e2f8696f37a5fd4751a49b2b71ab2c1b4e624b29e1d0c5b60a92695ea88f883df273b3f4edf352b01"
+  }
+}

@@ -3,6 +3,7 @@ package certification
 import (
 	"bytes"
 	"github.com/fxamacker/cbor/v2"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -174,4 +175,53 @@ func TestResponseV3ViewGuards(t *testing.T) {
 	require.ErrorIs(t, err, ErrResponseV3, "a sender cannot produce an over-limit view")
 	hand.PartitionView = []byte{}
 	require.ErrorIs(t, hand.IsValid(), ErrResponseV3, "an empty view is null or absent, never an empty string")
+}
+
+// §49: an attached entry may be as large as the per-entry cap everywhere, 128 KiB (the largest valid entry is 95,365 bytes); the frame limit follows.
+func TestTheAttachedEntryCapIs128KiB(t *testing.T) {
+	require.Equal(t, 128<<10, MaxTrustBaseUpdateBytes)
+	require.Equal(t, MaxCertificationResponseV2Frame+2*(128<<10), MaxCertificationResponseV3Frame)
+	base := v3Base(t)
+	require.NoError(t, NewCertificationResponseV3(base, [][]byte{entryBytes(1, 95_365), entryBytes(2, 95_365)}).IsValid(), "two maximum-size valid entries")
+	require.Error(t, NewCertificationResponseV3(base, [][]byte{entryBytes(1, 128<<10+1)}).IsValid())
+}
+
+// #952, send side: a V3 payload above MaxCertificationResponseV3Frame (1 MiB + 2 x 128 KiB) is never produced, because every shard refuses it on receive.
+// The message text pads the response to the exact boundary with the two largest entries attached.
+func TestResponseV3PayloadIsBoundedByTheFrameLimit(t *testing.T) {
+	entries := [][]byte{entryBytes(1, MaxTrustBaseUpdateBytes), entryBytes(2, MaxTrustBaseUpdateBytes)}
+	withMessage := func(n int) (int, error) {
+		base := v3Base(t)
+		base.Message = strings.Repeat("x", n)
+		raw, err := types.Cbor.Marshal(NewCertificationResponseV3(base, entries))
+		return len(raw), err
+	}
+	// the smallest padding whose payload reaches the limit; the payload grows with the text, by one byte per byte except at length-header steps
+	lo, hi := 0, MaxCertificationResponseV3Frame
+	for lo < hi {
+		mid := (lo + hi) / 2
+		size, err := withMessage(mid)
+		if err != nil {
+			hi = mid
+		} else if size >= MaxCertificationResponseV3Frame {
+			hi = mid
+		} else {
+			lo = mid + 1
+		}
+	}
+	atLimit, err := withMessage(lo - 1)
+	require.NoError(t, err)
+	require.Equal(t, MaxCertificationResponseV3Frame-1, atLimit, "one byte below the limit encodes")
+	size, err := withMessage(lo)
+	require.NoError(t, err)
+	require.Equal(t, MaxCertificationResponseV3Frame, size, "exactly the limit encodes")
+	_, err = withMessage(lo + 1)
+	require.ErrorIs(t, err, ErrResponseV3, "one byte above the limit is refused at encoding")
+	require.ErrorContains(t, err, "exceeds the frame limit")
+
+	t.Run("maximum entries alone are far below the limit", func(t *testing.T) {
+		raw, err := types.Cbor.Marshal(NewCertificationResponseV3(v3Base(t), entries))
+		require.NoError(t, err)
+		require.Less(t, len(raw), MaxCertificationResponseV3Frame)
+	})
 }

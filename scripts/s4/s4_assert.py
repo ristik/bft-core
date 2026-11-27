@@ -163,6 +163,16 @@ def tuple_of(v, fields):
     return {f: (x if isinstance(x, bool) else num(x)) for f, x in zip(fields, v)}
 
 
+def unanchored_terms(c, custody, lid):
+    """#1297/#1298: the lot's closed terms that still wait for their permissionless anchorTerm (custody refuses its maturity, TermAnchorPending, and no
+    post-term report against such a term is admitted; the exit tooling, scripts/x4pos/exit_check.py terms, anchors them). None on contracts that predate it.
+    Not a case effect: anchoring is anyone's call and only raises floors."""
+    try:
+        return num(c(custody, "lotUnanchoredTerms(uint256)(uint32)", lid)[0])
+    except RuntimeError:
+        return None
+
+
 def cmd_snapshot(a):
     rpc = a.rpc
     block = num(run("block-number", "--rpc-url", rpc).strip())
@@ -179,6 +189,7 @@ def cmd_snapshot(a):
         lot["holds"] = rel["holds"]
         lot["retirementImported"] = rel["retirementImported"]
         lot["pendingHolds"] = num(c(a.evidence, "pendingHolds(uint256)(uint32)", lid)[0])
+        lot["unanchoredTerms"] = unanchored_terms(c, a.custody, lid)
         snap["lots"][str(lid)] = lot
     snap["exposureLots"] = lots_ids
     snap["otherLots"] = other

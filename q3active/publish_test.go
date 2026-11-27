@@ -1,7 +1,9 @@
 package q3active
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/internal/testutils/q3fixture"
@@ -47,4 +49,24 @@ func TestPublishRefusesAnEntryThatIsNotAnActivationAndAnotherRecordOfThePublishe
 	require.Equal(t, first.Claim(), r.snap.Load().Claim(), "the provisional handle was not replaced")
 	r.complete(first.Epoch())
 	require.Equal(t, first.Claim(), r.Snapshot().Claim(), "served once the epoch is complete")
+}
+
+func TestWaitActivationWakesEveryReaderAndReplaysTheCurrentTip(t *testing.T) {
+	r := &Runtime{}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	epochs := make(chan uint64, 2)
+	for range 2 {
+		go func() {
+			epoch, _ := r.WaitActivation(ctx, 1)
+			epochs <- epoch
+		}()
+	}
+	r.snap.Store(snapshotOf(2, 1))
+	r.complete(2)
+	require.EqualValues(t, 2, <-epochs)
+	require.EqualValues(t, 2, <-epochs)
+	late, err := r.WaitActivation(ctx, 1)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, late)
 }

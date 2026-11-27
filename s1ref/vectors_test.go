@@ -385,8 +385,8 @@ func TestConflictIdentity(t *testing.T) {
 		t.Fatal("legacy null and empty commit hash must have different content digests")
 	}
 	// Signature forms never change the content or the signer.
-	for _, id := range []string{"s2.sig.65-v0.ok", "s2.sig.65-v1.ok", "s2.sig.alt-nonce.ok"} {
-		if !bytes.Equal(word(id, contentA), word("s2.sig.64.ok", contentA)) || !bytes.Equal(word(id, 5), word("s2.sig.64.ok", 5)) {
+	for _, id := range []string{"s2.sig.alt-nonce.ok"} {
+		if !bytes.Equal(word(id, contentA), word("s2.sig.65.ok", contentA)) || !bytes.Equal(word(id, 5), word("s2.sig.65.ok", 5)) {
 			t.Fatalf("%s: signature form changed content or signer", id)
 		}
 	}

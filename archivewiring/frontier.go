@@ -107,6 +107,9 @@ type ReplicaAvailability struct {
 	Host     shardnode.EvidenceHost
 	Replicas []peer.ID
 	Limits   Limits
+	// ReadBacks, when set, holds the batched read-backs of the running frontier advance (bft-core#1071): a replica that served exactly
+	// the expected representation in one of them is not read again singly. Nil reads every block singly.
+	ReadBacks *ReadBackCache
 }
 
 func (v ReplicaAvailability) VerifyAvailable(name string, q archive.Request, expected [32]byte) error {
@@ -119,6 +122,9 @@ func (v ReplicaAvailability) VerifyAvailable(name string, q archive.Request, exp
 	}
 	if id == "" || v.Host == nil || !v.Limits.valid() {
 		return frontier.ErrContext
+	}
+	if v.ReadBacks.holds(id, q, expected) {
+		return nil // read back complete, with this manifest, by this advance's chain read
 	}
 	ctx := v.Context
 	if ctx == nil {

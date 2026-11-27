@@ -12,6 +12,7 @@ import (
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/trie"
+	libp2ppeer "github.com/libp2p/go-libp2p/core/peer"
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/archive"
 	"github.com/unicitynetwork/bft-core/configuredprogress"
@@ -251,4 +252,38 @@ func archivedHandoffTerminalFixture(t *testing.T) (handoffTerminalCertificate, *
 		Header: headerRaw, Body: bodyRaw, CanonicalRootInput: []byte{1}, Companion: companion, OriginalUC: originalUCraw, OriginalTR: originalTRraw,
 		ResultingUC: resultingUCraw, ResultingTR: resultingTRraw,
 	}
+}
+
+// #1050, failure 2: a follower installed an epoch from its mirrors and restarted. The epoch's terminal body is in neither its journal nor
+// its archive (it never executed that block), so the repair failed and the node crash-looped. The production repair archive falls back to
+// the node's non-root archive sources; the fetched body is verified against the terminal certificate before anything is written, and a
+// tampered one is still refused.
+func TestARestartedFollowerRepairsItsTerminalFromItsArchiveSources(t *testing.T) {
+	terminal, record := archivedHandoffTerminalFixture(t)
+	local := handoffRepairArchive{err: archive.ErrUnavailable}
+	asked := 0
+	src := libp2ppeer.ID("incumbent")
+	sources := remoteFallbackArchive{local: local, sources: func() []libp2ppeer.ID { return []libp2ppeer.ID{"down", src} },
+		fetch: func(id libp2ppeer.ID, _ archive.Request) (*archive.Record, error) {
+			asked++
+			if id != src {
+				return nil, archive.ErrUnavailable
+			}
+			return record, nil
+		}}
+	journal := &handoffRepairJournal{terminal: terminal.uc}
+	require.NoError(t, reapplyHandoffTerminalCertificatesWithArchive(context.Background(), journal, journal, sources, archive.Context{}, configuredprogress.Context{},
+		configuredprogress.JournalLimits{}, []handoffTerminalCertificate{terminal}))
+	require.True(t, journal.backfilled, "the restart proceeds")
+	require.Equal(t, 2, asked)
+
+	tampered := *record
+	tampered.Body = append(bytes.Clone(record.Body), 0xff)
+	bad := remoteFallbackArchive{local: local, sources: func() []libp2ppeer.ID { return []libp2ppeer.ID{src} },
+		fetch: func(libp2ppeer.ID, archive.Request) (*archive.Record, error) { return &tampered, nil }}
+	journal = &handoffRepairJournal{terminal: terminal.uc}
+	err := reapplyHandoffTerminalCertificatesWithArchive(context.Background(), journal, journal, bad, archive.Context{}, configuredprogress.Context{},
+		configuredprogress.JournalLimits{}, []handoffTerminalCertificate{terminal})
+	require.ErrorIs(t, err, archive.ErrInvalid, "a source's bytes are verified, never trusted")
+	require.False(t, journal.backfilled)
 }

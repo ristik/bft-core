@@ -4,8 +4,18 @@ name: testnet-rehearsal
 # verifies hCaptcha, is not started). Manual: it builds ureth from source, which takes the better part of an hour.
 on:
   pull_request:
-    # a change to the package (it is long, but the package changes rarely and this is the only run of it as containers)
-    paths: ['deploy/testnet/**', '.github/workflows/testnet-rehearsal.yml']
+    # Opt-in: it takes over an hour, so it runs only on a PR labelled `rehearse` (add the label to start it; later pushes rerun it while the label stays).
+    # Use it when a PR changes what it runs: generate.py, compose/images, pins.json, rehearse.py, or the node code it boots (no paths filter, so any PR can
+    # opt in). Tooling with unit tests (handoff_drive, remote_joiner, ...) is covered by testnet-package. Removing the label does not stop a run in progress:
+    # cancel it by hand. Adding an unrelated label neither starts nor cancels a run (a run that does not rehearse takes a concurrency group of its own).
+    types: [opened, labeled, synchronize, reopened]
+  push:
+    # integration/enshrined-evm: a change of what the images are built from runs the image build alone (no profile), so that pull requests into it
+    # restore that build (scripts/ci/rehearsal-bundle.py key names the same inputs)
+    branches: [integration/enshrined-evm]
+    paths: ['deploy/testnet/pins.json', 'deploy/testnet/build-images.py', 'deploy/testnet/imagetag.py', 'deploy/testnet/Dockerfile.*', 'deploy/testnet/faucet/**',
+            'deploy/testnet/gateway.py', 'deploy/testnet/public_relay.py', 'deploy/testnet/metrics_relay.py', 'deploy/testnet/.dockerignore', 'deploy/testnet/*.dockerignore',
+            'scripts/ci/rehearsal-bundle.py', '.github/workflows/testnet-rehearsal.yml', 'go.mod']
   workflow_dispatch:
     inputs:
       stages:
@@ -13,16 +23,34 @@ on:
         required: false
         default: ''
       pos_stages:
-        description: 'PoS-only run: rehearse.py PoS-profile stages (e.g. up,identity,first-tx,pos-smoke,pos-election,pos-proposal; the joiner: up,identity,first-tx,pos-smoke,pos-joiner,pos-election,pos-proposal,pos-propose,pos-install,pos-advance,pos-join-signs,pos-restart,pos-join-heavy, on a fresh generation, in the join step below); skips the PoA rehearsal. Opt-in, not in the default list: pos-reject (after pos-election: the automatic RejectResult of an unpublished result, bft-core #857, ~2 h), pos-resources (after pos-recreate) and, for bft-core #843, pos-crash, pos-crash-ureth, pos-crash-shard, pos-crash-root, pos-crash-ureth-shard (after pos-recreate), pos-crash-e2 (after pos-advance), pos-crash-e1 (after pos-smoke)'
+        description: 'PoS-only run: rehearse.py PoS-profile stages (e.g. up,identity,first-tx,pos-smoke,pos-election,pos-proposal; the joiner: up,identity,first-tx,pos-smoke,pos-joiner,pos-election,pos-proposal,pos-propose,pos-install,pos-advance,pos-join-signs,pos-join-heavy,pos-restart, on a fresh generation, in the join step below); skips the PoA rehearsal. Opt-in, not in the default list: pos-reject (after pos-election: the automatic RejectResult of an unpublished result, bft-core #857, ~2 h), pos-resources (after pos-recreate) and, for bft-core #843, pos-crash, pos-crash-ureth, pos-crash-shard, pos-crash-root, pos-crash-ureth-shard (after pos-recreate), pos-crash-e2 (after pos-advance), pos-crash-e1 (after pos-smoke)'
         required: false
         default: ''
+      join_stages:
+        description: 'Join-profile-only run (skips the PoA and the main PoS rehearsals): rehearse.py stages for the join generation, e.g. up,identity,first-tx,pos-smoke,pos-joiner,pos-election,pos-proposal,pos-propose,pos-install,pos-advance,pos-restore-repeat (bft-core #905: the joiner restore repeated with pid evidence and a low-limit control)'
+        required: false
+        default: ''
+      restore_repeat:
+        description: 'pos-restore-repeat: number of restores at the package pid limit (default 20)'
+        required: false
+        default: '20'
+      restore_controls:
+        description: 'pos-restore-repeat: low pid limits as the control, comma separated; the lowest must reproduce pthread_create failed (default 24,16)'
+        required: false
+        default: '24,16'
 permissions:
   contents: read
 concurrency:
-  group: testnet-rehearsal-${{ github.ref }}
-  cancel-in-progress: false
+  # A newer push supersedes the PR run in progress (the whole run: the image build and every profile). A run that does not rehearse (an unrelated
+  # label) takes a group of its own, so it never cancels a rehearsal. Dispatch runs (refs/heads/...) never share a group with a PR and are never cancelled.
+  group: testnet-rehearsal-${{ github.ref }}${{ !(github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'rehearse') && (github.event.action != 'labeled' || github.event.label.name == 'rehearse'))) && format('-idle-{0}', github.run_id) || '' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
-  rehearse:
+  # The image build runs once; each profile then runs on its own runner from the same verified images and tools (the profile steps below are
+  # the steps of the former single job, unchanged). `rehearse` is the one result the merge tooling reads.
+  images:
+    name: Build the images
+    if: ${{ github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'rehearse') && (github.event.action != 'labeled' || github.event.label.name == 'rehearse')) }}
     # ubuntu-22.04 (glibc 2.35), not -latest (2.39): a binary needs a glibc no newer than the runtime image's (bookworm, 2.36). The first run built on 2.39 and
     # build-images.py's own --help check in the runtime image refused it, as the package README says (build on Debian 12 or older).
     runs-on: ubuntu-22.04
@@ -45,110 +73,129 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: The cache key of this build (pins.json, the Dockerfiles and their inputs, the build scripts, the toolchains, the runner image)
+        id: key
+        run: python3 scripts/ci/rehearsal-bundle.py key | tee -a "$GITHUB_OUTPUT"
+      # Pull requests restore the bundle a run built from exactly these inputs (exact key, no restore-keys); a PR's own cache writes stay in its own
+      # scope. Trusted events (push, dispatch) never restore: they build with build-images.py and save.
+      - name: Restore the build of these pins (pull requests only)
+        id: cache
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/rehearsal-build-cache
+          key: ${{ steps.key.outputs.key }}
+      - name: Load the restored build (verified against pins.json and images.json; refused on any mismatch, never rebuilt over)
+        if: ${{ steps.cache.outputs.cache-hit == 'true' }}
+        run: |
+          python3 scripts/ci/rehearsal-bundle.py unpack "$RUNNER_TEMP/rehearsal-build-cache/bundle.tar.zst" \
+            ubft=pinned-bft/build/ubft keygen=/tmp/tn-keygen b1genesis=/tmp/tn-b1genesis h4pin=/tmp/tn-h4pin
+          echo "- images and pinned tools restored from cache \`${{ steps.key.outputs.key }}\`" >>"$GITHUB_STEP_SUMMARY"
       - uses: actions/checkout@v4
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
         with:
           ref: ${{ steps.pins.outputs.bft }}
           path: pinned-bft
       - uses: actions/checkout@v4
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
         with:
           repository: ristik/ureth
           ref: ${{ steps.pins.outputs.ureth }}
           path: pinned-ureth
       - uses: actions/checkout@v4
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
         with:
           repository: ristik/aggregator-go
           ref: ${{ steps.pins.outputs.aggregator_go }}
           path: pinned-aggregator-go
-      - uses: actions/checkout@v4
-        with:
-          repository: ristik/unicity-pos-contracts
-          ref: ${{ steps.pins.outputs.contracts }}
-          path: pinned-contracts
-          submodules: recursive   # the PoS profile's genesis is built from a clean checkout at the pin (generate.py refuses any other)
-      - run: sudo apt-get update && sudo apt-get install -y clang libclang-dev libssl-dev pkg-config protobuf-compiler
-      - uses: foundry-rs/foundry-toolchain@v1
-        with:
-          version: v1.8.1   # cast: offline signing of the rehearsal's transactions
+      - if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev libssl-dev pkg-config protobuf-compiler
       - uses: Swatinem/rust-cache@v2
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
         with:
           cache-on-failure: true
           workspaces: |
             pinned-ureth
       - name: Build the images from the pinned sources (build-images.py builds each binary and checks the source pin and a clean tree)
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
         run: python3 deploy/testnet/build-images.py --bft-source pinned-bft --ureth-source pinned-ureth --aggregator-go-source pinned-aggregator-go
       - run: go build -o /tmp/tn-keygen ./deploy/testnet/keygen
-      - run: go build -C pinned-bft -o /tmp/tn-b1genesis ./scripts/b1genesis
-      - run: go build -C pinned-bft -o /tmp/tn-h4pin ./scripts/h4-restore-pin   # the PoS join restores the joiner's shard node from a survivor's archive
+      - if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        run: go build -C pinned-bft -o /tmp/tn-b1genesis ./scripts/b1genesis
+      - if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        run: go build -C pinned-bft -o /tmp/tn-h4pin ./scripts/h4-restore-pin   # the PoS join restores the joiner's shard node from a survivor's archive
+      - name: Pack the images and tools for the profile jobs
+        run: |
+          python3 scripts/ci/rehearsal-bundle.py pack "$RUNNER_TEMP/rehearsal-bundle.tar.zst" \
+            ubft=pinned-bft/build/ubft keygen=/tmp/tn-keygen b1genesis=/tmp/tn-b1genesis h4pin=/tmp/tn-h4pin
+      - name: Keep the bundle for the cache
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        run: mkdir -p "$RUNNER_TEMP/rehearsal-build-cache" && cp "$RUNNER_TEMP/rehearsal-bundle.tar.zst" "$RUNNER_TEMP/rehearsal-build-cache/bundle.tar.zst"
+      - name: Save the build of these pins
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/rehearsal-build-cache
+          key: ${{ steps.key.outputs.key }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: testnet-rehearsal-bundle
+          path: ${{ runner.temp }}/rehearsal-bundle.tar.zst
+          compression-level: 0   # already zstd
+          retention-days: 1
+          overwrite: true
+
+  rehearse-poa:
+    name: Rehearse PoA
+    needs: images
+    if: ${{ github.event_name != 'push' && (github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'rehearse') && (github.event.action != 'labeled' || github.event.label.name == 'rehearse'))) && inputs.pos_stages == '' && inputs.join_stages == '' }}
+    # ubuntu-22.04 as the build job: the same runtime as before the split (one profile per runner, after the same image build).
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk (the loaded images and the generations)
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          df -h /
+      - id: pins
+        run: |
+          python3 - <<'E' >> "$GITHUB_OUTPUT"
+          import json
+          p = json.load(open('deploy/testnet/pins.json'))
+          for k in ('bft', 'ureth', 'aggregator-go', 'contracts'):
+              print(f"{k.replace('-', '_')}={p[k]}")
+          E
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false   # nothing is built here; generate.py reads the tools' build info with go version -m
+      - uses: ./.github/actions/foundry   # Foundry v1.8.1 (digest-pinned archive): cast, offline signing of the rehearsal's transactions
+      - uses: actions/download-artifact@v4
+        with:
+          name: testnet-rehearsal-bundle
+          path: ${{ runner.temp }}
+      - name: Load the images and tools of the build job (verified against pins.json and images.json; refused on any mismatch)
+        run: |
+          python3 scripts/ci/rehearsal-bundle.py unpack "$RUNNER_TEMP/rehearsal-bundle.tar.zst" \
+            ubft=pinned-bft/build/ubft keygen=/tmp/tn-keygen b1genesis=/tmp/tn-b1genesis h4pin=/tmp/tn-h4pin
+          rm -f "$RUNNER_TEMP/rehearsal-bundle.tar.zst"
+          df -h /
       - name: Generate a generation (authorities start here and stay live)
         run: |
           umask 077
           echo rehearsal-not-a-real-secret > /tmp/captcha-secret
-          sudo -E env "PATH=$PATH" python3 deploy/testnet/generate.py --out /srv/tn-rehearsal-1 --validators 4 --chain-id 31337 \
-            --ubft pinned-bft/build/ubft --b1genesis /tmp/tn-b1genesis --keygen /tmp/tn-keygen \
-            --captcha-sitekey rehearsal-sitekey --captcha-secret-file /tmp/captcha-secret
+          sudo -E env "PATH=$PATH" python3 deploy/testnet/generate.py --first-generation --out /srv/tn-rehearsal-1 --validators 4 --chain-id 31337 \
+            --ubft pinned-bft/build/ubft --b1genesis /tmp/tn-b1genesis --keygen /tmp/tn-keygen --block-interval-ms 0 \
+            --captcha-sitekey rehearsal-sitekey --captcha-secret-file /tmp/captcha-secret --no-utb
       - name: Rehearse
-        if: ${{ inputs.pos_stages == '' }}
+        if: ${{ inputs.pos_stages == '' && inputs.join_stages == '' }}
         env:
           STAGES: ${{ inputs.stages }}
         run: |
           sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-rehearsal-1 --evidence "$RUNNER_TEMP/evidence" \
             --reset-out /srv/tn-rehearsal-2 --reset-ubft pinned-bft/build/ubft --reset-b1genesis /tmp/tn-b1genesis --reset-keygen /tmp/tn-keygen \
             --reset-captcha-sitekey rehearsal-sitekey --reset-captcha-secret-file /tmp/captcha-secret ${STAGES:+--stages "$STAGES"}
-      - name: PoS profile, generation (the PoA generation is stopped first, the host ports are the same)
-        if: ${{ inputs.stages == '' }}
-        run: |
-          for d in /srv/tn-rehearsal-2 /srv/tn-rehearsal-1-restored /srv/tn-rehearsal-1; do
-            if sudo test -f "$d/compose.yaml"; then sudo docker compose -f "$d/compose.yaml" down; fi
-          done
-          umask 077
-          sudo -E env "PATH=$PATH" python3 deploy/testnet/generate.py --out /srv/tn-rehearsal-pos --validators 4 --chain-id 31337 \
-            --ubft pinned-bft/build/ubft --b1genesis /tmp/tn-b1genesis --keygen /tmp/tn-keygen \
-            --captcha-sitekey rehearsal-sitekey --captcha-secret-file /tmp/captcha-secret \
-            --pos --pos-contracts pinned-contracts
-      - name: PoS profile, rehearse (first start, the 5a smoke, owner keys, the reward pool, the election, the handoff proposal)
-        if: ${{ inputs.stages == '' }}
-        env:
-          POS_STAGES: ${{ inputs.pos_stages }}
-        run: |
-          sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-rehearsal-pos --evidence "$RUNNER_TEMP/evidence-pos" \
-            --ubft pinned-bft/build/ubft --restore-pin /tmp/tn-h4pin --stages "${POS_STAGES:-up,identity,first-tx,pos-smoke,pos-observe,pos-rewards,pos-election,pos-proposal,pos-abort,pos-propose,pos-too-late,pos-install,pos-advance,pos-restart,pos-stale,pos-handoff-2,pos-restart-2,pos-recreate,pos-owner}"
-      - name: PoS profile, resources and logs
-        if: always() && inputs.stages == ''
-        run: |
-          mkdir -p "$RUNNER_TEMP/evidence-pos"
-          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/evidence-pos" || true
-          if sudo test -f /srv/tn-rehearsal-pos/compose.yaml; then
-            docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.PIDs}}' > "$RUNNER_TEMP/evidence-pos/docker-stats.txt" || true
-            sudo bash -c "cd /srv/tn-rehearsal-pos && F='-f compose.yaml'; [ -f compose.joiner.json ] && F=\"\$F -f compose.joiner.json\"; docker compose \$F ps -a > '$RUNNER_TEMP/evidence-pos/compose-ps.txt' && docker compose \$F logs --no-color --timestamps --tail 600 > '$RUNNER_TEMP/evidence-pos/compose-logs.txt'" || true
-            sudo cp /srv/tn-rehearsal-pos/manifest.json "$RUNNER_TEMP/evidence-pos/manifest.json" || true
-            sudo cp -r /srv/tn-rehearsal-pos/network "$RUNNER_TEMP/evidence-pos/network" || true   # public material only: no key is ever in network/
-            sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/evidence-pos" || true
-          fi
-      - name: PoS join profile, generation (a fresh PoS generation, the main one is stopped first, the host ports are the same)
-        if: ${{ inputs.stages == '' && inputs.pos_stages == '' }}
-        run: |
-          if sudo test -f /srv/tn-rehearsal-pos/compose.yaml; then sudo docker compose -f /srv/tn-rehearsal-pos/compose.yaml down; fi
-          umask 077
-          sudo -E env "PATH=$PATH" python3 deploy/testnet/generate.py --out /srv/tn-rehearsal-join --validators 4 --chain-id 31337 \
-            --ubft pinned-bft/build/ubft --b1genesis /tmp/tn-b1genesis --keygen /tmp/tn-keygen \
-            --captcha-sitekey rehearsal-sitekey --captcha-secret-file /tmp/captcha-secret \
-            --pos --pos-contracts pinned-contracts
-      - name: PoS join profile, rehearse (a fifth entity joins - register, bond, delegate, election with five, handoff to five, it signs, restarts)
-        if: ${{ inputs.stages == '' && inputs.pos_stages == '' }}
-        run: |
-          sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-rehearsal-join --evidence "$RUNNER_TEMP/evidence-join" \
-            --ubft pinned-bft/build/ubft --restore-pin /tmp/tn-h4pin \
-            --stages "up,identity,first-tx,pos-smoke,pos-joiner,pos-election,pos-proposal,pos-propose,pos-install,pos-advance,pos-join-signs,pos-restart,pos-join-heavy"
-      - name: PoS join profile, logs
-        if: always() && inputs.stages == '' && inputs.pos_stages == ''
-        run: |
-          mkdir -p "$RUNNER_TEMP/evidence-join"
-          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/evidence-join" || true
-          if sudo test -f /srv/tn-rehearsal-join/compose.yaml; then
-            sudo bash -c "cd /srv/tn-rehearsal-join && F='-f compose.yaml'; [ -f compose.joiner.json ] && F=\"\$F -f compose.joiner.json\"; docker compose \$F ps -a > '$RUNNER_TEMP/evidence-join/compose-ps.txt' && docker compose \$F logs --no-color --timestamps --tail 600 > '$RUNNER_TEMP/evidence-join/compose-logs.txt'" || true
-            sudo cp -r /srv/tn-rehearsal-join/network "$RUNNER_TEMP/evidence-join/network" || true   # public material only
-            sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/evidence-join" || true
-          fi
       - name: Resources and logs
         if: always()
         run: |
@@ -159,6 +206,7 @@ jobs:
           # the generation that is live now: the reset's, else the restored one, else the original
           G=$(for d in /srv/tn-rehearsal-2 /srv/tn-rehearsal-1-restored /srv/tn-rehearsal-1; do sudo test -f "$d/compose.yaml" && { echo "$d"; break; }; done)
           sudo bash -c "cd '$G' && docker compose ps -a > '$RUNNER_TEMP/evidence/compose-ps.txt' && docker compose logs --no-color --timestamps --tail 400 > '$RUNNER_TEMP/evidence/compose-logs.txt'" || true
+          sudo PYTHONDONTWRITEBYTECODE=1 python3 deploy/testnet/redact_evidence.py "$G" "$RUNNER_TEMP/evidence/compose-logs.txt" || sudo bash -c "echo '[log withheld: redaction did not finish]' > '$RUNNER_TEMP/evidence/compose-logs.txt'"
           sudo cp "$G/manifest.json" "$RUNNER_TEMP/evidence/manifest.json" || true
           sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/evidence" || true
           cp deploy/testnet/artifacts/images.json "$RUNNER_TEMP/evidence/images.json" || true
@@ -167,15 +215,196 @@ jobs:
         with:
           name: testnet-rehearsal-evidence
           path: ${{ runner.temp }}/evidence
+
+  rehearse-pos:
+    name: Rehearse PoS
+    needs: images
+    if: ${{ github.event_name != 'push' && (github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'rehearse') && (github.event.action != 'labeled' || github.event.label.name == 'rehearse'))) && inputs.stages == '' && inputs.join_stages == '' }}
+    # ubuntu-22.04 as the build job: the same runtime as before the split (one profile per runner, after the same image build).
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk (the loaded images and the generations)
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          df -h /
+      - id: pins
+        run: |
+          python3 - <<'E' >> "$GITHUB_OUTPUT"
+          import json
+          p = json.load(open('deploy/testnet/pins.json'))
+          for k in ('bft', 'ureth', 'aggregator-go', 'contracts'):
+              print(f"{k.replace('-', '_')}={p[k]}")
+          E
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false   # nothing is built here; generate.py reads the tools' build info with go version -m
+      - uses: actions/checkout@v4
+        with:
+          repository: ristik/unicity-pos-contracts
+          ref: ${{ steps.pins.outputs.contracts }}
+          path: pinned-contracts
+          submodules: recursive   # the PoS profile's genesis is built from a clean checkout at the pin (generate.py refuses any other)
+      - uses: ./.github/actions/foundry   # Foundry v1.8.1 (digest-pinned archive): cast, offline signing of the rehearsal's transactions
+      - uses: actions/download-artifact@v4
+        with:
+          name: testnet-rehearsal-bundle
+          path: ${{ runner.temp }}
+      - name: Load the images and tools of the build job (verified against pins.json and images.json; refused on any mismatch)
+        run: |
+          python3 scripts/ci/rehearsal-bundle.py unpack "$RUNNER_TEMP/rehearsal-bundle.tar.zst" \
+            ubft=pinned-bft/build/ubft keygen=/tmp/tn-keygen b1genesis=/tmp/tn-b1genesis h4pin=/tmp/tn-h4pin
+          rm -f "$RUNNER_TEMP/rehearsal-bundle.tar.zst"
+          df -h /
+      - name: The rehearsal captcha secret (the PoA generation step writes the same file)
+        run: |
+          umask 077
+          echo rehearsal-not-a-real-secret > /tmp/captcha-secret
+      - name: PoS profile, generation (the PoA generation is stopped first, the host ports are the same)
+        if: ${{ inputs.stages == '' && inputs.join_stages == '' }}
+        run: |
+          for d in /srv/tn-rehearsal-2 /srv/tn-rehearsal-1-restored /srv/tn-rehearsal-1; do
+            if sudo test -f "$d/compose.yaml"; then sudo docker compose -f "$d/compose.yaml" down; fi
+          done
+          umask 077
+          sudo -E env "PATH=$PATH" python3 deploy/testnet/generate.py --first-generation --out /srv/tn-rehearsal-pos --validators 4 --chain-id 31337 \
+            --ubft pinned-bft/build/ubft --b1genesis /tmp/tn-b1genesis --keygen /tmp/tn-keygen --block-interval-ms 0 \
+            --captcha-sitekey rehearsal-sitekey --captcha-secret-file /tmp/captcha-secret --no-utb \
+            --pos --pos-contracts pinned-contracts
+      - name: PoS profile, rehearse (first start, the 5a smoke, owner keys, the reward pool, the election, the handoff proposal)
+        if: ${{ inputs.stages == '' && inputs.join_stages == '' }}
+        env:
+          POS_STAGES: ${{ inputs.pos_stages }}
+        run: |
+          sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-rehearsal-pos --evidence "$RUNNER_TEMP/evidence-pos" \
+            --ubft pinned-bft/build/ubft --restore-pin /tmp/tn-h4pin --stages "${POS_STAGES:-up,identity,first-tx,pos-smoke,pos-observe,pos-rewards,pos-election,pos-proposal,pos-abort,pos-propose,pos-too-late,pos-install,pos-advance,pos-restart,pos-stale,pos-handoff-2,pos-restart-2,pos-recreate,pos-owner}"
+      - name: PoS profile, resources and logs
+        if: always() && inputs.stages == '' && inputs.join_stages == ''
+        run: |
+          mkdir -p "$RUNNER_TEMP/evidence-pos"
+          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/evidence-pos" || true
+          if sudo test -f /srv/tn-rehearsal-pos/compose.yaml; then
+            docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.PIDs}}' > "$RUNNER_TEMP/evidence-pos/docker-stats.txt" || true
+            sudo bash -c "cd /srv/tn-rehearsal-pos && F='-f compose.yaml'; [ -f compose.joiner.json ] && F=\"\$F -f compose.joiner.json\"; docker compose \$F ps -a > '$RUNNER_TEMP/evidence-pos/compose-ps.txt' && docker compose \$F logs --no-color --timestamps --tail 600 > '$RUNNER_TEMP/evidence-pos/compose-logs.txt'" || true
+            sudo PYTHONDONTWRITEBYTECODE=1 python3 deploy/testnet/redact_evidence.py /srv/tn-rehearsal-pos "$RUNNER_TEMP/evidence-pos/compose-logs.txt" || sudo bash -c "echo '[log withheld: redaction did not finish]' > '$RUNNER_TEMP/evidence-pos/compose-logs.txt'"
+            sudo cp /srv/tn-rehearsal-pos/manifest.json "$RUNNER_TEMP/evidence-pos/manifest.json" || true
+            sudo cp -r /srv/tn-rehearsal-pos/network "$RUNNER_TEMP/evidence-pos/network" || true   # public material only: no key is ever in network/
+            sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/evidence-pos" || true
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always() && inputs.stages == '' && inputs.join_stages == ''
+        with:
+          name: testnet-rehearsal-pos-evidence
+          path: ${{ runner.temp }}/evidence-pos
+          if-no-files-found: ignore
+
+  rehearse-join:
+    name: Rehearse PoS join
+    needs: images
+    if: ${{ github.event_name != 'push' && (github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'rehearse') && (github.event.action != 'labeled' || github.event.label.name == 'rehearse'))) && inputs.stages == '' && inputs.pos_stages == '' }}
+    # ubuntu-22.04 as the build job: the same runtime as before the split (one profile per runner, after the same image build).
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk (the loaded images and the generations)
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          df -h /
+      - id: pins
+        run: |
+          python3 - <<'E' >> "$GITHUB_OUTPUT"
+          import json
+          p = json.load(open('deploy/testnet/pins.json'))
+          for k in ('bft', 'ureth', 'aggregator-go', 'contracts'):
+              print(f"{k.replace('-', '_')}={p[k]}")
+          E
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false   # nothing is built here; generate.py reads the tools' build info with go version -m
+      - uses: actions/checkout@v4
+        with:
+          repository: ristik/unicity-pos-contracts
+          ref: ${{ steps.pins.outputs.contracts }}
+          path: pinned-contracts
+          submodules: recursive   # the PoS profile's genesis is built from a clean checkout at the pin (generate.py refuses any other)
+      - uses: ./.github/actions/foundry   # Foundry v1.8.1 (digest-pinned archive): cast, offline signing of the rehearsal's transactions
+      - uses: actions/download-artifact@v4
+        with:
+          name: testnet-rehearsal-bundle
+          path: ${{ runner.temp }}
+      - name: Load the images and tools of the build job (verified against pins.json and images.json; refused on any mismatch)
+        run: |
+          python3 scripts/ci/rehearsal-bundle.py unpack "$RUNNER_TEMP/rehearsal-bundle.tar.zst" \
+            ubft=pinned-bft/build/ubft keygen=/tmp/tn-keygen b1genesis=/tmp/tn-b1genesis h4pin=/tmp/tn-h4pin
+          rm -f "$RUNNER_TEMP/rehearsal-bundle.tar.zst"
+          df -h /
+      - name: The rehearsal captcha secret (the PoA generation step writes the same file)
+        run: |
+          umask 077
+          echo rehearsal-not-a-real-secret > /tmp/captcha-secret
+      - name: PoS join profile, generation (a fresh PoS generation, the main one is stopped first, the host ports are the same)
+        if: ${{ inputs.stages == '' && inputs.pos_stages == '' }}
+        run: |
+          if sudo test -f /srv/tn-rehearsal-pos/compose.yaml; then sudo docker compose -f /srv/tn-rehearsal-pos/compose.yaml down; fi
+          umask 077
+          sudo -E env "PATH=$PATH" python3 deploy/testnet/generate.py --first-generation --out /srv/tn-rehearsal-join --validators 4 --chain-id 31337 \
+            --ubft pinned-bft/build/ubft --b1genesis /tmp/tn-b1genesis --keygen /tmp/tn-keygen --block-interval-ms 0 \
+            --captcha-sitekey rehearsal-sitekey --captcha-secret-file /tmp/captcha-secret --no-utb \
+            --pos --pos-contracts pinned-contracts
+      - name: PoS join profile, rehearse (a fifth entity joins - register, bond, delegate, election with five, handoff to five, it signs, restarts)
+        if: ${{ inputs.stages == '' && inputs.pos_stages == '' }}
+        env:
+          JOIN_STAGES: ${{ inputs.join_stages }}
+          RESTORE_REPEAT: ${{ inputs.restore_repeat }}
+          RESTORE_CONTROLS: ${{ inputs.restore_controls }}
+        run: |
+          sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-rehearsal-join --evidence "$RUNNER_TEMP/evidence-join" \
+            --ubft pinned-bft/build/ubft --restore-pin /tmp/tn-h4pin \
+            --restore-repeat "${RESTORE_REPEAT:-20}" --restore-controls "${RESTORE_CONTROLS:-24,16}" \
+            --stages "${JOIN_STAGES:-up,identity,first-tx,pos-smoke,pos-joiner,pos-election,pos-proposal,pos-propose,pos-install,pos-advance,pos-join-signs,pos-join-heavy,pos-restart}"
+      - name: PoS join profile, logs
+        if: always() && inputs.stages == '' && inputs.pos_stages == ''
+        run: |
+          mkdir -p "$RUNNER_TEMP/evidence-join"
+          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/evidence-join" || true
+          if sudo test -f /srv/tn-rehearsal-join/compose.yaml; then
+            sudo bash -c "cd /srv/tn-rehearsal-join && F='-f compose.yaml'; [ -f compose.joiner.json ] && F=\"\$F -f compose.joiner.json\"; docker compose \$F ps -a > '$RUNNER_TEMP/evidence-join/compose-ps.txt' && docker compose \$F logs --no-color --timestamps --tail 600 > '$RUNNER_TEMP/evidence-join/compose-logs.txt'" || true
+            sudo PYTHONDONTWRITEBYTECODE=1 python3 deploy/testnet/redact_evidence.py /srv/tn-rehearsal-join "$RUNNER_TEMP/evidence-join/compose-logs.txt" || sudo bash -c "echo '[log withheld: redaction did not finish]' > '$RUNNER_TEMP/evidence-join/compose-logs.txt'"
+            sudo cp -r /srv/tn-rehearsal-join/network "$RUNNER_TEMP/evidence-join/network" || true   # public material only
+            sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/evidence-join" || true
+          fi
       - uses: actions/upload-artifact@v4
         if: always() && inputs.stages == '' && inputs.pos_stages == ''
         with:
           name: testnet-rehearsal-join-evidence
           path: ${{ runner.temp }}/evidence-join
           if-no-files-found: ignore
-      - uses: actions/upload-artifact@v4
-        if: always() && inputs.stages == ''
-        with:
-          name: testnet-rehearsal-pos-evidence
-          path: ${{ runner.temp }}/evidence-pos
-          if-no-files-found: ignore
+
+  # The check the merge tooling reads: passes only when the build and every profile this run selected passed (all three on a PR).
+  rehearse:
+    needs: [images, rehearse-poa, rehearse-pos, rehearse-join]
+    if: ${{ !cancelled() && github.event_name != 'push' && (github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'rehearse') && (github.event.action != 'labeled' || github.event.label.name == 'rehearse'))) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require the image build and the profiles
+        env:
+          EVENT: ${{ github.event_name }}
+          IMAGES: ${{ needs.images.result }}
+          POA: ${{ needs.rehearse-poa.result }}
+          POS: ${{ needs.rehearse-pos.result }}
+          JOIN: ${{ needs.rehearse-join.result }}
+        run: |
+          echo "images: $IMAGES, PoA: $POA, PoS: $POS, PoS join: $JOIN"
+          [[ "$IMAGES" == success ]]
+          if [[ "$EVENT" == pull_request ]]; then
+            [[ "$POA" == success && "$POS" == success && "$JOIN" == success ]]
+          else
+            # a dispatch with stage inputs runs only the profiles they select; every one that ran must pass and at least one must run
+            for r in "$POA" "$POS" "$JOIN"; do [[ "$r" == success || "$r" == skipped ]]; done
+            [[ "$POA" == success || "$POS" == success || "$JOIN" == success ]]
+          fi

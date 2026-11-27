@@ -34,10 +34,11 @@ type parkedApproval struct {
 	msg    *abdrc.HandoffApprovalMsg
 	result [32]byte
 	at     time.Time
+	gen    uint64 // the consensus context it was parked under (#1086): released only into that one
 }
 
 const (
-	maxParkedApprovals = 32
+	maxParkedApprovals = 256 // one per signer while the facts arrive: the committee ceiling (evmassign.MaxPrimaryPoPs)
 	parkedApprovalTTL  = 2 * time.Minute
 )
 
@@ -184,26 +185,40 @@ func (x *ConsensusManager) parkApproval(msg *abdrc.HandoffApprovalMsg, result [3
 	if _, replace := c.parked[msg.Signer]; !replace && len(c.parked) >= maxParkedApprovals {
 		return
 	}
-	c.parked[msg.Signer] = parkedApproval{msg: msg, result: result, at: time.Now()}
+	c.parked[msg.Signer] = parkedApproval{msg: msg, result: result, at: time.Now(), gen: x.contextGen()}
+}
+
+// dropParked forgets the parked approvals: the in-process epoch switch (#1086) ends every one of them with the epoch they were sent in.
+func (c *primaryCache) dropParked() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.parked = nil
 }
 
 func (x *ConsensusManager) releaseParkedApprovals(result [32]byte) {
 	c := &x.primaryCache
 	c.mu.Lock()
-	var release []*abdrc.HandoffApprovalMsg
+	var release []parkedApproval
 	for k, p := range c.parked {
 		if p.result == result {
-			release = append(release, p.msg)
+			release = append(release, p)
 			delete(c.parked, k)
 		}
 	}
 	c.mu.Unlock()
-	for _, m := range release {
+	for _, p := range release {
+		m := p.msg
 		sink := x.approvalSink
 		if sink == nil {
 			sink = func(m *abdrc.HandoffApprovalMsg) error { return x.onHandoffApprovalMsg(context.Background(), m) }
 		}
-		if err := sink(m); err != nil {
+		// judged only in the context it was parked in, and never while an epoch switch replaces it (#1086)
+		if err := x.operator(func() error {
+			if err := x.contextOpen(p.gen); err != nil {
+				return err
+			}
+			return sink(m)
+		}); err != nil {
 			x.log.Debug("a parked handoff approval was refused when its facts landed", "signer", m.Signer, "err", err)
 		}
 	}
@@ -264,7 +279,7 @@ func (x *ConsensusManager) cachedPrimaryWitness(parent, result [32]byte) ([]byte
 // prefetchForPlan starts the witness build for a primary plan once its frozen parent is known (an endorser knows it from the Prepare), so
 // that whichever root leads the Freeze finds it built.
 func (x *ConsensusManager) prefetchForPlan(preimage, frozenParent []byte) {
-	if len(preimage) == 0 || len(frozenParent) != 32 || !x.blockStore.PosServices().RequiresPrimaryProof() {
+	if len(preimage) == 0 || len(frozenParent) != 32 || !x.blockStore().PosServices().RequiresPrimaryProof() {
 		return
 	}
 	c, err := evmassign.DecodeCandidate(preimage)
@@ -278,7 +293,7 @@ func (x *ConsensusManager) prefetchForPlan(preimage, frozenParent []byte) {
 // this candidate. It only reads the cache: a missing witness starts its build and is reported unavailable, so the leader's round never
 // waits on the execution client.
 func (x *ConsensusManager) primaryFreezeProof(plan *pendingHandoff, frozenParent []byte) ([]byte, error) {
-	if len(plan.plan.CandidatePreimage) == 0 || !x.blockStore.PosServices().RequiresPrimaryProof() {
+	if len(plan.plan.CandidatePreimage) == 0 || !x.blockStore().PosServices().RequiresPrimaryProof() {
 		return nil, nil
 	}
 	c, err := evmassign.DecodeCandidate(plan.plan.CandidatePreimage)
@@ -290,7 +305,7 @@ func (x *ConsensusManager) primaryFreezeProof(plan *pendingHandoff, frozenParent
 
 // primaryProofFor is primaryFreezeProof over a decoded candidate.
 func (x *ConsensusManager) primaryProofFor(c evmassign.Candidate, rawPoPs, frozenParent []byte) ([]byte, error) {
-	if !x.blockStore.PosServices().RequiresPrimaryProof() || c.Kind != evmassign.KindPrimary {
+	if !x.blockStore().PosServices().RequiresPrimaryProof() || c.Kind != evmassign.KindPrimary {
 		return nil, nil
 	}
 	pops, err := evmassign.DecodePoPs(rawPoPs)
@@ -312,7 +327,7 @@ func (x *ConsensusManager) primaryProofFor(c evmassign.Candidate, rawPoPs, froze
 // checkPrimaryPoPsShape requires the EVM possession proofs exactly where the chain will judge them and nothing else: a primary candidate on a
 // chain with the election pinned carries a well-formed list, everything else carries none. It needs no EVM state.
 func (x *ConsensusManager) checkPrimaryPoPsShape(msg *abdrc.HandoffApprovalMsg, c evmassign.Candidate) error {
-	svc := x.blockStore.PosServices()
+	svc := x.blockStore().PosServices()
 	judged := len(msg.CandidatePreimage) != 0 && c.Kind == evmassign.KindPrimary && svc.RequiresPrimaryProof()
 	if !judged {
 		if len(msg.PrimaryPoPs) != 0 {
@@ -329,7 +344,7 @@ func (x *ConsensusManager) checkPrimaryPoPsShape(msg *abdrc.HandoffApprovalMsg, 
 // judgePoPs judges the proofs in full against the election's published facts: one valid proof per member, and the set the election stored (so
 // no member can fix a wrong set in a plan by sending its approval first). Freeze admission re-judges everything against the frozen parent.
 func (x *ConsensusManager) judgePoPs(msg *abdrc.HandoffApprovalMsg, c evmassign.Candidate, facts evmassign.PrimaryFacts) error {
-	svc := x.blockStore.PosServices()
+	svc := x.blockStore().PosServices()
 	pops, err := evmassign.DecodePoPs(msg.PrimaryPoPs)
 	if err != nil {
 		return errors.Join(ErrHandoffApproval, storage.ErrPrimaryProofMissing, err)
@@ -370,7 +385,7 @@ var errPrimaryFactsPending = errors.New("the primary result's facts are being fe
 // were verified (so only a real old-committee member can cost anything). It never calls the execution client: it reads the facts cache, and
 // on a miss starts the background fetch and parks the approval to be judged when the facts land.
 func (x *ConsensusManager) judgeApprovalPoPs(msg *abdrc.HandoffApprovalMsg) error {
-	if len(msg.CandidatePreimage) == 0 || !x.blockStore.PosServices().RequiresPrimaryProof() {
+	if len(msg.CandidatePreimage) == 0 || !x.blockStore().PosServices().RequiresPrimaryProof() {
 		return nil
 	}
 	c, err := evmassign.DecodeCandidate(msg.CandidatePreimage)
@@ -392,7 +407,7 @@ func (x *ConsensusManager) judgeApprovalPoPs(msg *abdrc.HandoffApprovalMsg) erro
 
 // prefetchFactsForPlan starts the background fetch of the result's facts when the operator's own plan is held, before any approval arrives.
 func (x *ConsensusManager) prefetchFactsForPlan(preimage []byte) {
-	if len(preimage) == 0 || !x.blockStore.PosServices().RequiresPrimaryProof() {
+	if len(preimage) == 0 || !x.blockStore().PosServices().RequiresPrimaryProof() {
 		return
 	}
 	if c, err := evmassign.DecodeCandidate(preimage); err == nil && c.Kind == evmassign.KindPrimary {
@@ -403,7 +418,7 @@ func (x *ConsensusManager) prefetchFactsForPlan(preimage []byte) {
 // warmPrimaryFacts reads a primary plan's facts in the operator's own goroutine, so that its own approval (and every approval that follows)
 // finds them cached.
 func (x *ConsensusManager) warmPrimaryFacts(ctx context.Context, preimage []byte) error {
-	if len(preimage) == 0 || !x.blockStore.PosServices().RequiresPrimaryProof() {
+	if len(preimage) == 0 || !x.blockStore().PosServices().RequiresPrimaryProof() {
 		return nil
 	}
 	c, err := evmassign.DecodeCandidate(preimage)

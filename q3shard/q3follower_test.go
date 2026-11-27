@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -125,4 +126,368 @@ func TestQ3FollowerRunWaitsForTheNextBundleAndStopsOnCancel(t *testing.T) {
 
 	require.ErrorIs(t, (*Q3Follower)(nil).CatchUp(context.Background(), 2), ErrQ3FollowerConfig)
 	require.ErrorIs(t, (&Q3Follower{Runtime: act}).Run(context.Background()), ErrQ3FollowerConfig)
+}
+
+// A non-active node (joiner, syncing replica, external follower) takes activation evidence from mirrors only: a root is never dialled, even
+// when every mirror fails. This is the transport boundary: Fetch is the only way the follower reaches a peer.
+func TestQ3FollowerNonActiveNeverAsksARoot(t *testing.T) {
+	all := ids(t, 5)
+	roots, old, mirrors := all[:2], all[2:3], all[3:]
+	isRoot := map[peer.ID]bool{roots[0]: true, roots[1]: true, old[0]: true}
+	act := &fakeActivator{active: 1, refuse: map[string]bool{"forged": true}}
+	var asked []peer.ID
+	f := &Q3Follower{Runtime: act, AnchorEpoch: 1, CurrentRoots: roots, OldRoots: func(context.Context, uint64) []peer.ID { return old },
+		Mirrors: func() []peer.ID { return mirrors }, NonActive: func() bool { return true },
+		Fetch: func(_ context.Context, id peer.ID, epoch uint64) (q3active.Bundle, error) {
+			require.False(t, isRoot[id], "a non-active node dialled root %s", id)
+			asked = append(asked, id)
+			if id == mirrors[0] {
+				return q3active.Bundle{Candidate: []byte("forged")}, nil // a mirror serving bytes the history refuses
+			}
+			return q3active.Bundle{Candidate: []byte("good")}, nil
+		}}
+	require.NoError(t, f.CatchUp(context.Background(), 2))
+	require.Equal(t, []peer.ID{mirrors[0], mirrors[1]}, asked, "a refused mirror is followed by the next mirror")
+	require.Equal(t, []uint64{2}, act.activated)
+
+	// every mirror unavailable: the follower fails rather than falling back to a root
+	asked = nil
+	f.Fetch = func(_ context.Context, id peer.ID, _ uint64) (q3active.Bundle, error) {
+		require.False(t, isRoot[id], "a non-active node dialled root %s", id)
+		asked = append(asked, id)
+		return q3active.Bundle{}, errors.New("not staged here")
+	}
+	err := f.CatchUp(context.Background(), 3)
+	require.ErrorIs(t, err, ErrQ3Unavailable)
+	require.Equal(t, mirrors, asked)
+}
+
+// An active node asks the roots first (the fastest path), then the old committee, then the mirrors as backup; each peer once per round.
+func TestQ3FollowerActiveAsksRootsThenMirrors(t *testing.T) {
+	all := ids(t, 4)
+	roots, mirrors := all[:2], all[2:]
+	act := &fakeActivator{active: 1}
+	var asked []peer.ID
+	f := &Q3Follower{Runtime: act, AnchorEpoch: 1, CurrentRoots: roots,
+		Mirrors:   func() []peer.ID { return append([]peer.ID{roots[1]}, mirrors...) }, // a peer listed twice is asked once
+		NonActive: func() bool { return false },
+		Fetch: func(_ context.Context, id peer.ID, _ uint64) (q3active.Bundle, error) {
+			asked = append(asked, id)
+			if id != mirrors[1] {
+				return q3active.Bundle{}, errors.New("unavailable")
+			}
+			return q3active.Bundle{Candidate: []byte("good")}, nil
+		}}
+	require.NoError(t, f.CatchUp(context.Background(), 2))
+	require.Equal(t, []peer.ID{roots[0], roots[1], mirrors[0], mirrors[1]}, asked)
+}
+
+type stagedRuntime map[uint64]q3active.Bundle
+
+func (s stagedRuntime) StagedBundleAt(_ context.Context, epoch uint64) (q3active.Bundle, bool, error) {
+	b, ok := s[epoch]
+	return b, ok, nil
+}
+
+func TestMirrorProviderServesOnlyStagedActivations(t *testing.T) {
+	staged := q3active.Bundle{Envelope: []byte{1}, Candidate: []byte("c")}
+	m := MirrorProvider{Runtime: stagedRuntime{2: staged}}
+	got, err := m.Q3Bundle(context.Background(), 2)
+	require.NoError(t, err)
+	require.Equal(t, staged, got, "served exactly as staged")
+	_, err = m.Q3Bundle(context.Background(), 3)
+	require.ErrorIs(t, err, ErrNotMirrored)
+	_, err = MirrorProvider{}.Q3Bundle(context.Background(), 2)
+	require.ErrorIs(t, err, ErrNotMirrored)
+}
+
+// Role separation holds when the lists overlap: a current root, an old root, or any other known root identity listed as a mirror is
+// never asked by a non-active node. An active node still asks every root first.
+func TestQ3FollowerNonActiveExcludesRootsListedAsMirrors(t *testing.T) {
+	all := ids(t, 6)
+	current, old, other, mirror := all[0], all[1], all[2], all[3]
+	isRoot := map[peer.ID]bool{current: true, old: true, other: true}
+	act := &fakeActivator{active: 1}
+	var asked []peer.ID
+	nonActive := true
+	f := &Q3Follower{Runtime: act, AnchorEpoch: 1, CurrentRoots: []peer.ID{current}, OldRoots: func(context.Context, uint64) []peer.ID { return []peer.ID{old} },
+		Mirrors:   func() []peer.ID { return []peer.ID{current, old, other, mirror} }, // a misconfigured or dual-role mirror list
+		NonActive: func() bool { return nonActive }, IsRoot: func(id peer.ID) bool { return isRoot[id] },
+		Fetch: func(_ context.Context, id peer.ID, _ uint64) (q3active.Bundle, error) {
+			asked = append(asked, id)
+			return q3active.Bundle{}, errors.New("unavailable")
+		}}
+	require.ErrorIs(t, f.CatchUp(context.Background(), 2), ErrQ3Unavailable)
+	require.Equal(t, []peer.ID{mirror}, asked, "only the non-root mirror")
+
+	// without IsRoot the current and old roots are still excluded
+	asked, f.IsRoot = nil, nil
+	require.ErrorIs(t, f.CatchUp(context.Background(), 2), ErrQ3Unavailable)
+	require.Equal(t, []peer.ID{other, mirror}, asked)
+
+	asked, nonActive = nil, false
+	require.ErrorIs(t, f.CatchUp(context.Background(), 2), ErrQ3Unavailable)
+	require.Equal(t, []peer.ID{current, old, other, mirror}, asked, "an active node: roots first")
+}
+
+// Mixed root lists (bootnodes naming roots and shard peers): with authenticated root identities only those are roots. A shard peer named
+// among the "roots" is a mirror for a non-active node, and an active node does not ask it as a root.
+func TestQ3FollowerRootListsAreFilteredByAuthenticatedIdentity(t *testing.T) {
+	all := ids(t, 3)
+	root, shard, mirror := all[0], all[1], all[2]
+	act := &fakeActivator{active: 1}
+	var asked []peer.ID
+	nonActive := true
+	f := &Q3Follower{Runtime: act, AnchorEpoch: 1, CurrentRoots: []peer.ID{root, shard}, Mirrors: func() []peer.ID { return []peer.ID{shard, mirror} },
+		NonActive: func() bool { return nonActive }, IsRoot: func(id peer.ID) bool { return id == root },
+		Fetch: func(_ context.Context, id peer.ID, _ uint64) (q3active.Bundle, error) {
+			asked = append(asked, id)
+			return q3active.Bundle{}, errors.New("unavailable")
+		}}
+	require.ErrorIs(t, f.CatchUp(context.Background(), 2), ErrQ3Unavailable)
+	require.Equal(t, []peer.ID{shard, mirror}, asked, "the listed shard peer is asked; the root is not")
+	asked, nonActive = nil, false
+	require.ErrorIs(t, f.CatchUp(context.Background(), 2), ErrQ3Unavailable)
+	require.Equal(t, []peer.ID{root, shard, mirror}, asked, "active: only the authenticated root as a root, then the mirrors")
+}
+
+func TestQ3FollowerWakeInterruptsPeerDiscovery(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	entered, wake := make(chan struct{}, 1), make(chan struct{}, 1)
+	var tip atomic.Uint64
+	act := &fakeActivator{active: 1}
+	f := &Q3Follower{Runtime: act, AnchorEpoch: 1, CurrentRoots: ids(t, 1), Retry: time.Hour, Wake: wake, LocalTip: tip.Load,
+		Local: func(_ context.Context, epoch uint64) (q3active.Bundle, error) {
+			if tip.Load() >= epoch {
+				return q3active.Bundle{}, nil
+			}
+			return q3active.Bundle{}, ErrQ3Unavailable
+		},
+		Fetch: func(ctx context.Context, _ peer.ID, _ uint64) (q3active.Bundle, error) {
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			<-ctx.Done()
+			return q3active.Bundle{}, ctx.Err()
+		}}
+	done := make(chan error, 1)
+	go func() { done <- f.Run(ctx) }()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("fallback fetch did not start")
+	}
+	tip.Store(2)
+	wake <- struct{}{}
+	require.Eventually(t, func() bool { return act.ActiveEpoch() == 2 }, time.Second, time.Millisecond)
+	cancel()
+	require.NoError(t, <-done)
+}
+
+type followerRefusalProbe struct {
+	*fakeActivator
+	onRefusal func()
+}
+
+func (p followerRefusalProbe) Activate(ctx context.Context, b q3active.Bundle) error {
+	err := p.fakeActivator.Activate(ctx, b)
+	if err != nil {
+		p.onRefusal()
+	}
+	return err
+}
+
+func TestQ3FollowerObservesWakeBetweenPeerAttempts(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	wake := make(chan struct{}, 1)
+	act := &fakeActivator{active: 1, refuse: map[string]bool{"refused": true}}
+	roots := ids(t, 2)
+	var firstDiscovery context.Context
+	var tip atomic.Uint64
+	f := &Q3Follower{
+		Runtime: followerRefusalProbe{act, func() {
+			// The first remote fetch has returned. Publish while its
+			// bundle is being refused, before the next peer is tried.
+			require.NoError(t, firstDiscovery.Err())
+			tip.Store(2)
+			wake <- struct{}{}
+			select {
+			case <-firstDiscovery.Done():
+				require.ErrorIs(t, context.Cause(firstDiscovery), errPairedActivationReady)
+			case <-ctx.Done():
+				t.Fatal("the discovery reader missed the wake between peers")
+			}
+		}},
+		AnchorEpoch: 1, CurrentRoots: roots, Wake: wake, LocalTip: tip.Load,
+		Local: func(_ context.Context, epoch uint64) (q3active.Bundle, error) {
+			if tip.Load() >= epoch {
+				return q3active.Bundle{Candidate: []byte("local")}, nil
+			}
+			return q3active.Bundle{}, ErrQ3Unavailable
+		},
+		Fetch: func(ctx context.Context, id peer.ID, _ uint64) (q3active.Bundle, error) {
+			require.Equal(t, roots[0], id, "the local bundle is ready before the next peer")
+			firstDiscovery = ctx
+			return q3active.Bundle{Candidate: []byte("refused")}, nil
+		},
+	}
+	require.NoError(t, f.CatchUp(ctx, 2))
+	require.EqualValues(t, 2, act.ActiveEpoch())
+}
+
+func TestQ3FollowerOnlyWakesForTheAwaitedEpoch(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		start uint64
+	}{
+		{name: "restart replays installed epoch", start: 2},
+		{name: "paired publication follows peer installation", start: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			const installed, awaited = 2, 3
+			act := &fakeActivator{active: tc.start}
+			wake := make(chan struct{}, 1)
+			observed := make(chan uint64, 2)
+			entered := make(chan context.Context, 1)
+			var tip atomic.Uint64
+			f := &Q3Follower{
+				Runtime: act, AnchorEpoch: 1, CurrentRoots: ids(t, 1), Wake: wake, Retry: time.Hour,
+				LocalTip: func() uint64 {
+					latest := tip.Load()
+					observed <- latest
+					return latest
+				},
+				Local: func(_ context.Context, epoch uint64) (q3active.Bundle, error) {
+					if tip.Load() >= epoch {
+						return q3active.Bundle{Candidate: []byte("local successor")}, nil
+					}
+					return q3active.Bundle{}, ErrQ3Unavailable
+				},
+				Fetch: func(ctx context.Context, _ peer.ID, epoch uint64) (q3active.Bundle, error) {
+					if epoch == installed {
+						return q3active.Bundle{Candidate: []byte("peer predecessor")}, nil
+					}
+					if epoch == awaited {
+						select {
+						case entered <- ctx:
+						default:
+						}
+					}
+					// No peer can finish discovery for the successor until
+					// the paired publication interrupts it.
+					<-ctx.Done()
+					return q3active.Bundle{}, ctx.Err()
+				},
+			}
+			done := make(chan error, 1)
+			go func() { done <- f.Run(ctx) }()
+			defer func() {
+				cancel()
+				require.NoError(t, <-done)
+			}()
+			var slow context.Context
+			select {
+			case slow = <-entered:
+			case <-ctx.Done():
+				t.Fatal("successor discovery did not start")
+			}
+			require.EqualValues(t, installed, act.ActiveEpoch())
+			tip.Store(installed)
+			wake <- struct{}{}
+			select {
+			case latest := <-observed:
+				require.EqualValues(t, installed, latest)
+			case <-ctx.Done():
+				t.Fatal("watcher did not observe the stale publication")
+			}
+			require.NoError(t, slow.Err(), "the installed epoch must leave the current peer request running")
+			tip.Store(awaited)
+			wake <- struct{}{}
+			select {
+			case latest := <-observed:
+				require.EqualValues(t, awaited, latest)
+			case <-ctx.Done():
+				t.Fatal("watcher stopped listening before the successor publication")
+			}
+			require.Eventually(t, func() bool { return act.ActiveEpoch() == awaited }, time.Second, time.Millisecond)
+			require.ErrorIs(t, context.Cause(slow), errPairedActivationReady)
+		})
+	}
+}
+
+func TestQ3FollowerContinuingHintsCannotStarveAValidPeer(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	entered, wake := make(chan struct{}, 1), make(chan struct{}, 1)
+	act := &fakeActivator{active: 1}
+	var attempts, local atomic.Int32
+	var tip atomic.Uint64
+	f := &Q3Follower{
+		Runtime: act, AnchorEpoch: 1, CurrentRoots: ids(t, 1), Wake: wake, LocalTip: tip.Load, Retry: time.Millisecond,
+		Local: func(_ context.Context, epoch uint64) (q3active.Bundle, error) {
+			if epoch == 2 {
+				local.Add(1)
+			}
+			return q3active.Bundle{}, ErrQ3Unavailable
+		},
+		Fetch: func(ctx context.Context, _ peer.ID, epoch uint64) (q3active.Bundle, error) {
+			if epoch != 2 {
+				return q3active.Bundle{}, ErrQ3Unavailable
+			}
+			switch attempts.Add(1) {
+			case 1:
+				entered <- struct{}{}
+				<-ctx.Done()
+				return q3active.Bundle{}, ctx.Err()
+			case 2:
+				// Exercise another sweep at the same epoch.
+				return q3active.Bundle{}, ErrQ3Unavailable
+			}
+			select {
+			case <-ctx.Done():
+				return q3active.Bundle{}, ctx.Err()
+			case <-time.After(30 * time.Millisecond):
+				return q3active.Bundle{Candidate: []byte("valid peer")}, nil
+			}
+		},
+	}
+	done := make(chan error, 1)
+	go func() { done <- f.Run(ctx) }()
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("first peer fetch did not start")
+	}
+	tip.Store(2)
+	wake <- struct{}{}
+	hintsDone := make(chan struct{})
+	go func() {
+		defer close(hintsDone)
+		tick := time.NewTicker(time.Millisecond)
+		defer tick.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+				select {
+				case wake <- struct{}{}:
+				default:
+				}
+			}
+		}
+	}()
+	defer func() {
+		cancel()
+		<-hintsDone
+		require.NoError(t, <-done)
+	}()
+	require.Eventually(t, func() bool { return act.ActiveEpoch() == 2 }, time.Second, time.Millisecond)
+	require.EqualValues(t, 3, attempts.Load(), "only the first hint interrupted a peer fetch")
+	require.EqualValues(t, 3, local.Load(), "initial discovery, one hint, and the timer retry")
 }

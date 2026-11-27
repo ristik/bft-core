@@ -9,6 +9,7 @@ package shardnode
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/unicitynetwork/bft-go-base/types"
 
@@ -23,6 +24,27 @@ type Hash []byte
 // ErrBlockBindingUnavailable marks a local prerequisite that can be retried
 // without treating the peer's certified body as invalid.
 var ErrBlockBindingUnavailable = errors.New("shardnode: block binding prerequisite unavailable")
+
+// The round and certified recovery both allow one renewed proof acquisition.
+const transientProofRetryDelay = 500 * time.Millisecond
+
+// RetryBlockBinding gives an unavailable local prerequisite one retry after backoff.
+// The caller's context bounds both attempts.
+func RetryBlockBinding(ctx context.Context, check func(context.Context) error) error {
+	err := check(ctx)
+	if !errors.Is(err, ErrBlockBindingUnavailable) {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return err
+	case <-time.After(transientProofRetryDelay):
+		if ctx.Err() != nil {
+			return err
+		}
+		return check(ctx)
+	}
+}
 
 // ErrCertifiedChainForksAnchor marks a verified certified chain that passes an anchor's height without containing the anchor: the anchor (an
 // execution client's finalized block, say) is not on the certified chain, which is a proven conflict and not missing history (#843).
@@ -45,9 +67,10 @@ type BlockRef struct {
 // parameters (an EVM header's timestamp, prevRandao, and so on) from it is
 // the Executor's job, not the framework's.
 type RoundParams struct {
-	Round     uint64 // TechnicalRecord.Round for this round
-	Epoch     uint64 // TechnicalRecord.Epoch for this round
-	Timestamp uint64 // UnicitySeal.Timestamp of the certificate that authorized this round (seconds)
+	Activation RootActivation // locally installed live context, absent for historical replay
+	Round      uint64         // TechnicalRecord.Round for this round
+	Epoch      uint64         // TechnicalRecord.Epoch for this round
+	Timestamp  uint64         // UnicitySeal.Timestamp of the certificate that authorized this round (seconds)
 
 	// SealHash is UnicitySeal.Hash — the certified Unicity Tree root, already
 	// a computed, signed 32-byte value. Deliberately NOT a hash of the whole

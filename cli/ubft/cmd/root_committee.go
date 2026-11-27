@@ -1,0 +1,262 @@
+package cmd
+
+import (
+	"context"
+	"log/slog"
+	"slices"
+	"sync"
+	"time"
+
+	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/unicitynetwork/bft-go-base/types"
+
+	"github.com/unicitynetwork/bft-core/network"
+)
+
+/*
+The root committee keeper (#1082).
+
+A root reaches the others of its committee over libp2p connections, opened on demand by whoever sends first. A member that cannot be
+dialled (behind NAT, or an isolated bridge whose private addresses the others cannot reach) is reached only over a connection it opened
+itself, and after an install every root has restarted: the connections are gone, and a member dialled while it was restarting is in
+the swarm's dial backoff for 5 s and more. In the first rounds of a new epoch that cost a joiner's leader slots two round timeouts (~20 s)
+on staging.
+
+So a member of the installed epoch, before it starts consensus in it (after the verified activation, before the first successor round):
+
+  - dials every other member itself and keeps those connections, protected from trimming, re-dialling a member it lost within one
+    interval and past the dial backoff (network.MemberProtector.Maintain); the others reach it over these connections whichever side
+    can dial, and nothing in the leader schedule changes;
+  - waits a bounded warm-up for the committee to be connected, so its first round does not start with votes and proposals that can reach
+    nobody. A member that is down costs at most the warm-up, once.
+
+A root that is not a member of the installed epoch (a follower, a leaver) keeps no committee: it never dials a committee it is not in.
+The one exception is a joiner whose staged candidate names it in the successor (#1086 PR 2): it keeps that committee connected from its
+readiness on, before the commit, because it switches into the successor in process and its leader slots come right after the activation.
+*/
+
+// committeeKeep paces the keeper (astra on #1088): a member is retried every 250 ms for the first 30 s (the handoff, when every root
+// restarts), then with exponential backoff capped at 10 s with jitter; a host starts at most 8 dials per tick (32/s) and holds at most
+// network.MaxMemberDials in flight, however large the committee.
+var committeeKeep = network.MaintainConfig{Interval: 250 * time.Millisecond, RapidWindow: 30 * time.Second, BackoffMax: 10 * time.Second,
+	DialTimeout: 5 * time.Second, PerTick: 8}
+
+const (
+	// committeeWarmupDefault bounds the wait before the first round: the members of a parallel install come up within about one restart of
+	// each other.
+	committeeWarmupDefault = 3 * time.Second
+)
+
+// rootCommittee is the keeper of one root's committee connections.
+type rootCommittee struct {
+	mu      sync.Mutex // an in-process epoch switch moves the keeper to the successor's committee while the status endpoint reads it
+	epoch   uint64
+	member  bool
+	members []peer.ID // the others of the committee
+	// staged is the successor committee of the candidate staged here when it names this root (#1086 PR 2): a joiner keeps it connected
+	// from then on, before the commit, so that it switches into the successor in process with its connections up
+	stagedEpoch uint64
+	staged      []peer.ID
+	keeper      *network.MemberProtector
+	host        *network.Peer
+}
+
+// follow moves the keeper to the committee of tb, the epoch this root switched into in process (#1086), without a warm-up wait: the
+// connections the committees share are kept, a member that joins is dialled, and a member that left is no longer protected. A root that
+// is not a member of tb keeps no committee (beyond a staged successor that names it).
+func (c *rootCommittee) follow(ctx context.Context, log *slog.Logger, tb *types.RootTrustBaseV1) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	members, member := committeePeers(tb, c.host.ID())
+	c.epoch, c.member, c.members = tb.Epoch, member, members
+	if c.stagedEpoch <= c.epoch {
+		c.stagedEpoch, c.staged = 0, nil // the staged successor is the installed epoch now
+	}
+	if missing := c.keepLocked(ctx); c.member && len(missing) != 0 {
+		log.Info("keeping the switched-into root committee connected", "epoch", tb.Epoch, "missing", peerStrings(missing))
+	}
+}
+
+// stage keeps the successor committee a candidate staged here names (members, which include this root) connected besides the installed
+// one; a successor that does not name this root, or none (epoch zero), keeps nothing beyond the installed committee.
+func (c *rootCommittee) stage(ctx context.Context, log *slog.Logger, epoch uint64, ids []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var others []peer.ID
+	named := false
+	for _, s := range ids {
+		id, err := peer.Decode(s)
+		if err != nil {
+			continue
+		}
+		if id == c.host.ID() {
+			named = true
+			continue
+		}
+		others = append(others, id)
+	}
+	if !named || epoch <= c.epoch {
+		epoch, others = 0, nil
+	}
+	if epoch == c.stagedEpoch && slices.Equal(others, c.staged) {
+		return
+	}
+	c.stagedEpoch, c.staged = epoch, others
+	if epoch != 0 {
+		log.Info("keeping the staged successor's root committee connected before its activation (#1086)", "epoch", epoch, "members", len(others)+1,
+			"missing", peerStrings(c.keepLocked(ctx)))
+		return
+	}
+	c.keepLocked(ctx)
+}
+
+// keepLocked protects the union of the installed committee (when this root is a member) and the staged successor's, and returns those
+// not connected now. c.mu is held.
+func (c *rootCommittee) keepLocked(ctx context.Context) []peer.ID {
+	var keep []peer.ID
+	if c.member {
+		keep = append(keep, c.members...)
+	}
+	for _, id := range c.staged {
+		if !slices.Contains(keep, id) {
+			keep = append(keep, id)
+		}
+	}
+	if len(keep) == 0 {
+		if c.keeper != nil {
+			c.keeper.Set(ctx, nil)
+		}
+		return nil
+	}
+	if c.keeper == nil {
+		c.keeper = c.host.NewMemberProtector("root-committee")
+		go c.keeper.Maintain(ctx, committeeKeep)
+	}
+	c.keeper.Set(ctx, keep)
+	return c.keeper.Disconnected()
+}
+
+// keepStaged follows the candidate staged on the manager until ctx ends (stage): a joiner keeps its successor's committee connected from
+// its readiness on. It polls, since staging is an operator call and rare.
+func (c *rootCommittee) keepStaged(ctx context.Context, log *slog.Logger, cm interface{ StagedCommittee() (uint64, []string) }) {
+	tick := time.NewTicker(250 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		epoch, ids := cm.StagedCommittee()
+		c.stage(ctx, log, epoch, ids)
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+	}
+}
+
+// committeePeers is the committee of tb other than self, and whether self is in it.
+func committeePeers(tb *types.RootTrustBaseV1, self peer.ID) ([]peer.ID, bool) {
+	var out []peer.ID
+	member := false
+	for _, n := range tb.RootNodes {
+		if n == nil {
+			continue
+		}
+		id, err := peer.Decode(n.NodeID)
+		if err != nil {
+			continue
+		}
+		if id == self {
+			member = true
+			continue
+		}
+		out = append(out, id)
+	}
+	return out, member
+}
+
+// keepRootCommittee starts keeping the committee of tb (the installed epoch's) connected until ctx ends, and waits up to warmup for every
+// other member to be connected. It returns the keeper for the status endpoint; a non-member keeps nothing.
+func keepRootCommittee(ctx context.Context, log *slog.Logger, host *network.Peer, tb *types.RootTrustBaseV1, warmup time.Duration) *rootCommittee {
+	members, member := committeePeers(tb, host.ID())
+	c := &rootCommittee{epoch: tb.Epoch, member: member, members: members, host: host}
+	if !member {
+		return c
+	}
+	c.keeper = host.NewMemberProtector("root-committee")
+	c.keeper.Set(ctx, members)
+	go c.keeper.Maintain(ctx, committeeKeep)
+	start := time.Now()
+	deadline := time.NewTimer(warmup)
+	defer deadline.Stop()
+	tick := time.NewTicker(20 * time.Millisecond)
+	defer tick.Stop()
+	for len(c.keeper.Disconnected()) != 0 {
+		select {
+		case <-ctx.Done():
+			return c
+		case <-deadline.C:
+			log.Warn("starting consensus with root committee members unreachable (#1082): their rounds may time out until they connect",
+				"epoch", tb.Epoch, "missing", peerStrings(c.keeper.Disconnected()), "waited", time.Since(start))
+			return c
+		case <-tick.C:
+		}
+	}
+	log.Info("root committee connected", "epoch", tb.Epoch, "members", len(members)+1, "waited", time.Since(start))
+	return c
+}
+
+// rootCommitteeStatus is the status endpoint's answer: the installed epoch, whether this root is in its committee, and which other members
+// it is connected to now. A joiner's readiness is that it reports no member missing; before the commit, that its Staged view (the
+// successor committee its staged candidate names it in, #1086 PR 2) reports none missing.
+type rootCommitteeStatus struct {
+	Epoch     uint64                     `json:"epoch"`
+	Member    bool                       `json:"member"`
+	Connected []string                   `json:"connected"`
+	Missing   []string                   `json:"missing"`
+	Staged    *rootCommitteeStagedStatus `json:"staged,omitempty"`
+}
+
+// rootCommitteeStagedStatus is the staged successor committee's connectivity, seen from a root it names.
+type rootCommitteeStagedStatus struct {
+	Epoch     uint64   `json:"epoch"`
+	Connected []string `json:"connected"`
+	Missing   []string `json:"missing"`
+}
+
+func (c *rootCommittee) status() rootCommitteeStatus {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := rootCommitteeStatus{Epoch: c.epoch, Member: c.member, Connected: []string{}, Missing: []string{}}
+	if c.keeper == nil {
+		return out
+	}
+	missing := c.keeper.Disconnected()
+	split := func(ids []peer.ID) (connected, absent []string) {
+		connected, absent = []string{}, []string{}
+		for _, id := range ids {
+			if slices.Contains(missing, id) {
+				absent = append(absent, id.String())
+			} else {
+				connected = append(connected, id.String())
+			}
+		}
+		return connected, absent
+	}
+	if c.member {
+		out.Connected, out.Missing = split(c.members)
+	}
+	if c.stagedEpoch != 0 {
+		st := &rootCommitteeStagedStatus{Epoch: c.stagedEpoch}
+		st.Connected, st.Missing = split(c.staged)
+		out.Staged = st
+	}
+	return out
+}
+
+func peerStrings(ids []peer.ID) []string {
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = id.String()
+	}
+	slices.Sort(out)
+	return out
+}

@@ -12,6 +12,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/unicitynetwork/bft-core/vradmit"
+	"github.com/unicitynetwork/bft-core/vrschema"
 	"sync"
 	"sync/atomic"
 
@@ -43,6 +45,8 @@ var (
 	ErrSnapshot = errors.New("q3active: the snapshot is not the activation's")
 	// ErrConflict is returned when a legacy view disagrees with the verified history for an epoch.
 	ErrConflict = errors.New("q3active: trust base differs from the verified history")
+	// ErrMemberCeiling is returned for a handoff whose committee is larger than the configured ceiling (Config.MemberCeiling).
+	ErrMemberCeiling = errors.New("q3active: the committee is above the deployment's member ceiling")
 )
 
 // RootSink is the root consensus manager (rootchain/consensus.ConsensusManager). InstallVerifiedEpoch must be idempotent for the
@@ -72,6 +76,10 @@ type Config struct {
 	// UTBGenesis makes the genesis epoch a UTB epoch: the deployment endorses the signed trust-base entry from its first handoff, and every activation
 	// must carry the UTB protocol tuple.
 	UTBGenesis bool
+	// MemberCeiling, when positive, refuses at admission a handoff whose committee has more members (ErrMemberCeiling). Zero is the native
+	// bound only. A deployment that carries the B1 registry sets evmassign.B1MaxValidators (the registry's gas-priced 16): a larger committee
+	// could not be imported by the installed registry, so it must not be admitted. A no-EVM deployment leaves it zero.
+	MemberCeiling int
 }
 
 // Participants are the five installers. They exist only after the runtime does (the manager takes the runtime as its gate and
@@ -84,13 +92,19 @@ type Participants struct {
 
 // Runtime is the verified history, the install journal and the published snapshot of one process.
 type Runtime struct {
-	mu        sync.Mutex // serialises activation and recovery
-	journal   *q3install.Journal
-	hist      atomic.Pointer[q3format.History]
-	snap      atomic.Pointer[Snapshot] // the installer's provisional snapshot: private until its epoch is journaled complete
-	active    atomic.Pointer[Snapshot] // the published active context: the provisional one once its epoch is complete
-	parts     atomic.Pointer[Participants]
-	completed sync.Map // epoch -> struct{}: journaled complete in this process
+	// memberCeiling is Config.MemberCeiling.
+	memberCeiling int
+	mu            sync.Mutex // serialises activation and recovery
+	// fence, when set (SetFence), refuses installing an epoch of a rule this binary lacks (design 7.4); guarded by mu.
+	fence             func(epoch uint64, schedule []vrschema.Activation) error
+	journal           *q3install.Journal
+	hist              atomic.Pointer[q3format.History]
+	snap              atomic.Pointer[Snapshot] // the installer's provisional snapshot: private until its epoch is journaled complete
+	active            atomic.Pointer[Snapshot] // the published active context: the provisional one once its epoch is complete
+	parts             atomic.Pointer[Participants]
+	completed         sync.Map // epoch -> struct{}: journaled complete in this process
+	publicationMu     sync.Mutex
+	activationChanged chan struct{}
 }
 
 // ErrNotAttached is returned when an activation or recovery is asked before the participants were attached.
@@ -103,7 +117,7 @@ func New(cfg Config) (*Runtime, error) {
 	if cfg.Genesis == nil {
 		return nil, q3install.ErrComponents
 	}
-	r := &Runtime{}
+	r := &Runtime{memberCeiling: cfg.MemberCeiling, activationChanged: make(chan struct{})}
 	j, err := q3install.Open(q3install.Config{DB: cfg.DB, Bundles: r.verify, Components: map[q3install.Step]q3install.Component{
 		q3install.StepRoot:      &rootComponent{r: r},
 		q3install.StepSafety:    &consumerComponent{r: r, name: "safety", pick: func(p *Participants) Consumer { return p.Safety }},
@@ -189,13 +203,42 @@ func (r *Runtime) ActiveEpoch() uint64 {
 // durably complete and recovered publishes nothing, however far its steps got.
 func (r *Runtime) Snapshot() *Snapshot { return r.active.Load() }
 
+// WaitActivation waits for publication of a fully installed successor. The
+// epoch is an availability hint; consumers authenticate the bundle themselves.
+func (r *Runtime) WaitActivation(ctx context.Context, after uint64) (uint64, error) {
+	for {
+		r.publicationMu.Lock()
+		if r.activationChanged == nil {
+			r.activationChanged = make(chan struct{})
+		}
+		epoch, changed := r.ActiveEpoch(), r.activationChanged
+		r.publicationMu.Unlock()
+		if epoch > after {
+			return epoch, nil
+		}
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-changed:
+		}
+	}
+}
+
 // complete records that an epoch's installation is durably complete (and recovered), admits it, and publishes the provisional
 // snapshot when that is the epoch's.
 func (r *Runtime) complete(epoch uint64) {
 	r.completed.Store(epoch, struct{}{})
 	if s := r.snap.Load(); s != nil {
 		if _, ok := r.completed.Load(s.Epoch()); ok {
-			r.active.Store(s)
+			r.publicationMu.Lock()
+			if r.active.Load() != s {
+				r.active.Store(s)
+				if r.activationChanged != nil {
+					close(r.activationChanged)
+				}
+				r.activationChanged = make(chan struct{})
+			}
+			r.publicationMu.Unlock()
 		}
 	}
 }
@@ -252,8 +295,12 @@ func (r *Runtime) verify(raw []byte, committed q3format.Claim) error {
 	if err != nil {
 		return err
 	}
-	if e, err := next.ForEpoch(committed.Epoch); err != nil || e.Claim() != committed {
+	e, err := next.ForEpoch(committed.Epoch)
+	if err != nil || e.Claim() != committed {
 		return fmt.Errorf("%w: the verified history derives another record for epoch %d", ErrBundle, committed.Epoch)
+	}
+	if r.memberCeiling > 0 && e.MemberCount() > r.memberCeiling {
+		return fmt.Errorf("%w: epoch %d has %d members, the ceiling is %d", ErrMemberCeiling, committed.Epoch, e.MemberCount(), r.memberCeiling)
 	}
 	return nil
 }
@@ -290,6 +337,64 @@ func (r *Runtime) resolve(a q3install.Activation) (q3format.Entry, handoff.OldCo
 	return e, p, b, err
 }
 
+// RootChecker is implemented by a root sink that can run its install checks of a bundle without installing anything
+// (consensus.CheckVerifiedEpoch); the checks of its own durable state stay in the install.
+type RootChecker interface {
+	CheckVerifiedEpoch(entry q3format.Entry, proof handoff.OldCommitProof, head *abdrc.CommittedBlock, candidate []byte) error
+}
+
+// RootFencer is implemented by a root sink that refuses an epoch whose verified checkpoint schedules a rule its binary lacks (the activation
+// schedule's fence, design section 7.4). It reads and writes nothing durable; the runtime calls it before the journal stages anything,
+// for a new activation, and before the journal recovers anything, for every staged one.
+type RootFencer interface {
+	FenceEpoch(epoch uint64, head *abdrc.CommittedBlock) error
+}
+
+// Authenticate checks the bundle itself as Activate would and changes nothing: the envelope against this runtime's history (the
+// journal's own check, which derives the activation record), and, when the attached root sink offers them, the root's checks of the
+// bundle (the commit proof under the old epoch's keys, the snapshot, a coupled candidate); checks of the root's own durable state stay in
+// the install. An install that takes its bundle from a root peer authenticates
+// each answer, so a peer serving a decodable but invalid bundle is passed over for the next one (#1080 review). It stages nothing:
+// Activate re-runs every check.
+func (r *Runtime) Authenticate(b Bundle) error {
+	raw, err := EncodeBundle(b)
+	if err != nil {
+		return err
+	}
+	_, env, err := DecodeBundle(raw)
+	if err != nil {
+		return err
+	}
+	if len(env.Links) == 0 {
+		return fmt.Errorf("%w: no link", ErrBundle)
+	}
+	claim := env.Links[len(env.Links)-1].Claim
+	if err := r.verify(raw, claim); err != nil {
+		return errors.Join(ErrBundle, err)
+	}
+	p := r.parts.Load()
+	if p == nil {
+		return nil
+	}
+	checker, ok := p.Root.(RootChecker)
+	if !ok {
+		return nil
+	}
+	next, err := r.History().VerifyEnvelope(env)
+	if err != nil {
+		return errors.Join(ErrBundle, err)
+	}
+	e, err := next.ForEpoch(claim.Epoch)
+	if err != nil {
+		return errors.Join(ErrBundle, err)
+	}
+	proof, err := activatingProof(env)
+	if err != nil {
+		return err
+	}
+	return checker.CheckVerifiedEpoch(e, proof, b.Snapshot, b.Candidate)
+}
+
 // Activate is the only way an activation starts: it authenticates the bundle against the history, then the journal stages it and
 // carries every participant to completion in the section 4 order. It returns nil only after the completion marker is durable and
 // the epoch is admitted.
@@ -308,10 +413,73 @@ func (r *Runtime) Activate(ctx context.Context, b Bundle) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	claim := env.Links[len(env.Links)-1].Claim
+	// the fence of the checkpoint the bundle carries, after its authentication and before the journal stages (or retains) anything
+	if f, ok := r.parts.Load().Root.(RootFencer); ok {
+		if err := r.Authenticate(b); err != nil {
+			return err
+		}
+		if err := f.FenceEpoch(claim.Epoch, b.Snapshot); err != nil {
+			return err
+		}
+	}
+	// the activation schedule's fence (design 7.4) for a runtime without a root sink: the schedule of the checkpoint this bundle carries,
+	// authenticated against the verified history entry's control digest, decides before anything is staged
+	if err := r.fenceBundle(b, claim.Epoch); err != nil {
+		return err
+	}
 	if err := r.journal.Install(ctx, claim, raw); err != nil {
 		return err
 	}
 	r.complete(claim.Epoch)
+	return nil
+}
+
+// SetFence installs the activation-schedule fence (vrrules.Gate.CheckCheckpoint): Activate and Recover refuse an epoch it refuses, deciding
+// from the authenticated schedule of the checkpoint each bundle carries. It needs no endpoint and no coverage, so a recovery that skips an
+// intermediate Boundary decides like any other. Set it once, before Recover or Activate; nil (the default, and every root, whose sink
+// fences) fences nothing here.
+func (r *Runtime) SetFence(f func(epoch uint64, schedule []vrschema.Activation) error) {
+	r.mu.Lock()
+	r.fence = f
+	r.mu.Unlock()
+}
+
+// fenceBundle applies the fence to one bundle: the checkpoint's control state must be the one the verified history entry of the epoch
+// commits to, and then its schedule decides.
+func (r *Runtime) fenceBundle(b Bundle, epoch uint64) error {
+	if r.fence == nil {
+		return nil
+	}
+	if _, isRoot := r.parts.Load().Root.(RootFencer); isRoot {
+		return nil // a root's own fence ran
+	}
+	raw, err := EncodeBundle(b)
+	if err != nil {
+		return err
+	}
+	_, env, err := DecodeBundle(raw)
+	if err != nil {
+		return err
+	}
+	next, err := r.History().VerifyEnvelope(env)
+	if err != nil {
+		return errors.Join(ErrBundle, err)
+	}
+	e, err := next.ForEpoch(epoch)
+	if err != nil {
+		return errors.Join(ErrBundle, err)
+	}
+	v, _, ok := e.Handoff()
+	if !ok || b.Snapshot == nil {
+		return fmt.Errorf("%w: epoch %d has no verified checkpoint", ErrBundle, epoch)
+	}
+	sched, err := vradmit.AuthenticatedSchedule(b.Snapshot.Control, v.ControlDigest)
+	if err != nil {
+		return errors.Join(ErrBundle, err)
+	}
+	if err := r.fence(epoch, sched); err != nil {
+		return fmt.Errorf("epoch %d: %w", epoch, err)
+	}
 	return nil
 }
 
@@ -323,6 +491,38 @@ func (r *Runtime) Recover(ctx context.Context) error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// every staged epoch is fenced by its own checkpoint before the journal completes or restores anything: a binary that lacks a rule
+	// effective at a staged epoch leaves the stores as it found them
+	if f, ok := r.parts.Load().Root.(RootFencer); ok {
+		staged, err := r.journal.Staged()
+		if err != nil {
+			return err
+		}
+		for _, a := range staged {
+			b, _, err := DecodeBundle(a.Bundle)
+			if err != nil {
+				return err
+			}
+			if err := f.FenceEpoch(a.Claim.Epoch, b.Snapshot); err != nil {
+				return err
+			}
+		}
+	}
+	if r.fence != nil { // a staged installation is finished only for an epoch this binary may run: each by its own checkpoint
+		pending, err := r.journal.Staged()
+		if err != nil {
+			return err
+		}
+		for _, a := range pending {
+			b, _, err := DecodeBundle(a.Bundle)
+			if err != nil {
+				return err
+			}
+			if err := r.fenceBundle(b, a.Claim.Epoch); err != nil {
+				return fmt.Errorf("staged epoch %d: %w", a.Claim.Epoch, err)
+			}
+		}
+	}
 	err := r.journal.Recover(ctx, func(epoch uint64) (q3format.Claim, bool) {
 		e, ok := r.Activated(epoch)
 		if !ok {

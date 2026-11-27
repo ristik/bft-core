@@ -446,8 +446,8 @@ func TestAuthorityOffersNoGenericSigningOrKeyImport(t *testing.T) {
 		methods = append(methods, at.Method(i).Name)
 	}
 	require.ElementsMatch(t, []string{
-		"AdvanceEpoch", "Authenticate", "Close", "CompleteEnrollment", "Enrollment", "MarkUntrusted", "Release", "ReplaceSession",
-		"Reserve", "RetainResponse", "Sign", "SignDelegationPossession", "SignElectionPoP", "SignHandoffPoP", "SigningPublicKey", "Status",
+		"AdvanceEpoch", "AdvanceWithProof", "Authenticate", "Close", "CompleteEnrollment", "Enrollment", "MarkUntrusted", "Release", "ReplaceSession",
+		"ProvisionFence", "ReloadRegistrationAuthorizations", "Reserve", "RetainResponse", "Sign", "SignDelegationPossession", "SignElectionPoP", "SignHandoffPoP", "SignPosPoP", "SetPosPolicy", "SignRegistration", "SigningPublicKey", "Status",
 	}, methods,
 		"this authority admits structured requests only: no generic signing, key import, key export or journal load")
 
@@ -474,6 +474,15 @@ func TestAuthorityOffersNoGenericSigningOrKeyImport(t *testing.T) {
 		for i := 0; i < request.NumField(); i++ {
 			require.NotEqual(t, reflect.Slice, request.Field(i).Type.Kind(), "%s.%s: a request carries typed fields, not bytes to sign", name, request.Field(i).Name)
 		}
+	}
+
+	// The registration signature takes one structured request: typed fields (a domain, an owner, an id, a registration), no digest.
+	regMethod, ok := at.MethodByName("SignRegistration")
+	require.True(t, ok)
+	require.Equal(t, 2, regMethod.Type.NumIn(), "SignRegistration takes the receiver and one structured request")
+	require.Equal(t, reflect.TypeOf(RegistrationRequest{}), regMethod.Type.In(1))
+	for i := 0; i < reflect.TypeOf(RegistrationRequest{}).NumField(); i++ {
+		require.NotEqual(t, reflect.Slice, reflect.TypeOf(RegistrationRequest{}).Field(i).Type.Kind(), "a registration request carries no bytes to sign")
 	}
 
 	f := newFixture(t, 1)
