@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 rpc=$1 agg=$2 chain=$3 history=$4
+export NB2_HISTORY_URL="$history"
 here=$PWD/scripts/nb2-t7
 scratch=$(mktemp -d "$NB2_OUT/.driver.XXXXXX")
 driver_pid=
@@ -44,11 +45,10 @@ cp test-nodes/execution-genesis-hash "$NB2_OUT/execution.pin"
 cp test-nodes/utb/utb-manifest.json "$NB2_OUT/utb-manifest.json"
 "$UTB_VERIFIER" fetch --url "$history" --out "$NB2_OUT/trust.cbor"
 "$UTB_VERIFIER" verify --bundle "$NB2_OUT/trust.cbor" --pin "$(cat "$NB2_OUT/trust.pin")"
-cp -R testvectors/nb2-continuation-v1.1-supplement/descriptors "$NB2_OUT/"
-jq -n --arg commit "$(jq -r .ureth "$NB2_OUT/pins.json")" --arg digest "$(sha256sum "$URETH_BIN" | cut -d' ' -f1)" \
-  '{ureth:$commit,binaries:{"unicity-reth":$digest}}' >"$NB2_OUT/descriptors/build-index.json"
+python3 "$here/descriptors.py" "$PWD" "$NB2_URETH_SOURCE" "$NB2_PLUGIN" "$URETH_BIN" \
+  "$NB2_OUT/descriptors" "$NB2_OUT/plugin-lib.sha256"
 {
-  git rev-parse HEAD
+  git -C "$PWD" rev-parse HEAD
   sha256sum build/ubft "$UTB_VERIFIER" "$AGG_BIN" "$URETH_BIN" "$NB2_PLUGIN/package-lock.json" "$NB2_OUT/plugin-lib.sha256"
   go version -m "$AGG_BIN"
 } >"$NB2_OUT/builds.txt"
@@ -70,6 +70,10 @@ if [[ "${NB2_QUALIFY_OFFLINE:-0}" = 1 ]]; then
   NB2_RESUME_STAGE=settle run_driver "${driver[@]}"
 else
   run_driver "${driver[@]}"
+fi
+
+if [[ -e "$NB2_OUT/FlatReceipts.receipt.json" ]]; then
+  python3 "$here/probe-qualification.py" "$NB2_OUT" "$PWD" FlatReceipts.receipt.json
 fi
 
 if [[ -n "${NB2_SCENARIO_DRIVER:-}" ]]; then

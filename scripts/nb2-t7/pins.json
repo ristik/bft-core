@@ -1,6 +1,7 @@
 {
+  "bftRelease": "0aec34ba3f4e6cefc5e6110936baec5f474cbbe0",
   "contracts": "9b02951640877d6b4054df2ab6fce307629d6e61",
-  "plugin": "ef0f995b36d3c02105fab64fbf4231ee968234e2",
+  "plugin": "ab816019a96774dceeb3c39e3071fe9519930d23",
   "aggregator": "4c54c8f440e7e33bc53a795556d1391102dc75fb",
   "ureth": "c91535bf306738655d06db0389e44ab0df57014e",
   "registryRuntimeKeccak": "0x93dae8b0e730c861e66468a0ff109395190b7f5292da4a19a6f9515fd15c1841",

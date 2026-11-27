@@ -1,18 +1,18 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import { concat, fromHex, toHex } from './sdk/bytes.js';
 import { abiEncode, depositCalldata, redeemCalldata } from './sdk/nb2/abi.js';
 import { SdkAggregator } from './sdk/nb2/aggregator.js';
-import { ascii, raw, scanNative, u16, u256 } from './sdk/nb2/cbor.js';
+import { ascii, u16, u256 } from './sdk/nb2/cbor.js';
 import { ASSET_UCT, decodeConfig, deriveCoin, deriveType, domainOf, encodeConfig, PRODUCTION_PARAMS, type Config } from './sdk/nb2/config.js';
 import { HE, HU } from './sdk/nb2/crypto.js';
 import { decodeDepositProof, depositSalt, depositedData, encodeReceiptBacking, firstOwnerOf, rhoOf, TOPIC, verifyReceiptLog } from './sdk/nb2/deposit.js';
-import { Nb2Error } from './sdk/nb2/errors.js';
+import { Nb2Error, WalletError } from './sdk/nb2/errors.js';
 import { LocalKeySigner, signTx } from './sdk/nb2/evm.js';
 import { RecoveryAuthority, RecoverySession } from './sdk/nb2/recovery.js';
 import { EvmReader, HttpJsonRpc, RpcError } from './sdk/nb2/rpc.js';
@@ -79,8 +79,9 @@ async function record(name: string, receipt: Receipt, started: number, signedByt
 }
 
 async function send(name: string, target: string, calldata: Uint8Array, value = 0n,
-  expectedStatus: string | null = '0x1', payer = signer, gas = 24_000_000n) {
+  expectedStatus: string | null = '0x1', payer = signer, gas = 24_000_000n, requiredEpoch?: bigint) {
   writeFileSync(join(evidenceDir, name + '.calldata'), calldata);
+  const importGate = requiredEpoch === undefined ? undefined : await waitForImport(requiredEpoch);
   const started = Date.now();
   const { baseFee, priority } = await reader.fees();
   const nonce = await reader.nonce(payer.address);
@@ -88,7 +89,7 @@ async function send(name: string, target: string, calldata: Uint8Array, value = 
     maxFeePerGas: baseFee * 2n + priority, gas, to: bytes(target), data: calldata, value });
   assert(tx.raw.length <= 524_288, 'signed transaction cap');
   json(name + '.submitted.json', { hash: hex(tx.hash), nonce, gasLimit: gas, payer: hex(payer.address),
-    maxFeePerGas: baseFee * 2n + priority, maxPriorityFeePerGas: priority });
+    maxFeePerGas: baseFee * 2n + priority, maxPriorityFeePerGas: priority, importGate });
   assert.equal(hex(await reader.sendRaw(tx.raw)), hex(tx.hash));
   for (let i = 0; i < 120; ++i) {
     const receipt = await reader.receipt(tx.hash) as Receipt | null;
@@ -193,23 +194,53 @@ function loadGraph() {
 if (process.env.NB2_SCENARIO_DRIVER && !resumeStage) process.exit(0);
 
 const history = await TrustInput.fromBundle(readFileSync(join(out, 'trust.cbor')), rootGenesis);
-const registrySlot = (name: string) => hex(HE(ascii('unicity.seal-registry/' + name)));
+const verifiedHistory = join(out, 'verified-history.cbor');
+if (existsSync(verifiedHistory)) await extendHistory(verifiedHistory);
+const historyUrl = process.env.NB2_HISTORY_URL;
+assert(historyUrl && new URL(historyUrl).hostname === '127.0.0.1', 'loopback UTB history required');
+let refreshingHistory: Promise<void> | undefined;
+
+function signerEpoch(ucs: Uint8Array[]) {
+  return ucs.reduce((tip, raw) => {
+    const { epoch } = decodeUc(raw).unicitySeal;
+    return epoch > tip ? epoch : tip;
+  }, history.history.entries[0].epoch);
+}
+
+async function extendHistory(file: string) {
+  const candidate = await TrustInput.fromBundle(readFileSync(file), rootGenesis);
+  for (const entry of candidate.history.entries) await history.history.append(entry);
+}
+
+async function refreshHistory() {
+  const candidate = join(keys, 'history-candidate.cbor');
+  command(join(out, 'utb-evidence'), ['fetch', '--url', historyUrl!, '--out', candidate]);
+  await extendHistory(candidate);
+  writeFileSync(candidate, await history.history.toBundle());
+  renameSync(candidate, verifiedHistory);
+}
+
 async function trustFor(ucs: Uint8Array[]) {
-  const round = ucs.map((uc) => decodeUc(uc).unicitySeal.rootChainRoundNumber)
-    .reduce((max, n) => n > max ? n : max, 0n);
+  const required = signerEpoch(ucs);
   for (let i = 0; i < 120; ++i) {
-    // The locally enrolled execution client is the authority for this test lane.
-    const head = await reader.rpc.call<{ hash: string }>('eth_getBlockByNumber', ['finalized', false]);
-    const at = { blockHash: head.hash, requireCanonical: true };
-    const readSlot = async (name: string) => BigInt(await reader.rpc.call<string>('eth_getStorageAt', [registry, registrySlot(name), at]));
-    const [usableEpoch, rootRound] = await Promise.all([readSlot('origin.rootEpoch'), readSlot('clock.rootRound')]);
-    if (usableEpoch > 0n && rootRound >= round) {
-      json('origin.json', { blockHash: head.hash, registry, usableEpoch, rootRound });
-      return history.withAuthenticatedOrigin({ usableEpoch, rootRound });
-    }
-    await delay(500);
+    if (history.history.tip!.epoch >= required) return history.snapshot();
+    await (refreshingHistory ??= refreshHistory().finally(() => { refreshingHistory = undefined; }));
+    if (history.history.tip!.epoch < required) await delay(500);
   }
-  throw new Error(`execution origin did not reach certified root round ${round}`);
+  throw new Error(`verified wallet history did not reach signer epoch ${required}`);
+}
+
+async function waitForImport(required: bigint) {
+  const started = Date.now();
+  for (let i = 0; i < 120; ++i) {
+    try {
+      await reader.checkReturnImport(c, required);
+      return { signerEpoch: required, attempts: i + 1, elapsedMs: Date.now() - started };
+    } catch (error) {
+      if (!(error instanceof WalletError && error.reason === 'ImportLag') || i === 119) throw error;
+      await delay(500);
+    }
+  }
 }
 
 const authenticatedArchives = new Set<EvmReader>();
@@ -329,7 +360,8 @@ async function runSmoke() {
     recoveredAmount -= ordinaryAmount;
     const a = await returned('ordinary', ordinaryPart, ordinaryRecipient, ordinaryAmount);
     await certifyReceipt('ordinary', await send('ordinary', vault,
-      redeemCalldata(a.evidence, a.verdict.eta, a.verdict.minSegment, new Uint8Array())), c.vault, a.paid);
+      redeemCalldata(a.evidence, a.verdict.eta, a.verdict.minSegment, new Uint8Array()),
+      0n, '0x1', signer, 24_000_000n, signerEpoch(tokenUcs(a.evidence))), c.vault, a.paid);
     await custody('ordinary', 1n, recoveredAmount);
   }
   for (let i = 0; i < transfers; ++i) {
@@ -356,7 +388,7 @@ async function runSmoke() {
 type Burn = { evidence: Uint8Array; trust: TrustInput; paid: ExpectedLog };
 type Checkpoint = { from: number; seq: string; receipt: Receipt; event: { topics: string[]; data: string } };
 async function completeRecovery(b: Burn, name = 'run', restore?: Checkpoint, saveAt = Infinity, maxOperations = packetMax) {
-  const authority = new RecoveryAuthority(b.trust, async (next) => json('authority.json', next.origin));
+  const authority = new RecoveryAuthority(b.trust, async (next) => writeFileSync(join(evidenceDir, 'authority.cbor'), await next.history.toBundle()));
   const session = await RecoverySession.create(gamma, b.evidence, authority, PRODUCTION_PARAMS,
     { salt, recovery: bytes(recovery), runtimeHash: recoveryHash, pins, vaultRuntimeHash: vaultHash });
   let trust = b.trust;
@@ -388,7 +420,7 @@ async function completeRecovery(b: Burn, name = 'run', restore?: Checkpoint, sav
     }
     const seq = (prior?.seq ?? 0n) + 1n;
     const label = name + '-' + seq;
-    const mined = await send(label, recovery, packet.calldata);
+    const mined = await send(label, recovery, packet.calldata, 0n, '0x1', signer, 24_000_000n, packet.requiredSignerEpoch);
     const cert = await certifyReceipt(label, mined, bytes(recovery), packet.event);
     await session.verifyEvent(cert.trust, cert.encoded, packet.event);
     if (packet.state) writeFileSync(join(evidenceDir, label + '.state'), packet.state);
@@ -423,13 +455,12 @@ async function executeRecovery(b: Burn) {
       singleSourceProgress: singleton.prior.seq, packedProgress: prior.seq });
   }
   const payment = await session.gaps('redeemRecovered', trust, prior.receipt, { seq: prior.seq }, []);
-  await certifyReceipt('recovered', await send('recovered', vault, payment.calldata), c.vault, b.paid);
+  await certifyReceipt('recovered', await send('recovered', vault, payment.calldata, 0n, '0x1', signer, 24_000_000n, payment.requiredSignerEpoch), c.vault, b.paid);
   return { session: hex(session.id), packets: prior.seq, operations: session.operationCount };
 }
 
 async function runQualificationCosts() {
   const walletCore = await import('./wallet/core.js');
-  const originPath = join(out, 'wallet-origin.json');
   const deploymentBlock = Number(BigInt(JSON.parse(text('NativeBridgeVault11.receipt.json')).blockNumber));
   const releasePath = join(out, 'wallet-measurement-input.json');
   json('wallet-measurement-input.json', {
@@ -438,20 +469,7 @@ async function runQualificationCosts() {
       maxEncodedTxBytes: 524288, userGasLimit: '24000000', gasReserve: '500000',
       returnReserveSegments: 64, deploymentBlock, stateReadOnly: false },
   });
-  async function publishOrigin(ucs: Uint8Array[] = []) {
-    const trust = await trustFor(ucs);
-    writeFileSync(originPath, JSON.stringify(trust.origin, (_, v) => typeof v === 'bigint' ? String(v) : v));
-    return trust;
-  }
-  await publishOrigin();
   const walletAgg = new walletCore.GatewayAggregator(aggregator);
-  // Authenticate the execution origin at or beyond each newly certified wallet
-  // source before handing that proof to the wallet's normal verification path.
-  const advancingAgg = { async certify(cd: Uint8Array) {
-    const proof = await walletAgg.certify(cd);
-    await publishOrigin([raw(proof, scanNative(proof).kids[0].kids[4])]);
-    return proof;
-  } };
   // The measurement wallet uses the disposable lane's funded key. Its private state
   // stays in the driver's scratch directory and is removed when the lane stops.
   const walletKey = offline ? randomBytes(32) : bytes(readFileSync(join(keys, 'send-key'), 'utf8'));
@@ -462,8 +480,8 @@ async function runQualificationCosts() {
   }
   const wallet = await new walletCore.Wallet(join(keys, 'workload-wallet'), walletKey, {
     release: releasePath, trustBundle: join(out, 'trust.cbor'), trustPin: join(out, 'trust.pin'),
-    trustOrigin: originPath, rpc, aggregator,
-  }).open({ aggregator: advancingAgg });
+    rpc, aggregator,
+  }).open({ aggregator: walletAgg });
   const recipient = bytes('0000000000000000000000000000000000000012');
   const cases = [
     { label: 'split-20', transfers: 0, depth: 20, txTarget: 8, gasTarget: 50_000_000 },
@@ -491,9 +509,8 @@ async function runQualificationCosts() {
       assert(receipt, label);
       const firstOwner = firstOwnerOf(wallet.ownerPub(0));
       const rho = rhoOf(domain, wallet.bridge.secretOf(plan.intent));
-      const certified = await certifyReceipt('deposit', await record('deposit', receipt, start),
+      await certifyReceipt('deposit', await record('deposit', receipt, start),
         c.vault, { topics: [TOPIC.Deposited, u256(deposit.depositNumber)], data: depositedData(domain, value, rho, firstOwner) });
-      await publishOrigin([certified.proof.uc]);
       await wallet.refreshAuthority();
       await walletCore.mint(wallet, label);
       let held = label;
@@ -521,8 +538,6 @@ async function runQualificationCosts() {
           for (const { tx, cd } of requests) token = appendTransfer(token, tx, await walletAgg.proof(cd));
         }
         const nextLabel = label + '-transferred';
-        const ucs = tokenUcs(token);
-        await publishOrigin(ucs);
         await wallet.refreshAuthority();
         await walletCore.receive(wallet, nextLabel, token, owner);
         wallet.update(held, { spent: 'transferred as ' + nextLabel });
@@ -531,14 +546,12 @@ async function runQualificationCosts() {
       }
       for (let i = 0; i < depth; i++) {
         const nextLabel = label + '-child-' + i;
-        await publishOrigin();
         await wallet.refreshAuthority();
-        const [next] = await walletCore.split(wallet, held, 0, [
+        await walletCore.split(wallet, held, 0, [
           { label: nextLabel, amount: amount - 1n }, { label: label + '-sibling-' + i, amount: 1n },
         ]);
         held = nextLabel;
         --amount;
-        await publishOrigin(tokenUcs(next));
         await wallet.refreshAuthority();
       }
       console.log(label, 'held lineage ready', wallet.token(held).length);
@@ -566,7 +579,7 @@ async function runQualificationCosts() {
         return;
       }
       const evidence = appendTransfer(token, request.tx, await certifyChecked(agg, request.cd));
-      const trust = await publishOrigin(tokenUcs(evidence));
+      const trust = await trustFor(tokenUcs(evidence));
       const verdict = await verifyReturn(gamma, evidence, trust, PRODUCTION_PARAMS);
       assert.equal(verdict.amount, amount);
       assert.equal(hex(verdict.recipient), hex(recipient));
@@ -687,7 +700,8 @@ async function runQualificationCustody() {
     recovered.prior.receipt, { seq: recovered.prior.seq }, []);
   const ordinaryCall = (claim: typeof target, history: Uint8Array = new Uint8Array()) =>
     redeemCalldata(claim.evidence, claim.verdict.eta, claim.verdict.minSegment, history);
-  const replayReceipt = await send('paid-target', vault, ordinaryCall(target));
+  const replayReceipt = await send('paid-target', vault, ordinaryCall(target),
+    0n, '0x1', signer, 24_000_000n, signerEpoch(tokenUcs(target.evidence)));
   await certifyReceipt('paid-target', replayReceipt, c.vault, target.paid);
 
   async function evmRefusal(name: string, calldata: Uint8Array, signature: string, ...args: Uint8Array[]) {
@@ -728,7 +742,7 @@ async function runQualificationCustody() {
       { seq: cursor.seq, cursor: opened }, gaps, opened === undefined ? h0 : undefined);
     const before = await reader.vaultState(c.vault);
     const start = Date.now();
-    const certified = await certifyReceipt(name, await send(name, recovery, packet.calldata, 0n, '0x1', loadPayer),
+    const certified = await certifyReceipt(name, await send(name, recovery, packet.calldata, 0n, '0x1', loadPayer, 24_000_000n, packet.requiredSignerEpoch),
       bytes(recovery), packet.event!);
     await lateRecovery.session.verifyEvent(certified.trust, certified.encoded, packet.event!);
     const after = await reader.vaultState(c.vault);
@@ -760,6 +774,7 @@ async function runQualificationCustody() {
     const nonce = await reader.nonce(signer.address);
     const { baseFee, priority } = await reader.fees();
     const batch = claims.slice(i, Math.min(n, i + size));
+    await waitForImport(signerEpoch(batch.flatMap(claim => tokenUcs(claim.evidence))));
     const endpoint = segments.length;
     const submitted = [];
     for (const [j, claim] of batch.entries()) {
@@ -825,7 +840,8 @@ async function runQualificationCustody() {
   await evmRefusal('evicted-ordinary', ordinaryReplay, 'BadGapProof(uint256)', u256(0));
   await evmRefusal('evicted-recovered', replay, 'BadGapProof(uint256)', u256(0));
 
-  const failed = await send('evicted-recovered-mined', vault, replay, 0n, '0x0');
+  const failed = await send('evicted-recovered-mined', vault, replay,
+    0n, '0x0', signer, 24_000_000n, recoveredPacket.requiredSignerEpoch);
   assert.deepEqual(failed.logs, []);
   const gatewayChecks = [];
   for (const url of laneGateways()) {
@@ -859,8 +875,10 @@ async function runQualificationCustody() {
   const bidder = new LocalKeySigner(randomBytes(32));
   await send('race-bidder-funding', hex(bidder.address), new Uint8Array(), 10n ** 18n);
   const race = [
-    { name: 'race-ordinary', payer: signer, data: ordinaryCall(late, encodeHistory(h0, gaps)) },
-    { name: 'race-recovered', payer: bidder, data: settlement.calldata },
+    { name: 'race-ordinary', payer: signer, data: ordinaryCall(late, encodeHistory(h0, gaps)),
+      requiredEpoch: signerEpoch(tokenUcs(late.evidence)) },
+    { name: 'race-recovered', payer: bidder, data: settlement.calldata,
+      requiredEpoch: settlement.requiredSignerEpoch },
   ];
   const quotes = await Promise.all(race.map(async leg => {
     const estimate = BigInt(await reader.rpc.call<string>('eth_estimateGas', [
@@ -870,8 +888,8 @@ async function runQualificationCustody() {
     assert(gas <= 24_000_000n, leg.name);
     return { ...leg, estimate, gas };
   }));
-  const attempts = await Promise.all(quotes.map(async ({ name, payer, data, gas }) =>
-    send(name, vault, data, 0n, null, payer, gas)));
+  const attempts = await Promise.all(quotes.map(({ name, payer, data, gas, requiredEpoch }) =>
+    send(name, vault, data, 0n, null, payer, gas, requiredEpoch)));
   const winner = attempts.findIndex(r => r.status === '0x1');
   assert(winner >= 0 && attempts.filter(r => r.status === '0x1').length === 1, 'one race winner');
   await certifyReceipt('late-paid', attempts[winner], c.vault, late.paid);
@@ -946,13 +964,13 @@ async function runOfflineRelayer(stage: string) {
   const started = Date.now();
   const advance = await completed.session.gaps('advanceGaps', gapTrust, completed.prior.receipt,
     { seq: completed.prior.seq }, gaps, startHead);
-  const gap = await certifyReceipt('offline-advance', await send('offline-advance', recovery, advance.calldata),
+  const gap = await certifyReceipt('offline-advance', await send('offline-advance', recovery, advance.calldata, 0n, '0x1', signer, 24_000_000n, advance.requiredSignerEpoch),
     bytes(recovery), advance.event!);
   await completed.session.verifyEvent(gap.trust, gap.encoded, advance.event!);
   const certifiedAdvanceMs = Date.now() - started;
   const packet = await completed.session.gaps('redeemRecovered', gap.trust, gap.encoded,
     { seq: completed.prior.seq + 1n, cursor: { next: advance.next, head: advance.head! } }, []);
-  await certifyReceipt('offline-paid', await send('offline-paid', vault, packet.calldata), c.vault, paid);
+  await certifyReceipt('offline-paid', await send('offline-paid', vault, packet.calldata, 0n, '0x1', signer, 24_000_000n, packet.requiredSignerEpoch), c.vault, paid);
   const final = await reader.vaultState(c.vault);
   assert.equal(await reader.balance(c.vault), BigInt(backup.initialBalance) + BigInt(backup.value) - amount);
   assert.equal(await reader.balance(recipient), BigInt(backup.recipientBefore) + amount);

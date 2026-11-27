@@ -7,7 +7,7 @@ MongoDB it owns and releases the slot. The launcher requires a fresh checkout
 without `test-nodes`. Keep the run's output outside that checkout.
 
 Use [pins.json](pins.json) for the release inputs. Clone the pinned contracts,
-plug-in and aggregator repositories separately. Use Linux, Go, Node 22, Forge
+plug-in, Ureth and aggregator repositories separately. Use Linux, Go, Node 22, Forge
 and Cast 1.8.1, and solc 0.8.37. Build at most four jobs in parallel.
 
 ```sh
@@ -25,6 +25,7 @@ cargo build --locked --release -j 4 -p unicity-reth
 GOFLAGS=-p=4 make build
 go build -p 4 -o build/utb-evidence ./scripts/utb-evidence
 NB2_CONTRACTS=/path/to/contracts NB2_PLUGIN=/path/to/plug-ins \
+NB2_URETH_SOURCE=/path/to/ureth-source NB2_LANE_SLOT=2 \
 AGG_BIN=/path/to/bin/aggregator URETH_BIN=/path/to/ureth \
 NB2_OUT=/path/to/new/smoke-evidence scripts/nb2-t7/run.sh
 ```
@@ -33,6 +34,12 @@ The launcher builds the plug-in from a Git archive of the pinned commit in a
 fresh directory before acquiring a slot. It installs from the tracked lockfile,
 records the generated files in `plugin-lib.sha256`, and removes the build tree
 after the lane stops.
+
+Use a free private slot 0 or 2. The launcher defaults to slot 2 and takes its
+claim before starting MongoDB. The driver authenticates UTB history under the
+deployed genesis pin and waits for finalized B1 import of every required signer
+epoch before broadcasting a return. The resulting descriptors bind the
+imported-tip verifier and the wallet build.
 
 The smoke lane deploys the full production graph at K=64/B=16. It checks the T3/T4
 artifact hashes and the registry runtime, then binds the deployed runtime hashes in
@@ -99,7 +106,7 @@ identity, graph and proof settings on all four validators, then reads that raw
 transaction by block hash and index through the public relay. Pass a mined
 failed receipt path to exercise the failed-retry read.
 
-`check-qualification.py --repo BFT_CORE --ureth URETH --artifacts FORGE_OUT
+`check-qualification.py --repo BFT_CORE --ureth URETH --artifacts FORGE_OUT --plugin PLUGIN --ureth-bin URETH_BIN
 --output MANIFEST RUN...` rederives artifact, domain and pin digests and indexes
 the public evidence. It records test measurements. Fundable fee and peak-window
 envelopes need measured bounds for the combined qualification workloads.

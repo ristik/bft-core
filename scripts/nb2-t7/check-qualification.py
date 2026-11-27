@@ -23,6 +23,10 @@ def read(path):
     return json.loads(path.read_bytes())
 
 
+def write(path, data):
+    path.write_text(json.dumps(data, indent=2, sort_keys=True) + '\n')
+
+
 def sha(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -62,7 +66,7 @@ def source_map(values, checkout, revision=None):
         require(sha(content), expected, name)
 
 
-def inspect_graph(run, repo, ureth, artifacts):
+def inspect_graph(run, repo, ureth, artifacts, plugin, ureth_bin):
     g, pins = (read(run / name) for name in ('deployment.json', 'pins.json'))
     descriptor_dir = run / 'descriptors'
     desc = {name: digest(descriptor_dir / f'{name}.json') for name in (*DESCRIPTORS, 'semantic-profile')}
@@ -70,6 +74,17 @@ def inspect_graph(run, repo, ureth, artifacts):
         record = read(descriptor_dir / f'{name}.json')
         require(record['ureth'], pins['ureth'], f'{name} source revision')
         source_map(record.get('sources', record.get('rules')), ureth, pins['ureth'])
+    build_index = read(descriptor_dir / 'build-index.json')
+    if 'wallet' in build_index:
+        if plugin is None or ureth_bin is None:
+            raise SystemExit('imported-tip evidence requires --plugin and --ureth-bin')
+        wallet = build_index['wallet']
+        require(build_index['ureth'], pins['ureth'], 'execution build revision')
+        require(digest(ureth_bin), build_index['binaries']['unicity-reth'], 'execution binary')
+        require(wallet['revision'], pins['plugin'], 'wallet revision')
+        require(sha(source_file(plugin, pins['plugin'], 'package-lock.json')), wallet['lockSha256'], 'wallet lockfile')
+        require(digest(run / 'plugin-lib.sha256'), wallet['compiledSdkIndexSha256'], 'compiled SDK index')
+        source_map(wallet['sources'], plugin, pins['plugin'])
     registry = read(descriptor_dir / 'registry-layout.json')
     source_map(registry['sources'], repo)
     source_map(registry['native'], ureth, pins['ureth'])
@@ -107,7 +122,7 @@ def inspect_graph(run, repo, ureth, artifacts):
         if not initcode.startswith(creation):
             raise SystemExit(f'{name} live initcode does not start with the pinned creation bytes')
         require(read(run / f'{name}.receipt.json')['contractAddress'].lower(), g[CONTRACTS[name]], name)
-    return {'deployment': g, 'sourcePins': pins, 'descriptorSha256': desc}
+    return {'deployment': g, 'sourcePins': pins, 'descriptorSha256': desc, 'buildIndex': build_index}
 
 
 def percentile(values, percent):
@@ -185,6 +200,8 @@ def main():
     p.add_argument('--repo', type=Path, default=Path('.'))
     p.add_argument('--ureth', type=Path, required=True)
     p.add_argument('--artifacts', type=Path, required=True)
+    p.add_argument('--plugin', type=Path)
+    p.add_argument('--ureth-bin', type=Path)
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('runs', type=Path, nargs='+')
     args = p.parse_args()
@@ -194,7 +211,7 @@ def main():
               'corporaSha256': {name: digest(args.repo / 'testvectors' / name / 'MANIFEST') for name in
                                 ('nb2-continuation-v1.1', 'nb2-continuation-v1.1/transcripts', 'nb2-continuation-v1.1-supplement')}}
     for run in args.runs:
-        graph = inspect_graph(run, args.repo, args.ureth, args.artifacts)
+        graph = inspect_graph(run, args.repo, args.ureth, args.artifacts, args.plugin, args.ureth_bin)
         graph['costs'] = {name: workload(run / name, *limits) for name, limits in CASES.items()
                           if (run / name).is_dir() and not (run / name / 'offline-checkpoint.json').exists()}
         offline = list(run.glob('*/offline-result.json'))
@@ -214,7 +231,7 @@ def main():
         graph['buildEvidence'] = (run / 'builds.txt').read_text().splitlines()[:7]
         graph['evidenceSha256'] = dict(public_files(run))
         report['generations'][run.name] = graph
-    args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + '\n')
+    write(args.output, report)
 
 
 if __name__ == '__main__':
