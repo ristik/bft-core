@@ -162,8 +162,10 @@ func twoStageRun(t *testing.T, c *q4bLive, x, d string, warm, hold uint64, trans
 	}
 	target.Store(1 << 62)
 	withhold.Store(true)
-	clock := startRoundClock(m(ingress))
-	defer func() { reportTwoStageClock(t, clock.halt()) }()
+	if n > 4 {
+		clock := startRoundClock(m(ingress))
+		defer func() { reportTwoStageClock(t, clock.halt()) }()
+	}
 	c.stop(d)
 	if transport != nil {
 		transport.down(c, d)

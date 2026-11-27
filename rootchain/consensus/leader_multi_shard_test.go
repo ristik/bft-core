@@ -364,6 +364,9 @@ func gate9RescueTrace(t *testing.T, members int) {
 		transport.up(c, returning...)
 	}
 	c.start(returning...)
+	if !larger {
+		t0 = time.Now() // keep the original four-root trace's time origin
+	}
 	since := func() time.Duration { return time.Since(t0).Round(time.Millisecond) }
 	forwardsMu.Lock()
 	currentRound = func() uint64 { return m(watch).pacemaker.GetCurrentRound() }
