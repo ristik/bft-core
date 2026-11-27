@@ -137,19 +137,18 @@ def vr_pop_miss(r):
     def cli(*args, check=True):
         return rec.cli(live[0], home, *args, mounts=mounts, check=check)
 
-    first = cli('validator', 'apply', '--wait', '5m', check=False)
-    r.keep_redacted(ev / 'apply-1.log', first.stdout + first.stderr)
-    ident = json.loads((home / 'validator.json').read_text()).get('id')
-    r.expect(bool(ident), 'apply registered the joiner in VR', r.scrub((first.stdout + first.stderr).strip()[-300:]))
-    (auth / 'pos-policy.json').write_text(json.dumps({'network': vrdep['networkWord'], 'chainId': r.manifest['chain_id'],
-                                                     'election': election, 'ids': [ident]}) + '\n')
+    # one run, as the container's join (#1323): apply pins the authority's P85 policy (the release's election, no ids) to the identity VR
+    # assigns it, right before the delegation possession, which comes before the first bond
+    (auth / 'pos-policy-template.json').write_text(json.dumps({'network': vrdep['networkWord'], 'chainId': r.manifest['chain_id'],
+                                                              'election': election}) + '\n')
     vr_recover.chown(auth)
-    rec.exec(f'authority{j}', 'ubft', 'signing-authority', 'pos-policy', *vr_recover.OPERATOR, '--policy', '/authority/pos-policy.json')
-    if first.returncode:
-        r.expect('signing-pos-policy-refused' in first.stdout + first.stderr, 'the first apply stopped only for the PoS policy',
-                 r.scrub((first.stdout + first.stderr).strip()[-300:]))
-        second = cli('validator', 'apply', '--wait', '5m')
-        r.keep_redacted(ev / 'apply-2.log', second.stdout + second.stderr)
+    applied = cli('validator', 'apply', '--wait', '5m', '--pin-pos-policy', '/home/authority/pos-policy-template.json', check=False)
+    r.keep_redacted(ev / 'apply-1.log', applied.stdout + applied.stderr)
+    text = applied.stdout + applied.stderr
+    ident = json.loads((home / 'validator.json').read_text()).get('id')
+    r.expect(applied.returncode == 0 and bool(ident) and f'pinned the signing authority\'s P85 scope to identity {ident}' in text,
+             'one validator apply registered, delegated and bonded the joiner, pinning its authority to the identity it registered',
+             f'{ident}: ' + r.scrub(text.strip()[-300:]))
     # its shard node feeds its execution client, whose certified blocks its root observes: without it the root derives no intent and sends no proof
     rec.dc('up', '-d', '--no-deps', f'shard{j}', f'root{j}')
     times['joined'] = vr_recover.utc()
