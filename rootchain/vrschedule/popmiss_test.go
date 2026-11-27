@@ -200,3 +200,16 @@ func TestAMissStatementOverRealHosts(t *testing.T) {
 	require.EqualValues(t, 5, got.StakingID)
 	require.Equal(t, sender.ID().String(), got.Sigs[0].NodeID)
 }
+
+// A root outside the predecessor committee (here the joining successor 5) states no miss: its statements would carry no weight.
+func TestOnlyThePredecessorCommitteeStatesMisses(t *testing.T) {
+	w := newWorld(t)
+	var sent [][]MissMessage
+	m := w.Members[5]
+	s := NewService(ServiceConfig{Self: m.Root, Signer: m.RK.Signer, SendMiss: func(ms []MissMessage) { sent = append(sent, ms) }})
+	r := w.request(1_000)
+	s.Update(w.committedAt(r, 10))
+	s.Update(w.committedAt(r, 1_000))
+	require.Empty(t, sent)
+	require.Empty(t, s.MissCertificates(*r))
+}

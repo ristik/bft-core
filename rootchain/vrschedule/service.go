@@ -1372,6 +1372,9 @@ func (s *Service) missesLocked(c Committed) []MissMessage {
 		return nil
 	}
 	s.decided, s.own = digest, nil
+	if _, incumbent := s.incumbents[s.cfg.Self]; !incumbent {
+		return nil // only the predecessor committee states misses (a successor or K-only root's statements would be dropped)
+	}
 	st := s.cur
 	if st == nil || !bytes.Equal(st.digest[:], r.Intent) || !st.sinceOK || st.since >= r.Deadline || s.cfg.Signer == nil {
 		s.log().Info("VR handoff: no PoP miss is stated: this root did not hold the request's intent from before its cutoff",
