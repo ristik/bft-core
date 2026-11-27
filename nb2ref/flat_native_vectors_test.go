@@ -133,11 +133,18 @@ func TestFlatImportedTipAndMissingAuthority(t *testing.T) {
 
 func TestFlatLargeCombinedWitnesses(t *testing.T) {
 	w, v, registry := flatFixtureVerifier(t)
-	w.Agg.PDRs = []*types.PartitionDescriptionRecord{FixturePDR(DevNetwork, DevAggPartition, types.ShardID{}, 0, "flat-max-path")}
 	largeReceipt := ReceiptOpts{Type: 2, TxIndex: 3, FillerLogs: 1, MutReceipt: func(r *RawReceipt) {
 		r.Logs[0].Data = bytes.Repeat([]byte{0xa5}, 48_000)
 	}}
-	parent, _ := flatFixtureRootWithReceipt(t, w, v, 257, Key("flat-full-proof-root"), largeReceipt)
+	flatLargeCombinedWitnesses(t, w, v, registry, largeReceipt, largeReceipt, nil, "combined-large-receipt-and-paths")
+}
+
+func flatLargeCombinedWitnesses(t *testing.T, w *World, v *FlatVerifier, registry b1ref.Words,
+	deposit, predecessor ReceiptOpts, extendChild func(*InclusionProof), name string,
+) {
+	t.Helper()
+	w.Agg.PDRs = []*types.PartitionDescriptionRecord{FixturePDR(DevNetwork, DevAggPartition, types.ShardID{}, 0, "flat-max-path")}
+	parent, _ := flatFixtureRootWithReceipt(t, w, v, 257, Key("flat-full-proof-root"), deposit)
 	parentID := TokenID(parent.Mint.Salt, parent.Mint.Network)
 	key := Key("flat-full-proof-child")
 	mint := MintTx{Network: v.cfg.Network, Type: v.cfg.Ty, Recipient: sigPred(key), Salt: HU([]byte("flat-full-proof-salt")),
@@ -175,6 +182,9 @@ func TestFlatLargeCombinedWitnesses(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, proofs[0].Siblings, 256)
 	p.UC, p.Bitmap, p.Siblings = proofs[0].UC, proofs[0].Bitmap, proofs[0].Siblings
+	if extendChild != nil {
+		extendChild(p)
+	}
 	raw, records := flatFixtureEncode(t, []flatFixtureLevel{{nil, root}, {sumProof.Bytes(), child}})
 	want, err := v.VerifyFlatReturn(raw)
 	require.NoError(t, err)
@@ -188,7 +198,7 @@ func TestFlatLargeCombinedWitnesses(t *testing.T) {
 		p := scratch.packet(t, prior, receipt, cut)
 		packet, err := p.Calldata()
 		require.NoError(t, err)
-		f, next, event := flatFixtureFrame(t, w, v, model, p, packet, cut, largeReceipt)
+		f, next, event := flatFixtureFrame(t, w, v, model, p, packet, cut, predecessor)
 		receipt = f.ResultReceipt
 		require.Greater(t, len(receipt), 48_000)
 		if next == nil {
@@ -197,6 +207,6 @@ func TestFlatLargeCombinedWitnesses(t *testing.T) {
 		trace = append(trace, f)
 		prior = next
 	}
-	flatFixtureExports(t, "combined-large-receipt-and-paths", w, v, registry, raw, want.ABI(), trace)
+	flatFixtureExports(t, name, w, v, registry, raw, want.ABI(), trace)
 	t.Logf("complete packet %d bytes with 256 allocation steps, 256 RSMT siblings and a %d-byte predecessor", len(trace[1].Payload), len(trace[0].ResultReceipt))
 }
