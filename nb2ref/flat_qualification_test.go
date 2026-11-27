@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"crypto"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/b1ref"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -93,7 +95,7 @@ func TestFlatJointNativeQualification(t *testing.T) {
 
 	const name = "packed-joint-native-qualification"
 	flatLargeCombinedWitnesses(t, w, v, registry, flatLargeWitnessOptions{
-		name: name, deposit: deposit, predecessor: predecessor, resumePages: 32,
+		name: name, deposit: deposit, predecessor: predecessor, resumePages: 32, denseSparse: true,
 		prepareChild: func(draft *Draft) {
 			for i := range 14 {
 				key := Key(fmt.Sprintf("qualification/owner/%d", i))
@@ -115,5 +117,97 @@ func TestFlatJointNativeQualification(t *testing.T) {
 		} {
 			require.NoError(t, os.WriteFile(filepath.Join(dir, name, file), data, 0644))
 		}
+	}
+}
+
+// flatFixtureDenseResume certifies a synthetic prior state to stress sparse
+// witness widths without requiring source keys with chosen hash preimages.
+func flatFixtureDenseResume(t *testing.T, w *World, v *FlatVerifier, registry b1ref.Words,
+	evidence *FlatEvidence, wire []byte, prior FlatState, records []flatSourceFixture,
+	verdict *Verdict, opts flatLargeWitnessOptions,
+) {
+	t.Helper()
+	scratch := newFlatFixtureWallet(evidence)
+	scratch.packet(t, nil, nil, records[:2])
+	actualSIDs := make(map[[32]byte]bool)
+	actualClaims := make(map[[32]byte]bool)
+	for _, record := range records {
+		actualSIDs[record.sid] = true
+		for _, claim := range record.claims {
+			actualClaims[claim.key] = true
+		}
+	}
+	for i, record := range records[2:14] {
+		siblings := 256
+		if i == 11 {
+			siblings = 220
+		}
+		for bit := range siblings {
+			key := record.sid
+			key[bit/8] ^= byte(0x80) >> uint(bit%8)
+			if !actualSIDs[key] {
+				scratch.seen.insert(key, flatSIDLeaf(key))
+			}
+			for _, claim := range record.claims {
+				key := claim.key
+				key[bit/8] ^= byte(0x80) >> uint(bit%8)
+				if !actualClaims[key] {
+					value := HU([]byte("qualification/sparse/"), key[:])
+					scratch.claims.insert(key, flatClaimLeaf(key, value))
+				}
+			}
+		}
+	}
+	prior.SeenRoot = scratch.seen.lookup(256, [32]byte{})
+	prior.ClaimRoot = scratch.claims.lookup(256, [32]byte{})
+	session := v.Session(evidence.Header())
+	progress := FlatEvent{Kind: FlatProgressEvent, Session: session, Seq: prior.Seq, StateDigest: prior.Digest(session)}
+	predecessor, err := w.ReceiptProof(progress.Log(v.deployment.Recovery), opts.predecessor)
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name string
+		cut  int
+	}{{"-sparse", 16}, {"-sparse-split", 8}} {
+		wallet := *scratch
+		wallet.values = maps.Clone(scratch.values)
+		for height := range wallet.seen.nodes {
+			wallet.seen.nodes[height] = maps.Clone(scratch.seen.nodes[height])
+			wallet.claims.nodes[height] = maps.Clone(scratch.claims.nodes[height])
+		}
+		state, receipt := &prior, predecessor.Bytes()
+		var trace []flatFixtureTrace
+		for i := 2; i < len(records); i += tc.cut {
+			packet := wallet.packet(t, state, receipt, records[i:min(i+tc.cut, len(records))])
+			calldata, err := packet.Calldata()
+			require.NoError(t, err)
+			if tc.cut == 16 {
+				require.Len(t, packet.Pages, 32)
+				require.Len(t, packet.Operations, 16)
+				require.Len(t, packet.Operations[0].SID.Siblings, 256)
+				require.Len(t, packet.Operations[0].Claims[0].Path.Siblings, 256)
+				require.Greater(t, len(calldata), 385_000)
+			}
+			actual, err := v.RunFlat(calldata)
+			require.NoError(t, err)
+			require.Equal(t, session, actual.Event.Session)
+			require.Equal(t, state.Seq+1, actual.Event.Seq)
+			event := actual.Event.Log(v.deployment.Recovery)
+			result, err := w.ReceiptProof(event, opts.predecessor)
+			require.NoError(t, err)
+			frame := flatFixtureTrace{Payload: calldata, OldState: state.Bytes(),
+				Topics: bytes.Join([][]byte{event.Topics[0][:], event.Topics[1][:]}, nil),
+				Data:   event.Data, ResultReceipt: result.Bytes()}
+			state, receipt = actual.State, frame.ResultReceipt
+			if state != nil {
+				frame.NewState = state.Bytes()
+			} else {
+				require.Equal(t, FlatCompleteEvent, actual.Event.Kind)
+				require.Equal(t, verdict.ABI(), actual.Event.Verdict.ABI())
+			}
+			trace = append(trace, frame)
+			t.Logf("dense sparse Resume %s calldata=%d bytes", tc.name, len(calldata))
+		}
+		require.Nil(t, state)
+		flatFixtureExports(t, opts.name+tc.name, w, v, registry, wire, verdict.ABI(), trace)
 	}
 }

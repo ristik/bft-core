@@ -147,6 +147,7 @@ type flatLargeWitnessOptions struct {
 	extendChild          func(*Token)
 	name                 string
 	resumePages          int
+	denseSparse          bool
 }
 
 func flatFixtureExpandRSMT(t *testing.T, w *World, proof *InclusionProof, siblings int) {
@@ -231,4 +232,9 @@ func flatLargeCombinedWitnesses(t *testing.T, w *World, v *FlatVerifier, registr
 	}
 	flatFixtureExports(t, opts.name, w, v, registry, raw, want.ABI(), trace)
 	t.Logf("complete packet %d bytes with 256 allocation steps, 256 RSMT siblings and a %d-byte predecessor", len(trace[1].Payload), len(trace[0].ResultReceipt))
+	if opts.denseSparse {
+		prior, err := DecodeFlatState(trace[0].NewState)
+		require.NoError(t, err)
+		flatFixtureDenseResume(t, w, v, registry, e, raw, prior, records, want, opts)
+	}
 }
