@@ -12,8 +12,7 @@ def generate(repo, ureth, plugin, binary, output, wallet_index):
     fixtures = repo / 'testvectors/nb2-continuation-v1.1-supplement/descriptors'
     package = repo / 'deploy/testnet/bridge/nb2'
     output.mkdir()
-    for name in ('cert-batch-v2', 'rsmt-member-v1', 'registry-layout', 'execution',
-                 'primitive-vectors', 'semantic-profile'):
+    for name in ('cert-batch-v2', 'rsmt-member-v1', 'registry-layout', 'execution', 'primitive-vectors'):
         template = package / f'{name}-tip.json'
         if not template.is_file():
             template = fixtures / f'{name}.json'
@@ -26,9 +25,15 @@ def generate(repo, ureth, plugin, binary, output, wallet_index):
                 record[key] = {path: verify.sha(verify.source_file(ureth, pins['ureth'], path))
                                if native else verify.digest(repo / path) for path in record[key]}
         verify.write(output / f'{name}.json', record)
+    # The wallet pins these exact profile bytes. Bind the amended text through
+    # the release's build descriptor while preserving that profile identity.
+    profile = (package / 'semantic-profile-tip.json').read_bytes()
+    (output / 'semantic-profile.json').write_bytes(profile)
+    specification = 'docs/design/nb2-continuation-v1.1.md'
     verify.write(output / 'build-index.json', {
         'ureth': pins['ureth'],
         'binaries': {'unicity-reth': verify.digest(binary)},
+        'specification': {specification: verify.digest(repo / specification)},
         'wallet': {
             'revision': pins['plugin'],
             'lockSha256': verify.digest(plugin / 'package-lock.json'),
