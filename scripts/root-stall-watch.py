@@ -5,6 +5,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum, auto
 from http.client import HTTPConnection, HTTPException
 from pathlib import Path
 import signal
@@ -12,6 +13,12 @@ import time
 
 
 PAUSE_MAX_AGE = 10 * 60
+
+
+class Pause(Enum):
+    ABSENT = auto()
+    ACTIVE = auto()
+    EXPIRED = auto()
 
 
 def read_root(port, pid, path, timeout):
@@ -38,35 +45,57 @@ class Root:
     dumped: bool = False
     last_attempt: float | None = None
     paused: bool = False
+    resume_generation: tuple[int, int] | None = None
 
-    def restart_paused(self):
+    def restart_pause(self):
         # A rolling restart can delay peers that were never stopped, so the marker covers the lane.
+        nodes = self.home.parent
         try:
-            age = time.time() - (self.home.parent / ".stall-watch-pause").stat().st_mtime
+            started = (nodes / ".stall-watch-pause").stat().st_mtime
         except OSError:
-            if self.paused:
-                self.progressed = time.monotonic()
-            self.paused = False
-            return False
-        self.paused = 0 <= age < PAUSE_MAX_AGE
-        if self.paused:
+            pass
+        else:
+            age = time.time() - started
+            if 0 <= age < PAUSE_MAX_AGE:
+                self.paused = True
+                self.dumped = False
+                return Pause.ACTIVE
+            if age >= PAUSE_MAX_AGE:
+                self.paused = False
+                return Pause.EXPIRED
+
+        try:
+            completed = (nodes / ".stall-watch-resumed").stat()
+            generation = (completed.st_ino, completed.st_mtime_ns)
+        except OSError:
+            generation = None
+        if self.paused or (generation is not None and generation != self.resume_generation):
+            self.progressed = time.monotonic()
             self.dumped = False
             self.last_attempt = None
-        return self.paused
+        self.paused = False
+        self.resume_generation = generation
+        return Pause.ABSENT
 
     def sample(self, threshold):
-        if self.restart_paused():
+        if self.restart_pause() is Pause.ACTIVE:
             return
         current = read_root(self.port, self.pid, "/debug/consensus/round", 0.5)
-        if current is None or not current.strip().isdigit() or self.restart_paused():
+        pause = self.restart_pause()
+        if pause is Pause.ACTIVE:
             return
         now = time.monotonic()
-        round_number = int(current)
-        if self.round_number != round_number:
-            self.round_number = round_number
-            self.progressed = now
-            self.dumped = False
-        elapsed = now - self.progressed
+        round_available = current is not None and current.strip().isdigit()
+        if round_available:
+            round_number = int(current)
+            if self.round_number != round_number:
+                self.round_number = round_number
+                self.progressed = now
+                self.dumped = False
+        elif pause is not Pause.EXPIRED:
+            return
+        progressed = self.progressed
+        elapsed = now - progressed
         if self.dumped or elapsed < threshold:
             return
         if self.last_attempt is not None and now - self.last_attempt < threshold:
@@ -77,12 +106,15 @@ class Root:
             if int(pidfile.read_text()) != self.pid:
                 return
             stacks = read_root(self.port, self.pid, "/debug/pprof/goroutine?debug=2", 2)
-            if not stacks or self.restart_paused():
+            if not stacks or self.restart_pause() is Pause.ACTIVE or self.progressed != progressed:
                 return
             if int(pidfile.read_text()) != self.pid:
                 return  # The lane has replaced this root since we began sampling it.
             stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            reason = f"{elapsed:.1f}s without round progress (round {self.round_number}, pid {self.pid})"
+            round_info = f"round {self.round_number}" if round_available else "round unavailable"
+            if not round_available and self.round_number is not None:
+                round_info += f", last round {self.round_number}"
+            reason = f"{elapsed:.1f}s without round progress ({round_info}, pid {self.pid})"
             marker = f"\n=== #1063 stall dump: {reason}, pprof at {stamp} ===\n"
             log = self.home / "debug.log"
             with log.open("ab", buffering=0) as evidence:

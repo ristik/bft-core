@@ -193,27 +193,74 @@ set -eu
 source "$1"
 mkdir test-nodes
 marker=test-nodes/.stall-watch-pause
-stop_pidfile() { [ -f "$marker" ]; }
+failed_stage=$2
+check_stage() { [ -f "$marker" ] || exit 2; [ "$1" != "$failed_stage" ] || return 37; }
+stop_pidfile() { check_stage stop; }
 lsof() { return 1; }
 m2_root_addr() { echo "addr$1"; }
-m2_archive_root_state() { [ -f "$marker" ]; }
-m2_start_root() { [ -f "$marker" ]; }
-m2_wait_root_epoch() { [ -f "$marker" ] || exit 2; [ "$2" = 2 ]; }
+m2_archive_root_state() { check_stage archive; }
+m2_start_root() { check_stage start; }
+m2_wait_root_epoch() { check_stage ready; }
 m2_online_validators() { :; }
-m2_advance_authorities() { [ ! -e "$marker" ]; }
+m2_advance_authorities() { [ -z "$failed_stage" ] && [ ! -e "$marker" ]; }
 m2_send_paid() { :; }
 m2_measure_pause() { :; }
 
-m2_install_epoch 2 "1 2"
+status=0
+m2_install_epoch 2 "1 2" || status=$?
 [ ! -e "$marker" ]
+[ -f test-nodes/.stall-watch-resumed ]
+if [ -z "$failed_stage" ]; then [ "$status" = 0 ]; else [ "$status" = 37 ]; fi`
+	for _, stage := range []string{"", "stop", "archive", "start", "ready"} {
+		name := stage
+		if name == "" {
+			name = "success"
+		}
+		t.Run(name, func(t *testing.T) {
+			cmd := exec.Command("bash", "-c", script, "m2-install-watchdog-fixture", lib, stage)
+			cmd.Dir = t.TempDir()
+			out, err := cmd.CombinedOutput()
+			require.NoError(t, err, string(out))
+		})
+	}
+}
 
-if m2_install_epoch 3 "1 2"; then
-  echo "install succeeded despite failed epoch readiness" >&2
-  exit 1
-fi
-[ -f "$marker" ]`
-	cmd := exec.Command("bash", "-c", script, "m2-install-watchdog-fixture", lib)
-	cmd.Dir = t.TempDir()
-	out, err := cmd.CombinedOutput()
-	require.NoError(t, err, string(out))
+func TestS4SnapshotKeepsWatchdogPausedUntilRoundReadiness(t *testing.T) {
+	libDir, err := filepath.Abs("../lib")
+	require.NoError(t, err)
+	script := `
+set -eu
+source "$1/portable.sh"
+source "$1/s4-lib.sh"
+S4_RESTART_ROOTS=1 S4_DIR=journal
+mkdir -p "$S4_DIR" test-nodes/root1
+touch test-nodes/root1/evidence.db test-nodes/root1/debug.log
+echo 123 >test-nodes/root1/pid
+marker=test-nodes/.stall-watch-pause
+kill() { return 1; } # the original root has stopped
+sleep() { :; }
+s4_epoch() { echo 2; }
+stop_pidfile() { [ -f "$marker" ]; }
+m2_root_addr() { echo "addr$1"; }
+m2_start_root() { [ -f "$marker" ]; }
+outcome=$2
+s4_round() {
+  [ -f "$marker" ] || { touch unpaused; return 1; }
+  if [ "$outcome" = ready ] && [ -f polled ]; then echo 17; else touch polled; echo 0; fi
+}
+status=0
+s4_snapshot_journal 1 || status=$?
+[ -f polled ]
+[ ! -e unpaused ]
+[ ! -e "$marker" ]
+[ -f test-nodes/.stall-watch-resumed ]
+if [ "$outcome" = ready ]; then [ "$status" = 0 ]; else [ "$status" = 1 ]; fi`
+	for _, outcome := range []string{"ready", "timeout"} {
+		t.Run(outcome, func(t *testing.T) {
+			cmd := exec.Command("bash", "-c", script, "s4-watchdog-fixture", libDir, outcome)
+			cmd.Dir = t.TempDir()
+			out, err := cmd.CombinedOutput()
+			require.NoError(t, err, string(out))
+		})
+	}
 }

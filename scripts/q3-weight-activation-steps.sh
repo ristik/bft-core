@@ -225,29 +225,35 @@ q3_aggregators_unchanged() {
 # A real TC with the heavy validator alive: stop a light root; its leader rounds time out; heavy + two lights (8 >= 7) form the scheme-2 TC.
 # Epoch 2 is the root's current epoch (the roots restarted into it), so every timeout vote signed from here on is an epoch-2 statement.
 q3_real_tc() {
+  lane_with_root_watch_paused q3_restart_light_root_after_tc || return
+  h3_progress after-tc 8
+}
+
+q3_restart_light_root_after_tc() {
   local root=test-nodes/root1/debug.log mark
   mark=$(wc -l <"$root")
   h3_mark
-  lane_pause_root_watch || return 1
-  stop_pidfile test-nodes/root4/pid 'ubft root-node run' INT
+  stop_pidfile test-nodes/root4/pid 'ubft root-node run' INT || return
   q3_wait_grep_since 180 "$root" "$mark" "$Q3_PAT_TC" || return 1
   q3_wait_grep_since 60 "$root" "$mark" "$(q3_pat "$Q3_PAT_SIGNED_TIMEOUT" 2)" || return 1
   h3_since_mark | grep -aE "$Q3_PAT_TC|$(q3_pat "$Q3_PAT_SIGNED_TIMEOUT" 2)" | tail -n 20 >"$Q3_DIR/tc-trace.txt"
   [ -s "$Q3_DIR/tc-trace.txt" ] || return 1
   # root 4 returns (same state, same epoch: a plain restart, no archive of its stores)
-  m2_start_root 4 2 "$(m2_root_addr 1)" || return 1
-  lane_resume_root_watch || return 1
-  h3_progress after-tc 8
+  m2_start_root 4 2 "$(m2_root_addr 1)"
 }
 
 # The negative root boundary: the heavy root alone (weight 6 of W=9, Q=7) cannot form a certificate. The three light roots are killed; the heavy root
 # keeps timing out (it signs timeout votes) but no timeout certificate forms and no root round commits. With ONE light root back the weight is 7 =
 # Q and the chain commits again, so 6 fails and 7 passes at the same boundary.
 q3_root_boundary() {
+  lane_with_root_watch_paused q3_restart_lights_at_root_boundary || return
+  h3_progress root-boundary-restored 8
+}
+
+q3_restart_lights_at_root_boundary() {
   local root1=test-nodes/root1/debug.log mark mark2 settled end i signed timeouts formed committed
   mark=$(wc -l <"$root1")
-  lane_pause_root_watch || return 1
-  for i in 2 3 4; do stop_pidfile "test-nodes/root$i/pid" 'ubft root-node run' KILL; done
+  for i in 2 3 4; do stop_pidfile "test-nodes/root$i/pid" 'ubft root-node run' KILL || return; done
   sleep 12     # what was in flight commits or dies out; the chain is then stuck
   settled=$(q3_signers_of 1 | jq -r .round)
   sleep 40     # four local timeouts (10 s each) of the heavy root alone
@@ -273,9 +279,7 @@ q3_root_boundary() {
   echo "heavy + one light root (weight 7 of 9): committed round $committed (was stuck at $end), $formed timeout certificates in the window" >>"$Q3_DIR/root-boundary.txt"
   [ "$committed" -gt "$end" ] || { echo "heavy plus one light (weight 7) did not commit a round ($end -> $committed)" >&2; return 1; }
   m2_start_root 3 2 "$(m2_root_addr 1)" || return 1
-  m2_start_root 4 2 "$(m2_root_addr 1)" || return 1
-  lane_resume_root_watch || return 1
-  h3_progress root-boundary-restored 8
+  m2_start_root 4 2 "$(m2_root_addr 1)"
 }
 
 # The negative EVM boundary: three light EVM validators (weight 3 of W=9, Q=5) cannot get a shard certification accepted. The heavy entity's shard node is
@@ -317,12 +321,15 @@ q3_ids() { grep -aoE 'messageID=[0-9a-f]+' | sort -u; }
 # statement) and rebroadcast it, the TC must form, and commits must resume. No orderly stop and no retry of the module alone. Only the TIMEOUT is
 # observable as a rebroadcast; the vote held again at start is logged with its identity ("recovered last vote") and compared with the signed one.
 q3_heavy_crash() {
+  lane_with_root_watch_paused q3_check_heavy_crash
+}
+
+q3_check_heavy_crash() {
   local root1=test-nodes/root1/debug.log signed lastsigned recovered recov rebroadcast i mark
   mark=$(wc -l <"$root1")
-  lane_pause_root_watch || return 1
-  for i in 2 3 4; do stop_pidfile "test-nodes/root$i/pid" 'ubft root-node run' KILL; done   # the lights away: the heavy root cannot complete a certificate alone
+  for i in 2 3 4; do stop_pidfile "test-nodes/root$i/pid" 'ubft root-node run' KILL || return; done   # the lights away: the heavy root cannot complete a certificate alone
   q3_wait_grep_since 180 "$root1" "$mark" "$(q3_pat "$Q3_PAT_SIGNED_TIMEOUT" 2)" || return 1
-  stop_pidfile test-nodes/root1/pid 'ubft root-node run' KILL          # the heavy root dies right after signing
+  stop_pidfile test-nodes/root1/pid 'ubft root-node run' KILL || return   # the heavy root dies right after signing
   signed=$(tail -n +"$((mark + 1))" "$root1" | grep -aE "$(q3_pat "$Q3_PAT_SIGNED_TIMEOUT" 2)" | q3_ids)
   [ -n "$signed" ] || { echo "no signed timeout identity to compare against" >&2; return 1; }
   lastsigned=$(tail -n +"$((mark + 1))" "$root1" | grep -aE "$(q3_pat "$Q3_PAT_SIGNED_TIMEOUT" 2)" | tail -n 1 | q3_ids | sed 's/messageID=//')

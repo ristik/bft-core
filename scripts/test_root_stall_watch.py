@@ -54,6 +54,7 @@ class RootStallWatchTest(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         nodes = Path(directory.name)
         self.pause_marker = nodes / ".stall-watch-pause"
+        self.resumed_marker = nodes / ".stall-watch-resumed"
         home = nodes / "root1"
         home.mkdir()
         (home / "pid").write_text("123\n")
@@ -127,6 +128,46 @@ class RootStallWatchTest(unittest.TestCase):
         self.sample_at(1)
         self.sample_at(6)
         self.assertEqual(["123"], self.server.stack_requests)
+
+    def test_expired_pause_captures_unavailable_round_with_rate_limit_and_pid_check(self):
+        self.sample_at(1)
+        self.pause_marker.touch()
+        expires_at = self.pause_marker.stat().st_mtime + PAUSE_MAX_AGE
+        self.server.round_number = None
+        self.sample_at(6)
+        self.assertEqual([], self.server.stack_requests)
+
+        pidfile = self.root.home / "pid"
+        self.server.fail_capture = True
+        with patch("time.time", return_value=expires_at):
+            self.sample_at(7)
+            self.sample_at(8)
+            self.assertEqual(["123"], self.server.stack_requests)
+            self.assertFalse(self.log.exists())
+
+            self.server.fail_capture = False
+            pidfile.write_text("124\n")
+            self.sample_at(12)
+            self.assertEqual(["123"], self.server.stack_requests)
+            self.assertFalse(self.log.exists())
+
+            pidfile.write_text("123\n")
+            self.sample_at(17)
+            self.sample_at(22)
+        self.assertEqual(["123", "123"], self.server.stack_requests)
+        self.assertIn("round unavailable, last round 51, pid 123", self.log.read_text())
+
+    def test_pause_completed_between_samples_rearms(self):
+        self.sample_at(1)
+        self.pause_marker.touch()
+        self.pause_marker.replace(self.resumed_marker)
+
+        self.sample_at(10)
+        self.sample_at(14)
+        self.assertEqual([], self.server.stack_requests)
+        self.sample_at(15)
+        self.assertEqual(["123"], self.server.stack_requests)
+        self.assertIn("5.0s without round progress", self.log.read_text())
 
     def test_failed_capture_is_rate_limited(self):
         self.sample_at(1)

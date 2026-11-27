@@ -421,11 +421,14 @@ utb_import_report() {
 
 # before the V3 handoff: stop the root, let the others go on UTB_IMPORT_GAP rounds, restart it in the genesis epoch with its store, wait for the state import
 utb_step_s1() {
+  lane_with_root_watch_paused utb_restart_and_wait_for_import
+}
+
+utb_restart_and_wait_for_import() {
   local out node ref log gap start now i marker; out="$(utb_dir)/state-import"; mkdir -p "$out"
   node=$(utb_import_root); ref=$(h3_first_root); gap=${UTB_IMPORT_GAP:-12}; log="test-nodes/root$node/debug.log"
   [ "$node" != "$ref" ] || { echo "the root to import state must not be the reference root $ref" >&2; return 1; }
   start=$(utb_root_round "$ref") || return 1
-  lane_pause_root_watch || return 1
   stop_pidfile "test-nodes/root$node/pid" 'ubft root-node' || return 1
   for i in $(seq 1 50); do lsof -nP -iTCP:"$(m2_rpc_port "$node")" -sTCP:LISTEN >/dev/null 2>&1 || break; sleep 0.2; done
   for i in $(seq 1 180); do
@@ -442,7 +445,6 @@ utb_step_s1() {
   done
   tail -n +"$((marker + 1))" "$log" | grep -a 'completed recovery' | head -1 | cut -c1-240 | tee "$out/import-line.txt"
   [ -s "$out/import-line.txt" ] || { echo "root $node (stopped at round $start, $gap rounds behind) did not recover by state import within 120 s" >&2; return 1; }
-  lane_resume_root_watch || return 1
   echo "root $node stopped at root round $start, restarted $gap+ rounds later in the genesis epoch, state import completed (log line $((marker + 1))+)"
   ! tail -n +"$((marker + 1))" "$log" | grep -aq -e 'V3 freeze rules are not enabled' -e 'successor trust-base entry cannot be derived' || { echo "the root met a refusal right after its import" >&2; return 1; }
 }

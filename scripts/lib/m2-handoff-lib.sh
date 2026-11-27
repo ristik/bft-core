@@ -430,25 +430,28 @@ m2_config_only_handoff() { # epoch roots oldRpcs (the roots' RPC endpoints are t
   m2_install_epoch "$epoch" "$roots"
 }
 
-m2_install_epoch() { # epoch roots: after the handoff to this epoch committed, the roots restart into it, the validators activate it, the authorities advance and a paid transaction certifies
-  local epoch=$1 roots=$2 oldEpoch=$(($1-1)) nextFile="trust-base-epoch$1.json"
-  local i waitStep first boot prev activated
+m2_restart_roots_for_install() { # epoch roots
+  local epoch=$1 roots=$2 i waitStep first boot prev
   first=$(echo "$roots" | awk '{print $1}')
   # Every root restarts on the install epoch; each fetches and verifies the committed bundle.
-  lane_pause_root_watch || return 1
   for i in $roots; do
     prev=$(echo "$roots" | tr ' ' '\n' | grep -vx "$i" | head -1)
     boot=$(m2_root_addr "$prev")
-    stop_pidfile "test-nodes/root$i/pid" 'ubft root-node' || return 1
+    stop_pidfile "test-nodes/root$i/pid" 'ubft root-node' || return
     for waitStep in $(seq 1 50); do
       lsof -nP -iTCP:"$(m2_rpc_port "$i")" -sTCP:LISTEN >/dev/null 2>&1 || break
       sleep 0.2
     done
-    m2_archive_root_state "$i" "$epoch" || return 1
-    m2_start_root "$i" "$epoch" "$boot" || return 1
+    m2_archive_root_state "$i" "$epoch" || return
+    m2_start_root "$i" "$epoch" "$boot" || return
   done
-  m2_wait_root_epoch "$first" "$epoch" || return 1
-  lane_resume_root_watch || return 1
+  m2_wait_root_epoch "$first" "$epoch"
+}
+
+m2_install_epoch() { # epoch roots: after the handoff to this epoch committed, the roots restart into it, the validators activate it, the authorities advance and a paid transaction certifies
+  local epoch=$1 roots=$2 oldEpoch=$(($1-1)) nextFile="trust-base-epoch$1.json"
+  local i waitStep activated
+  lane_with_root_watch_paused m2_restart_roots_for_install "$epoch" "$roots" || return
   for i in $(m2_online_validators); do
     activated=false
     for waitStep in $(seq 1 90); do

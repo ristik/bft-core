@@ -127,9 +127,12 @@ h3_prepare_coupled() { # epoch replaced new
 
 # After H: the new root starts first (it proves H committed), the retained roots restart on the install epoch, the replaced one stops.
 h3_activate_coupled() { # epoch replaced new
+  lane_with_root_watch_paused h3_restart_coupled_roots "$@"
+}
+
+h3_restart_coupled_roots() { # epoch replaced new
   local epoch=$1 replace=$2 new=$3 i oldBoot
   oldBoot=$(m2_root_addr "$replace")
-  lane_pause_root_watch || return 1
   m2_start_root "$new" "$epoch" "$oldBoot" || return 1
   for i in $H3_ROOTS; do
     [ "$i" = "$replace" ] && continue
@@ -140,8 +143,7 @@ h3_activate_coupled() { # epoch replaced new
   done
   stop_pidfile "test-nodes/root$replace/pid" 'ubft root-node' || return 1
   H3_ROOTS=$(for i in $H3_ROOTS; do [ "$i" = "$replace" ] && echo "$new" || echo "$i"; done | tr '\n' ' ' | sed 's/ $//')
-  m2_wait_root_epoch "$(h3_first_root)" "$epoch" || return 1
-  lane_resume_root_watch
+  m2_wait_root_epoch "$(h3_first_root)" "$epoch"
 }
 
 # The successor committee's identity records (the #85 lifecycle): deterministic from each root node id, one per root entity bound to its delegated EVM
@@ -242,8 +244,11 @@ h3_retry_handoff() { # old epoch, attempt function (builds the assignment and pr
 # is still stopped and archiving; on a slow host that root, the joiner's, started rounds after the switch, recovered by state and never logged the switch, so
 # p85_epoch_switches (every running root must have logged one) failed (ci-lane run 39396698292 and 39433678003). Together, no root can run the switch without the others.
 h3_restart_roots() {
+  lane_with_root_watch_paused h3_restart_roots_into_epoch "$@"
+}
+
+h3_restart_roots_into_epoch() {
   local epoch=$1 i prev boot
-  lane_pause_root_watch || return 1
   if [ "${H3_RESTART_TOGETHER:-0}" = 1 ]; then
     for i in $H3_ROOTS; do
       stop_pidfile "test-nodes/root$i/pid" 'ubft root-node' || return 1
@@ -264,8 +269,7 @@ h3_restart_roots() {
     done
     for p in "${pids[@]}"; do wait "$p" || rc=1; done
     [ "$rc" = 0 ] || return 1
-    m2_wait_root_epoch "${H3_WAIT_ROOT:-$(h3_first_root)}" "$epoch" || return 1
-    lane_resume_root_watch
+    m2_wait_root_epoch "${H3_WAIT_ROOT:-$(h3_first_root)}" "$epoch"
     return
   fi
   for i in $H3_ROOTS; do
@@ -276,8 +280,7 @@ h3_restart_roots() {
     m2_archive_root_state "$i" "$epoch" || return 1
     m2_start_root "$i" "$epoch" "$boot" || return 1
   done
-  m2_wait_root_epoch "${H3_WAIT_ROOT:-$(h3_first_root)}" "$epoch" || return 1   # H3_WAIT_ROOT: a member of the epoch when only some roots restart (bft-core#1086)
-  lane_resume_root_watch
+  m2_wait_root_epoch "${H3_WAIT_ROOT:-$(h3_first_root)}" "$epoch"   # H3_WAIT_ROOT: a member of the epoch when only some roots restart (bft-core#1086)
 }
 
 # reth_trust / reth_untrust (definitions only): every lane that reaches h3_start_reth needs them, not only the paired devnet that sources them first

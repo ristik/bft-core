@@ -95,31 +95,39 @@ s4_equivocate() {
 # written last, so a copy taken while the process is stopped is a consistent crash-point snapshot, and no root restart disturbs the lane (S4_RESTART_ROOTS=1 stops and
 # restarts the root instead, as the first S4 runs did: in those runs the execution chain stopped certifying afterwards in the milestone runs, see docs/root-evidence.md).
 s4_snapshot_journal() {
-  local i=$1 ref pid epoch k
-  pid=$(cat "test-nodes/root$i/pid" 2>/dev/null)
+  local i=$1 pid
+  pid=$(cat "test-nodes/root$i/pid" 2>/dev/null) || return
   if [ "${S4_RESTART_ROOTS:-0}" != 1 ]; then
     kill -0 "$pid" 2>/dev/null || { echo "root $i is not running" >&2; return 1; }
-    lane_pause_root_watch || return 1
-    kill -STOP "$pid" || return 1
-    cp "test-nodes/root$i/evidence.db" "$S4_DIR/journal-root$i.db"; k=$?
-    kill -CONT "$pid" || return 1
-    lane_resume_root_watch || return 1
-    [ "$k" = 0 ] || return 1
+    lane_with_root_watch_paused s4_copy_stopped_journal "$i" "$pid" || return
     sleep 16   # the next periodic counter line (every 15 s) after the pause
     grep -a 'evidence observer stats' "test-nodes/root$i/debug.log" | tail -1 >"$S4_DIR/observer-stats-root$i.txt"
     return 0
   fi
-  epoch=$(s4_epoch "$i"); ref=
+  lane_with_root_watch_paused s4_copy_and_restart_root "$i" "$pid"
+}
+
+s4_copy_stopped_journal() {
+  local i=$1 pid=$2 copy_status=0
+  kill -STOP "$pid" || return
+  cp "test-nodes/root$i/evidence.db" "$S4_DIR/journal-root$i.db" || copy_status=$?
+  kill -CONT "$pid" || return
+  return "$copy_status"
+}
+
+s4_copy_and_restart_root() {
+  local i=$1 pid=$2 ref= epoch k
+  epoch=$(s4_epoch "$i") || return
   for k in 1 2 3 4; do [ "$k" = "$i" ] || { ref=$k; break; }; done
-  lane_pause_root_watch || return 1
-  stop_pidfile "test-nodes/root$i/pid" 'ubft root-node' || return 1
+  stop_pidfile "test-nodes/root$i/pid" 'ubft root-node' || return
   for k in $(seq 1 100); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
   kill -0 "$pid" 2>/dev/null && { echo "root $i did not stop" >&2; return 1; }
   cp "test-nodes/root$i/evidence.db" "$S4_DIR/journal-root$i.db" || return 1
   grep -a 'evidence observer stats' "test-nodes/root$i/debug.log" | tail -1 >"$S4_DIR/observer-stats-root$i.txt"
-  m2_start_root "$i" "$epoch" "$(m2_root_addr "$ref")" || return 1
-  lane_resume_root_watch || return 1
-  for k in $(seq 1 60); do [ "$(s4_round "$i" 2>/dev/null)" -gt 0 ] 2>/dev/null && break; sleep 1; done
+  m2_start_root "$i" "$epoch" "$(m2_root_addr "$ref")" || return
+  for k in $(seq 1 60); do [ "$(s4_round "$i" 2>/dev/null)" -gt 0 ] 2>/dev/null && return 0; sleep 1; done
+  echo "root $i did not report a positive round within 60 s after restart" >&2
+  return 1
 }
 
 s4_collect_after_rotation() {
