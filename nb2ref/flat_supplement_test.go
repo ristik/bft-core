@@ -30,12 +30,8 @@ func supplementWrite(t *testing.T, dir, name string, raw []byte) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, name), raw, 0644))
 }
 
-func TestFlatSupplement(t *testing.T) {
-	dir := os.Getenv("NB2_FLAT_SUPPLEMENT_OUT")
-	input := dir
-	if dir == "" {
-		input, dir = flatSupplement, t.TempDir()
-	}
+func readFlatFixtureDeployment(t *testing.T, input string) FlatDeployment {
+	t.Helper()
 	var identity struct {
 		RecoveryAddress, RecoveryRuntimeHash, Pins string
 	}
@@ -46,12 +42,21 @@ func TestFlatSupplement(t *testing.T) {
 		require.Len(t, b, n)
 		return b
 	}
-	deployment := FlatDeployment{
+	return FlatDeployment{
 		Salt:     [32]byte(supplementRead(t, input, "generation-salt.bin")),
 		Pins:     [32]byte(decode(identity.Pins, 32)),
 		Runtime:  [32]byte(decode(identity.RecoveryRuntimeHash, 32)),
 		Recovery: [20]byte(decode(identity.RecoveryAddress, 20)),
 	}
+}
+
+func TestFlatSupplement(t *testing.T) {
+	dir := os.Getenv("NB2_FLAT_SUPPLEMENT_OUT")
+	input := dir
+	if dir == "" {
+		input, dir = flatSupplement, t.TempDir()
+	}
+	deployment := readFlatFixtureDeployment(t, input)
 	gamma := supplementRead(t, input, "gamma.bin")
 
 	// Keep each scenario independent of the signing counters of the others.

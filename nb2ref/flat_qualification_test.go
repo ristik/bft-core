@@ -62,8 +62,12 @@ func TestFlatJointNativeQualification(t *testing.T) {
 	cfg := *old.cfg
 	cfg.RootGenesis = pin
 	cfg.Ty, cfg.Aid = FlatAssetIDs(&cfg)
-	gamma := FlatConfigBytes(&cfg)
-	w, v, registry := flatFixtureVerifierWithWorld(t, w, gamma, old.deployment)
+	gamma, deployment := FlatConfigBytes(&cfg), old.deployment
+	if dir := os.Getenv("NB2_FLAT_QUALIFICATION_GRAPH"); dir != "" {
+		gamma = supplementRead(t, dir, "gamma.bin")
+		deployment = readFlatFixtureDeployment(t, dir)
+	}
+	w, v, registry := flatFixtureVerifierWithWorld(t, w, gamma, deployment)
 
 	receipt := ReceiptOpts{Type: 2, TxIndex: 127, FillerLogs: 1, MutReceipt: func(r *RawReceipt) {
 		r.Logs[0].Data = bytes.Repeat([]byte{0xa5}, 48_000)
