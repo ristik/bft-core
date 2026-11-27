@@ -2,7 +2,6 @@
 """Make the checksummed docker-load bundle beside the immutable chain release."""
 import argparse
 import gzip
-import hashlib
 import json
 import re
 from pathlib import Path
@@ -10,7 +9,7 @@ import shutil
 import subprocess
 import tempfile
 
-from load import verify_archive
+from load import digest, verify_archive
 
 
 def main():
@@ -20,15 +19,18 @@ def main():
     cli.add_argument('source_release', type=Path)
     cli.add_argument('out', type=Path)
     a = cli.parse_args()
-    def digest(path):
-        with path.open('rb') as f:
-            return hashlib.file_digest(f, 'sha256').hexdigest()
     inspect = subprocess.check_output(['docker','image','inspect',a.image])
     image, = json.loads(inspect)
     if (image['Os'], image['Architecture']) != ('linux','amd64'):
         cli.error('expected the linux/amd64 validator image')
     if a.out.exists():
         cli.error('output already exists')
+    image_cat = ['docker', 'run', '--rm', '--network', 'none', '--entrypoint', '/bin/cat', image['Id']]
+    release_lock = json.loads(subprocess.check_output([*image_cat, '/opt/validator/release-lock.json']))
+    release_digest = digest(a.source_release/'SHA256SUMS')
+    genesis_id = (a.source_release/'utb-genesis.id').read_text().strip()
+    if release_digest != release_lock['sha256sums'] or genesis_id != release_lock['utb_genesis_id']:
+        cli.error('source release differs from the validator image lock')
     with tempfile.TemporaryDirectory(prefix='.validator-image-', dir=a.out.parent) as temp:
         stage = Path(temp)/'bundle'
         stage.mkdir()
@@ -41,8 +43,7 @@ def main():
         if not re.fullmatch(r'[0-9a-f]{40}', revision):
             cli.error('the validator image has no reviewed handoff-ubft revision')
         with handoff.open('wb') as file:
-            subprocess.run(['docker', 'run', '--rm', '--network', 'none', '--entrypoint', '/bin/cat',
-                            image['Id'], '/usr/local/bin/handoff-ubft'], stdout=file, check=True)
+            subprocess.run([*image_cat, '/usr/local/bin/handoff-ubft'], stdout=file, check=True)
         handoff_digest = digest(handoff)
         if labels.get('org.unicity.handoff-ubft.sha256') != handoff_digest:
             cli.error('handoff-ubft differs from the image build digest')
@@ -57,8 +58,7 @@ def main():
             'imageId':image['Id'], 'platform':'linux/amd64',
             'archive':tar.name, 'archiveSha256':digest(tar),
             'handoffUbftRevision':revision, 'handoffUbftSha256':handoff_digest,
-            'sourceReleaseSha256':digest(a.source_release/'SHA256SUMS'),
-            'utbGenesisId':(a.source_release/'utb-genesis.id').read_text().strip(),
+            'sourceReleaseSha256':release_digest, 'utbGenesisId':genesis_id,
         }
         verify_archive(tar, manifest['imageId'], manifest['platform'])
         (stage/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')

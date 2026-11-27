@@ -4,6 +4,7 @@ import io
 import json
 import re
 import subprocess
+from contextlib import redirect_stderr
 from pathlib import Path
 import tarfile
 import tempfile
@@ -27,6 +28,8 @@ def module(name):
 
 validator = module('validator')
 loader = module('load')
+with patch.dict('sys.modules', {'load': loader}):
+    packer = module('pack')
 
 
 class ValidatorContainer(unittest.TestCase):
@@ -48,6 +51,35 @@ class ValidatorContainer(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'authenticated image pin'):
                 validator.bootstrap(settings, {'sha256sums':hashlib.sha256(b'expected').hexdigest()})
             tool.assert_not_called()
+
+    def test_pack_refuses_a_release_that_differs_from_the_image_lock(self):
+        image = {'Os': 'linux', 'Architecture': 'amd64', 'Id': 'sha256:' + 'a'*64,
+                 'Config': {'Labels': {'org.unicity.handoff-ubft.revision': 'b'*40,
+                                       'org.unicity.handoff-ubft.sha256': hashlib.sha256(b'ubft').hexdigest()}}}
+        tag = 'validator:current'
+        lock = {'sha256sums': hashlib.sha256(b'pinned sums').hexdigest(), 'utb_genesis_id': '0xpinned'}
+        with tempfile.TemporaryDirectory() as d:
+            release = Path(d)
+            bundle = release/'bundle'
+            for name in ('root-peers.txt', 'shard-peers.txt'):
+                (release/name).touch()
+            for checksums, genesis in ((b'other sums', '0xpinned'), (b'pinned sums', '0xother')):
+                with self.subTest(checksums=checksums, genesis=genesis):
+                    (release/'SHA256SUMS').write_bytes(checksums)
+                    (release/'utb-genesis.id').write_text(genesis + '\n')
+                    stderr = io.StringIO()
+                    with patch('sys.argv', ['pack.py', tag, d, d, str(bundle)]), redirect_stderr(stderr), \
+                            patch.object(packer.subprocess, 'check_output', side_effect=[
+                                json.dumps([image]).encode(), json.dumps(lock).encode()]) as docker, \
+                            patch.object(packer.subprocess, 'run') as extract, \
+                            patch.object(packer.subprocess, 'Popen') as export:
+                        with self.assertRaises(SystemExit):
+                            packer.main()
+                        self.assertIn('release differs from the validator image lock', stderr.getvalue())
+                        self.assertEqual(docker.call_args.args[0][-2:], [image['Id'], '/opt/validator/release-lock.json'])
+                        extract.assert_not_called()
+                        export.assert_not_called()
+                        self.assertFalse(bundle.exists())
 
     def test_the_release_ships_the_retired_root_keys_to_the_home_apply_reads(self):
         """#1297/#1309: a release that lists retired-root-keys.json gets it into /data/release, where `ubft validator apply` and `rotate`
@@ -737,10 +769,18 @@ class JoinInOneRun(unittest.TestCase):
             self.assertIsNone(validator.joiner_root_catchup_epoch())
 
     def test_unavailable_hinted_activation_backs_off_without_stopping_other_services(self):
+        self.check_hinted_activation_exit(delay_exit=False)
+
+    def test_hinted_root_exits_between_former_recovery_and_child_exit_polls(self):
+        self.check_hinted_activation_exit(delay_exit=True)
+
+    def check_hinted_activation_exit(self, *, delay_exit):
         (self.home/'network.json').write_text(json.dumps({'rpc': 'http://127.0.0.1:8545'}))
         (self.home/'authority/fingerprint').touch()
         launched = []
         now = [0]
+        recovery_time = 2 if delay_exit else 1
+        root_args = ['ubft', 'root-node', 'run', '--home', str(self.home/'root')]
 
         class EndOfTest(Exception):
             pass
@@ -756,20 +796,35 @@ class JoinInOneRun(unittest.TestCase):
             for index in (0, 1, 3):  # RPC, execution and shard
                 launched[index][1].terminate.assert_not_called()
 
+        def root_exit(proc):
+            proc.returncode = 1
+            return proc.returncode
+
         def health_request():
             if now[0] == 0:
                 self.assertEqual(launched[-1][0][-2:], ['--install-handoff-epoch', '4'])
-                launched[-1][1].poll.return_value = launched[-1][1].returncode = 1
+                proc = launched[-1][1]
+                if delay_exit:
+                    # The first observation sees a live root. The next poll finds it has exited.
+                    def poll():
+                        proc.poll.side_effect = lambda: root_exit(proc)
+                        return None
+                    proc.poll.side_effect = poll
+                else:
+                    proc.poll.return_value = root_exit(proc)
                 now[0] = 1
-            elif now[0] == 1:
-                self.assertEqual(launched[-1][0][:2], ['ubft', 'root'])
-                self.assertNotIn('--install-handoff-epoch', launched[-1][0])
+            elif now[0] < recovery_time:
+                self.assertEqual(len(launched), 5)
                 check_running()
-                now[0] = 60
-            elif now[0] == 60:
+                now[0] = recovery_time
+            elif now[0] == recovery_time:
+                self.assertEqual(launched[-1][0], launched[2][0], 'reopen the same root home without the install flag')
+                check_running()
+                now[0] = recovery_time + 59
+            elif now[0] == recovery_time + 59:
                 self.assertEqual(len(launched), 6, 'no retry during the backoff')
                 check_running()
-                now[0] = 61
+                now[0] = recovery_time + 60
             else:
                 self.assertEqual(launched[-1][0][-2:], ['--install-handoff-epoch', '4'])
                 self.assertEqual(len(launched), 7)
@@ -781,7 +836,7 @@ class JoinInOneRun(unittest.TestCase):
         health.__exit__ = Mock(return_value=False)
         health.handle_request.side_effect = health_request
         with patch.object(validator, 'bootstrap'), patch.object(validator, 'link_authority'), \
-                patch.object(validator, 'wait_for'), patch.object(validator, 'root_command', return_value=['ubft', 'root']), \
+                patch.object(validator, 'wait_for'), patch.object(validator, 'root_command', return_value=root_args), \
                 patch.object(validator, 'shard_command', return_value=['ubft', 'shard']), \
                 patch.object(validator, 'ureth_command', return_value=['ureth']), patch.object(validator, 'HTTPServer', return_value=health), \
                 patch.object(validator.threading, 'Thread'), patch.object(validator.signal, 'signal'), \

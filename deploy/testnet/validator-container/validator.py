@@ -630,17 +630,18 @@ def node(a, pins):
                     shard()
                     enrolled = active.read_bytes()
                 now = time.monotonic()
-                if hinted_install is not None and procs['root'].poll() is not None:
+                for name, proc in procs.items():
+                    status = proc.poll()
+                    if status is None:
+                        continue
+                    if name != 'root' or hinted_install is None:
+                        raise RuntimeError(f'{name} exited with status {status}')
                     # The hint did not make the proof available. Keep the shard, execution and
                     # RPC running, and reopen the same root database without a requested epoch.
                     print(f'validator: root install for epoch {hinted_install} failed; restarting the follower', flush=True)
-                    stop('root')
                     start('root', root_args)
                     hinted_install = None
                     next_root_check = now + 60
-                for name, proc in procs.items():
-                    if proc.poll() is not None:
-                        raise RuntimeError(f'{name} exited with status {proc.returncode}')
                 if now >= next_root_check:
                     next_root_check = now + 30
                     target = None
