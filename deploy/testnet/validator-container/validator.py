@@ -357,18 +357,16 @@ def authority_process(a, pins):
                                   '--out', trust, output=True).returncode == 0, limit=300)
         # A lost process must never be recreated with the old enrollment.
         write(d/'lifetime', b'fail-stop\n')
-        args = ['ubft', 'signing-authority', 'run', '--home', d, '--authority-id', node,
+        args = ['handoff-ubft', 'signing-authority', 'run', '--home', d, '--authority-id', node,
                 '--network-id', 3, '--partition-id', 8, '--shard-id', '0x80', '--node-id', node,
                 '--shard-epoch', n['shardEpoch'], '--root-epoch', n['rootEpoch'], '--trust-base', trust,
                 '--client-socket', d/'client.sock', *auth_flags(d),
                 '--pop-socket', d/'pop.sock', '--pop-credential', d/'pop.cred',
-                '--registration-policy', d/'registration.json', '--dev-allow-late-pos-policy', '--require-pos-policy',
+                '--registration-policy', d/'registration.json', '--require-pos-policy',
                 '--lineage-genesis-trust-base', RELEASE/'trust-base.json', '--lineage-utb-genesis',
                 '--b1-profile', RELEASE/'b1-profile.json', '--activation-source-url', EXECUTION,
                 '--execution-genesis-hash', read(RELEASE/'manifest.json')['genesis_hash']]
         if rec is None:
-            # The verified release can predate the joiner authority and CLI in this image.
-            args[0] = 'handoff-ubft'
             args += ['--pending-join-scope']
         proc = subprocess.Popen([str(x) for x in args], cwd=HOME)
         signal.signal(signal.SIGTERM, lambda *_: proc.terminate())
@@ -821,7 +819,7 @@ def join(a, pins):
             # index). Before, a bonded identity without its delegation was passed over by an election reserved between two runs, and that
             # election's handoff moved the shard epoch this authority was started for. A resumed run pins the same policy again (a no-op).
             template = auth_dir()/'pos-policy-template.json'
-            write(template, json.dumps(pos_policy()).encode())
+            write(template, json.dumps(pos_policy_template()).encode())
             command('handoff-ubft', 'validator', 'apply', '--pin-pos-policy', template, timeout=900)
             journal(progress, 'electing', id=read(CONFIG)['id'])
         ident = read(CONFIG)['id']
@@ -858,18 +856,10 @@ def join(a, pins):
         return 0
 
 
-def pos_policy(*ids):
-    """The release's P85 election pin (network word, chain id, election) and the identity ids; without ids it is `validator apply
-    --pin-pos-policy`'s template, to which apply adds the identity it registers."""
-    policy = {'network':read(RELEASE/'vr-deployment.json')['networkWord'],
-              'chainId':read(RELEASE/'manifest.json')['chain_id'], 'election':read(RELEASE/'deployment.json')['election']}
-    return {**policy, 'ids':list(ids)} if ids else policy
-
-
-def provision_pos_policy(d, ident):
-    """The authority's PoS policy for this identity: it signs the election's delegation possession (admitDelegation) only for it."""
-    write(d/'pos-policy.json', json.dumps(pos_policy(ident)).encode())
-    authority('pos-policy', '--policy', d/'pos-policy.json', home=d)
+def pos_policy_template():
+    """Read the release's P85 pin template for validator apply and recover."""
+    return {'network':read(RELEASE/'vr-deployment.json')['networkWord'],
+            'chainId':read(RELEASE/'manifest.json')['chain_id'], 'election':read(RELEASE/'deployment.json')['election']}
 
 
 def names_node(conf, info):
@@ -962,14 +952,16 @@ def recover(a, pins):
             wait_for(f'the fresh authority in {d} (start the authority container)', lambda: authority_status(d), limit=300)
             stamp_authority(d)
             authority('node-info', '--out', d/'node-info.json', home=d)
-            provision_pos_policy(d, ident)
             journal(HOME/RECOVERY, 'transactions', **{k: rec[k] for k in ('id', 'old', 'new', 'scope')})
         if read(HOME/RECOVERY)['phase'] == 'transactions':
+            # #1222: recover pins the fresh authority to the identity after VR's binding names its key, then signs the delegation. The
+            # template is (re)written here, so a journal that reached this phase under an older container (which pinned first) resumes too
+            write(d/'pos-policy-template.json', json.dumps(pos_policy_template()).encode())
             with lock('.tx.lock', wait=True):
-                ubft('validator', 'recover', '--old-authority-home', auth_name(old),
-                     '--new-evm-authority-socket', f'{d.name}/operator.sock',
-                     '--new-evm-authority-credential', f'{d.name}/operator.cred', '--new-evm-node-info', f'{d.name}/node-info.json',
-                     '--wait', '10m', timeout=1800)   # the committee certifies on n-1 signers; a re-run resumes either way
+                command('handoff-ubft', 'validator', 'recover', '--old-authority-home', auth_name(old),
+                        '--new-evm-authority-socket', f'{d.name}/operator.sock',
+                        '--new-evm-authority-credential', f'{d.name}/operator.cred', '--new-evm-node-info', f'{d.name}/node-info.json',
+                        '--pin-pos-policy', d/'pos-policy-template.json', '--wait', '10m', timeout=1800)   # the committee certifies on n-1 signers; a re-run resumes either way
             journal(HOME/RECOVERY, 'linking', **{k: rec[k] for k in ('id', 'old', 'new', 'scope')})
         if read(HOME/RECOVERY)['phase'] == 'linking':
             configure_authority(new)

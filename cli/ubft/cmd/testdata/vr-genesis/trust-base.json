@@ -5,23 +5,23 @@
   "epochStartRound": 1,
   "rootNodes": [
     {
-      "nodeId": "16Uiu2HAm1fcLChkojjKjUe84AmXdYYaQFLw1e2U2cZeoCYArbXDU",
-      "sigKey": "0x03db8ff65adb167df7c6a16bbb9eebc2ec2fd187cb1569da8e65fffe9a4d19c831",
+      "nodeId": "16Uiu2HAkw9UhK6USgHfQVQ9jwjDg5k72DXdKoGnrrkdgrVTtZUoJ",
+      "sigKey": "0x02f872370b03a48e9224ce715c054dbc7d39b20ef03334973cdb1ad353ace6e924",
       "stake": 1
     },
     {
-      "nodeId": "16Uiu2HAmAEZfaqNKyN3oDEm3A3kbApELdi6dwHcpPXcyPDbXNkwP",
-      "sigKey": "0x03c77b87a288dcabb2031521c591d6eacc88ee5cf15eb0f2e0a2005088ecd098ba",
+      "nodeId": "16Uiu2HAm15V8iVMcdX4yjGy1HwPq3AfaJCYeZwDgU6KvEy8cacm5",
+      "sigKey": "0x02ab4618c7ab4ba0ba2f291b5f14c142bde23f6d8d0c6d7255c391e0cccde72879",
       "stake": 1
     },
     {
-      "nodeId": "16Uiu2HAmJT6rGJhKd9XmkL46zsQsGoyyg2k2RHZWZJY2SB5BURWn",
-      "sigKey": "0x03163d73e5dbf62c7a6f67e3458ca6b51737862f93caa9464acb4019fada16740e",
+      "nodeId": "16Uiu2HAmCwvWNT2R9obMcdZ1aJHHU2Ti6ch4rapHwPGPxCoGcyzC",
+      "sigKey": "0x02af02d9a0a9eed17776fbf322ba97ea90e335d93a63ac8b42a40b2c320bda40a9",
       "stake": 1
     },
     {
-      "nodeId": "16Uiu2HAmShoRjDXzoUvsCwYiBkgX5QbJRTtc5rQPtvktTbDTf3Th",
-      "sigKey": "0x0387b2cbf6540227fb3c70f217c85347c9c7f5f9b1339f8beb6981060f9682389a",
+      "nodeId": "16Uiu2HAmMboePDuGiCj6LwvgQfZtrV2Rm1AC33e2vU2qrbCCUgec",
+      "sigKey": "0x035ef4418c490e3fb11d632af032604151f1f998309c21e827907d6794bbe2d4c4",
       "stake": 1
     }
   ],
@@ -30,9 +30,9 @@
   "changeRecordHash": "",
   "previousEntryHash": "",
   "signatures": {
-    "16Uiu2HAm1fcLChkojjKjUe84AmXdYYaQFLw1e2U2cZeoCYArbXDU": "0x406f0005df2286b6ecdc67914c872b9b47bc6c5105542d3e9f253bd7e828beb537a779faad359b8a0e5128d932c812c3d463e677825ec45ae43833ad08b36a9b00",
-    "16Uiu2HAmAEZfaqNKyN3oDEm3A3kbApELdi6dwHcpPXcyPDbXNkwP": "0x9c9f013bcc40d3b4b588b47a3083c38bc043b248c9109c03e2dbec7e378d55e45e85f64a51e0c63f25fd9837618068e7f89855088bfcee3ae51df904fd26db0601",
-    "16Uiu2HAmJT6rGJhKd9XmkL46zsQsGoyyg2k2RHZWZJY2SB5BURWn": "0xda2cc78d58e62f042d59f9c6e8287e8d73152ba05bcb6fa9a943107971ceab505039cc6c9f7386b7c197593686245cdbe1b138f02c5321888aea1d19171fc1b601",
-    "16Uiu2HAmShoRjDXzoUvsCwYiBkgX5QbJRTtc5rQPtvktTbDTf3Th": "0x4a7da3062b6f6036524f726569a9df353561e69741f901c154f741fb77c707c0227296318a07684612e2beea39441b1ceb4c2f452edd3999509dcbb4e99fb7a600"
+    "16Uiu2HAkw9UhK6USgHfQVQ9jwjDg5k72DXdKoGnrrkdgrVTtZUoJ": "0x1d9ba2416243f307c420fd8e24e8c47ecdda41e512e64c742fae8d2078326bb7306b37baf7e1184e697e9485ae7f438efb8d70ae9efdffdd22b32fd39e024e7800",
+    "16Uiu2HAm15V8iVMcdX4yjGy1HwPq3AfaJCYeZwDgU6KvEy8cacm5": "0x9a4a547ae99130d74ecec0b2ce8fa8a50f2d4334542992bc1b048715064071dd1880ee09fc7f92cf8f507f6978dabcdbea4a0b404f3c95176c12a0f01ab14cc700",
+    "16Uiu2HAmCwvWNT2R9obMcdZ1aJHHU2Ti6ch4rapHwPGPxCoGcyzC": "0x4e8f728dc61f08e90e1e18785f77b9015319acbd68d8578c2c73deb3bf17427607b4ae464a4d7096718171fb1689bfa78fd302f34901ce7f90f0e2162668fcf700",
+    "16Uiu2HAmMboePDuGiCj6LwvgQfZtrV2Rm1AC33e2vU2qrbCCUgec": "0x4822fec1eede8e4c645060974e68d5e0edf5084340ea36d29e2f8696f37a5fd4751a49b2b71ab2c1b4e624b29e1d0c5b60a92695ea88f883df273b3f4edf352b01"
   }
 }

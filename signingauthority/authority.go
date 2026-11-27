@@ -101,12 +101,24 @@ type Authority struct {
 	advanceHook func()
 	// registration is the operator's registration policy (WithRegistrationPolicy); nil: this authority signs no registration.
 	registration *RegistrationPolicy
-	// pos is the pinned scope of the P85 possession signatures (WithPosPolicy, SetPosPolicy); nil: SignPosPoP is refused.
-	pos *PosPolicy
+	// pos is the verified scope of the P85 possession signatures (#1222): a pin checked against the deployment the authority's own
+	// execution client reports (pospolicy.go); nil: SignPosPoP is refused. posWant is a pin not verified yet: the startup pin
+	// (WithPosPolicy, posWantStartup), or a late one whose verification is pending because its source could not be read.
+	pos, posWant   *PosPolicy
+	posWantStartup bool
 	// requirePos refuses every P85 possession signature until pos is set (WithRequirePosPolicy).
 	requirePos bool
-	// latePos allows the operator channel to pin the election at run time (WithLatePosPolicy): development only.
-	latePos bool
+	// posSource reads the P85 deployment a pin is verified against (WithPosSource, ProvisionPosSource) and posB1Chain is the trusted b1
+	// profile's ExecutionChainID, the chain reference before the enrollment is complete. Guarded by mu.
+	posSource  PosSource
+	posB1Chain uint64
+	// confChain is the chain_id of the enrolled shard configuration (confChainKnown: it names one; confSeen: the authority installed a
+	// configuration, not only a hash given at New), the chain reference once the enrollment is complete. Guarded by mu.
+	confChain                uint64
+	confChainKnown, confSeen bool
+	// posInstall serialises pin verification (a one-slot semaphore, so a waiter gives up with its own context): it runs outside mu, and
+	// only one runs at a time.
+	posInstall chan struct{}
 	// fence refuses to sign for, or advance to, a root epoch >= E of an effective activation-schedule rule this binary lacks (WithFence).
 	fence *vrrules.Gate
 	// fencePending is the pre-genesis enrollment mode (WithFencePending): the authority serves key and enrollment operations only and signs
@@ -288,7 +300,7 @@ func New(enroll Enrollment, trust TrustBases, opts ...Option) (*Authority, error
 	fingerprint := sha256.Sum256(pub)
 	enroll = enroll.clone()
 	enroll.SigningKeyFingerprint = fingerprint[:]
-	a := &Authority{enroll: enroll, trust: trust, signer: signer, instance: instance}
+	a := &Authority{enroll: enroll, trust: trust, signer: signer, instance: instance, posInstall: make(chan struct{}, 1)}
 	for _, opt := range opts {
 		if err := opt(a); err != nil {
 			return nil, fmt.Errorf("signingauthority: %w", err)
@@ -452,6 +464,9 @@ func (a *Authority) CompleteEnrollment(conf *types.PartitionDescriptionRecord) e
 	hash, err := conf.Hash(gocrypto.SHA256)
 	if err != nil {
 		return fmt.Errorf("hashing the shard configuration: %w", err)
+	}
+	if err := a.noteConfLocked(conf); err != nil {
+		return err
 	}
 	a.enroll.ShardConfHash = hash
 	return nil

@@ -225,6 +225,11 @@ func (a *Authority) AdvanceWithProof(ctx context.Context, bundle []byte) (Advanc
 		a.sessionIssued = false
 		result.Retired = true
 	default:
+		if successor.conf != nil {
+			if err := a.noteConfLocked(successor.conf); err != nil {
+				return AdvanceResult{}, err
+			}
+		}
 		a.publishScopeLocked(a.enroll, successor.shardEpoch, successor.confHash, successor.trust)
 		a.retired, result.Retired = false, false
 		result.Advanced = true
@@ -249,6 +254,8 @@ type scopeChange struct {
 	shardEpoch uint64
 	confHash   []byte
 	trust      *types.RootTrustBaseV1
+	// conf is the activated configuration of a coupled change (nil for a root-only one): its chain id is checked against the P85 pin
+	conf *types.PartitionDescriptionRecord
 }
 
 // verifySuccessor derives the authority's scope from the activation that follows its epoch, from nothing but the verified step and its
@@ -302,7 +309,7 @@ func scopeForTransition(next *activationproof.Lineage, step activationproof.Step
 			if !bytes.Equal(v.SigKey, pub) {
 				return &scopeChange{retire: true}, nil
 			}
-			return &scopeChange{shardEpoch: conf.Epoch, confHash: hash, trust: trust}, nil
+			return &scopeChange{shardEpoch: conf.Epoch, confHash: hash, trust: trust, conf: conf}, nil
 		}
 	}
 	return &scopeChange{retire: true, recovery: excludedByPrimary(step, enroll, pub, conf.Epoch, hash)}, nil

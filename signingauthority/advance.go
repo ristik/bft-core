@@ -132,6 +132,9 @@ func (a *Authority) AdvanceEpoch(ctx context.Context, conf *types.PartitionDescr
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := a.noteConfLocked(conf); err != nil {
+		return err
+	}
 	// The high-water record is not cleared, and old reservations cannot be
 	// signed or released after the context changes.
 	a.publishScopeLocked(old, conf.Epoch, hash, &owned)

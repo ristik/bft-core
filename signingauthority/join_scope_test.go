@@ -112,18 +112,19 @@ func TestPendingJoinAuthorityCannotSkipItsOwnActivation(t *testing.T) {
 
 func TestPendingJoinElectionPoPFreezesScope(t *testing.T) {
 	publication := evmstatetest.Load(t, publicationFixture)
-	chainID := new(big.Int).SetBytes(publication.Deployment.ChainID[:]).String()
-	f := q3fixture.New(t, q3fixture.Options{Assignment: true, Params: map[string]string{"chain_id": chainID}})
+	chainID := new(big.Int).SetBytes(publication.Deployment.ChainID[:])
+	f := q3fixture.New(t, q3fixture.Options{Assignment: true, Params: map[string]string{"chain_id": chainID.String()}})
 	conf := f.ShardConf
 	enroll := Enrollment{AuthorityID: "joiner", NodeID: "fresh-joiner", NetworkID: conf.NetworkID,
 		PartitionID: conf.PartitionID, ShardID: conf.ShardID, ShardEpoch: f.Successor.Epoch,
 		RootEpoch: PinRootEpoch(1), Profile: ProfileLegacyBCRv1}
 	prove := func() {}
+	candidate, deployment := publication.Candidate, publication.Deployment
+	src := &fakePos{view: PosDeploymentView{Network: deployment.NetworkWord, ChainID: deployment.ChainID, Election: deployment.Election}}
 	a, err := New(enroll, currentTrust{base: f.Old}, WithLineage(f.Old, f.UTB),
-		WithPendingJoinScope(), WithRequirePosPolicy(), WithLatePosPolicy(), WithAdvanceHook(func() { prove() }))
+		WithPendingJoinScope(), WithRequirePosPolicy(), WithPosSource(src, chainID.Uint64()), WithAdvanceHook(func() { prove() }))
 	require.NoError(t, err)
 	key := mustPub(t, a)
-	candidate, deployment := publication.Candidate, publication.Deployment
 	candidate.Network, candidate.Predecessor = uint64(conf.NetworkID), bytes32(1)
 	candidate.Identities[0].EVMNodeID, candidate.Identities[0].EVMKey = enroll.NodeID, key
 	succ := *f.Successor
@@ -136,8 +137,9 @@ func TestPendingJoinElectionPoPFreezesScope(t *testing.T) {
 	require.ErrorIs(t, err, ErrPosPolicy)
 	_, id, err := evmassign.ElectionPoPDigest(candidate, deployment, req.Attempt, key, enroll.NodeID)
 	require.NoError(t, err)
+	src.bound = map[uint64]bool{id: true}
 	pin := PosPolicy{Network: deployment.NetworkWord, ChainID: deployment.ChainID, Election: deployment.Election, IDs: []uint64{id}}
-	require.NoError(t, a.SetPosPolicy(pin))
+	require.NoError(t, a.SetPosPolicy(t.Context(), pin))
 	future := req
 	succ.Epoch++
 	future.Candidate.Assignment, err = types.Cbor.Marshal(&succ)
@@ -169,18 +171,21 @@ func TestPendingJoinChecksAuthenticatedExecutionChain(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			pin := posPin()
 			pin.ChainID = vrschema.U64(tc.pin)
+			src := newFakePos()
+			src.view.ChainID = pin.ChainID
 			a, err := New(enroll, currentTrust{base: f.Old}, WithLineage(f.Old, f.UTB),
-				WithPendingJoinScope(), WithPendingJoinChainID(tc.profile), WithPosPolicy(pin))
+				WithPendingJoinScope(), WithPendingJoinChainID(tc.profile), WithPosSource(src, tc.pin))
 			require.NoError(t, err)
+			require.NoError(t, a.SetPosPolicy(t.Context(), pin))
 			before := a.Status()
 			result, err := a.AdvanceWithProof(t.Context(), bundleOf(t, f))
 			if tc.profile == 7 && tc.pin == 7 {
 				require.NoError(t, err)
 				require.True(t, result.Advanced)
-				require.NoError(t, a.SetPosPolicy(pin))
+				require.NoError(t, a.SetPosPolicy(t.Context(), pin))
 				other := pin
 				other.ChainID = vrschema.U64(8)
-				require.ErrorIs(t, a.SetPosPolicy(other), ErrPosPolicyConflict)
+				require.ErrorIs(t, a.SetPosPolicy(t.Context(), other), ErrPosPolicyConflict)
 			} else {
 				require.ErrorIs(t, err, ErrContextMismatch)
 				require.Equal(t, before, a.Status())

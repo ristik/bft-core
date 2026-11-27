@@ -74,7 +74,7 @@ func TestVRControlEncodeVectors(t *testing.T) {
 		require.NoError(t, rctypesValidate([]rctypes.PosControl{c}), v.Name)
 		n++
 	}
-	require.Equal(t, 5, n, "every positive control.encode vector")
+	require.Equal(t, 7, n, "every positive control.encode vector")
 }
 
 func rctypesValidate(cs []rctypes.PosControl) error {

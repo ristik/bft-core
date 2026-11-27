@@ -298,8 +298,10 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
                 '--vr-evm-authority-socket', '/pop/pop.sock', '--vr-evm-authority-credential', '/pop/pop.cred',
                 '--vr-shard-rpc', f'http://{operator_rpc.listen(rpc_bind, operator_rpc.SHARD_PORT)}',
                 '--utb-bundle-address', '127.0.0.1:8011']
+            # --vr-generation: the authority waits in the pre-genesis mode for fence.json, which provisions its activation fence and the execution
+            # source its P85 pin is verified against (#1222); without it the fence file was never read
             authority_flags = ['--pop-socket', '/authority/pop/pop.sock', '--pop-credential', '/authority/pop/pop.cred',
-                '--fence-provision-file', '/authority/fence.json', '--require-pos-policy', '--dev-allow-late-pos-policy']
+                '--fence-provision-file', '/authority/fence.json', '--vr-generation', '--require-pos-policy']
             if vr_authority_follow:
                 authority_flags += ['--follow-root-activations', vr_authority_follow,
                                     '--follow-client-credential', '/authority/client.cred']
@@ -608,7 +610,7 @@ def main():
                     log=open(auth/'enrollment.log','w')
                     vr_flags=['--pop-socket',str(auth/'pop/pop.sock'),'--pop-credential',str(auth/'pop/pop.cred'),
                         '--fence-provision-file',str(auth/'fence.json'),'--lineage-genesis-trust-base',str(home/'trust-base.json'),
-                        '--lineage-utb-genesis','--require-pos-policy','--dev-allow-late-pos-policy'] if a.vr_pos else []
+                        '--lineage-utb-genesis','--vr-generation','--require-pos-policy'] if a.vr_pos else []
                     proc=subprocess.Popen([ubft,'signing-authority','run','--home',str(auth),
                         '--client-socket',str(auth/'client.sock'),'--operator-socket',str(auth/'operator.sock'),
                         '--operator-credential',str(auth/'operator.cred'),'--authority-id',f'paired-evm-{i}',

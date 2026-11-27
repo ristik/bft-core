@@ -11,6 +11,7 @@ import (
 	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
 	"github.com/unicitynetwork/bft-core/q3format"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/rootrecords"
 	"github.com/unicitynetwork/bft-core/vradmit"
 	"github.com/unicitynetwork/bft-core/vrschema"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -134,6 +135,9 @@ type VRIntent struct {
 	AnchorUCTime uint64
 	Body         q3format.BodyV3
 	TrustBase    []byte
+	// Request is the PoP request this intent makes (#1319): its network, predecessor, result, attempt, roster (the candidate's identities,
+	// ascending staking id), intent digest and the root epoch it is derived in. The executor of control op 6 sets the deadline.
+	Request vrschema.PoPRequest
 }
 
 // VRIntents derives the intent from committed history and the VR proof (VT-05b's vrhandoff.DeriveIntent; a pure function of committed
@@ -216,6 +220,22 @@ func (v *vrStep) store(c *evmroot.ControlState) error {
 	}
 	c.VR = v.raw
 	return nil
+}
+
+// currentQuorumOf is the authority's trust-base commit threshold, or 0 where the authority names none.
+func currentQuorumOf(authority handoffAuthority) uint64 {
+	if q, ok := authority.(interface{ CurrentQuorumThreshold() uint64 }); ok && authority != nil {
+		return q.CurrentQuorumThreshold()
+	}
+	return 0
+}
+
+// currentRootOf is the authority's current root committee, or nil without an authority.
+func currentRootOf(authority handoffAuthority) func() []evmassign.RootMember {
+	if authority == nil {
+		return nil
+	}
+	return authority.CurrentRoot
 }
 
 // vrCommitteeSize is the assembler count of the epoch committee (the incumbents), or the stored one when the authority names none.
@@ -746,6 +766,21 @@ func (x *BlockStore) committedVRQuery() (VRIntentQuery, vradmit.RootState, uint6
 		q.Root = vrRootFacts(root.ShardState, confs, x.orchestration, svc.Registry, root.ShardState.Control.Network, root.BlockData.Epoch, auth)
 	}
 	return q, s, root.GetRound(), true, nil
+}
+
+// CommittedRootProgress is the root canonical progress at the committed root block (#1319: the clock a PoP request's cutoff counts in);
+// false on a chain without a record state.
+func (x *BlockStore) CommittedRootProgress() (uint64, bool) {
+	root := x.tree().Root()
+	if root == nil || root.ShardState.Control == nil || len(root.ShardState.Control.Pos) == 0 {
+		return 0, false
+	}
+	st, err := rootrecords.DecodeState(root.ShardState.Control.Pos)
+	if err != nil {
+		return 0, false
+	}
+	p, err := st.Progress(root.GetRound())
+	return p, err == nil
 }
 
 // HandoffViewOf is the HandoffView a block carries, if any (at most one, by the payload rule).

@@ -118,7 +118,7 @@ func (x *ConsensusManager) addRetirements(ctx context.Context, block *drctypes.B
 	}
 }
 
-// insertRetirement places the control after closures and rejections and before rule support and handoff views.
+// insertRetirement places the control after closures and rejections and before rule support, PoP requests and handoff views.
 func insertRetirement(controls []drctypes.PosControl, c drctypes.PosControl) []drctypes.PosControl {
 	out := append([]drctypes.PosControl(nil), controls...)
 	key := c.RetirementKey()
@@ -129,7 +129,7 @@ func insertRetirement(controls []drctypes.PosControl, c drctypes.PosControl) []d
 			if slices.Compare(k[:], key[:]) > 0 {
 				return slices.Insert(out, i, c)
 			}
-		case drctypes.OpRuleSupport, drctypes.OpHandoffView:
+		case drctypes.OpRuleSupport, drctypes.OpPoPRequest, drctypes.OpHandoffView:
 			return slices.Insert(out, i, c)
 		}
 	}

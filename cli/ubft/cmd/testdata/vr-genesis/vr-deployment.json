@@ -1,10 +1,10 @@
 {
   "format": "unicity.vr.root-deployment.v1",
   "rootNetwork": 3,
-  "networkWord": "0x1e95e3d277224ff38af807c315e75fa3ab92bebb781b58c4674835655db6c516",
+  "networkWord": "0xd1107b7c43481532e097e0b51aa2d8cf378410b4de56f0efd888eec7facb02a9",
   "chainId": 3,
   "registry": "0xff00000000000000000000000000000000000003",
-  "registryCodeHash": "0x19094777cb74c783f82392439d1f6c79fe62b6b57c2915790f00a9e16ee490e9",
+  "registryCodeHash": "0x3abfd37f4f7c1f3e7af8b0a449a4c0b509ec49a1bfdfb7e669855f9c557c7b39",
   "sealRegistry": "0xff00000000000000000000000000000000000002",
-  "sealRegistryCodeHash": "0x8b3105bfc06dae2a5755e78a66e9675172da8cd9d532dc4e8f44b01afd6f0e6c"
+  "sealRegistryCodeHash": "0x93dae8b0e730c861e66468a0ff109395190b7f5292da4a19a6f9515fd15c1841"
 }

@@ -41,7 +41,11 @@ type TestVRAuthority struct {
 	FreezeParent []byte
 	FreezeErr    error
 	FreezeCalls  int
+	// Quorum is the trust base's own commit threshold the authority reports (0: none)
+	Quorum uint64
 }
+
+func (a *TestVRAuthority) CurrentQuorumThreshold() uint64 { return a.Quorum }
 
 func (a *TestVRAuthority) Predecessor() []byte { return a.Pred }
 func (a *TestVRAuthority) VerifyFreeze(evmroot.OrderedHandoffRecord, []byte) ([]byte, error) {
