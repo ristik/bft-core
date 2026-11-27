@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/unicitynetwork/bft-core/signingauthority"
+	"github.com/unicitynetwork/bft-core/vrclient/vrfake"
 	"github.com/unicitynetwork/bft-core/vrschema"
 )
 
@@ -62,4 +64,37 @@ func TestPinPosPolicyOnALateAuthority(t *testing.T) {
 	err = a.PinPosPolicy(ctx, other)
 	require.ErrorContains(t, err, "signing-pos-policy-conflict")
 	require.ErrorContains(t, err, "identities [6]")
+}
+
+// #1323: a fresh identity's delegation is admitted before its first bond, so no election sees it bonded without a delegation; a retired
+// identity's new bond opens a new generation, so its delegation follows the bond; an interrupted run with the delegation staged only bonds.
+func TestValidatorApplyPoSAdmitsTheDelegationBeforeTheFirstBond(t *testing.T) {
+	for name, c := range map[string]struct {
+		edit       func(p *vrfake.Position, ds map[[2]uint64]*vrfake.Delegated, id uint64)
+		order      []string
+		generation uint64
+	}{
+		"registered, not bonded": {func(p *vrfake.Position, ds map[[2]uint64]*vrfake.Delegated, id uint64) {
+			p.OpenLots = 0
+			delete(ds, [2]uint64{id, 1})
+		}, []string{"admit", "bond"}, 1},
+		"the delegation is staged, the bond is not": {func(p *vrfake.Position, _ map[[2]uint64]*vrfake.Delegated, _ uint64) {
+			p.OpenLots = 0
+		}, []string{"bond"}, 1},
+		"a re-bond after retirement": {func(p *vrfake.Position, _ map[[2]uint64]*vrfake.Delegated, _ uint64) {
+			p.OpenLots, p.RetirementRequested = 0, true
+		}, []string{"bond", "admit"}, 2},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newRecoverFixture(t)
+			f.chain.With(func(ch *vrfake.Chain) { c.edit(ch.Pos.Positions[f.id], ch.Pos.Delegations, f.id) })
+			out, err := runValidator(t, f.home, "apply", "--id", fmt.Sprint(f.id))
+			require.NoError(t, err, out)
+			f.chain.With(func(ch *vrfake.Chain) {
+				require.Equal(t, c.order, ch.Pos.Order, out)
+				require.Equal(t, c.generation, ch.Pos.Positions[f.id].Generation)
+				require.NotNil(t, ch.Pos.Delegations[[2]uint64{f.id, c.generation}], "the delegation is at the bonded generation")
+			})
+		})
+	}
 }

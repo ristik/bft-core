@@ -764,9 +764,9 @@ def join(a, pins):
             journal(progress, 'applying')
         if read(progress)['phase'] == 'applying':
             # #1323: one run. VR assigns the identity id at registration; apply pins the authority's PoS policy to it right before the
-            # delegation possession, so registration, bond and delegation land together. A bonded identity without its delegation is
-            # passed over by an election reserved in the gap, and that election's handoff moves the shard epoch this authority was
-            # started for. A resumed run pins the same policy again, which is a no-op.
+            # delegation possession, and admits the delegation before the first bond (the bond puts the identity in the election's live
+            # index). Before, a bonded identity without its delegation was passed over by an election reserved between two runs, and that
+            # election's handoff moved the shard epoch this authority was started for. A resumed run pins the same policy again (a no-op).
             template = auth_dir()/'pos-policy-template.json'
             write(template, json.dumps(pos_policy()).encode())
             ubft('validator', 'apply', '--pin-pos-policy', template, timeout=900)

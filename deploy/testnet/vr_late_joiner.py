@@ -76,6 +76,15 @@ def max_gap(times):
 
 
 JOINER_STATE = 'joined.json'   # late-joiner/: what vr-joiner-exit continues from
+# #1323: the UC seconds the joiner needs from its authority's start to its bond (restore, restart, funding, the four apply receipts), with
+# a margin. Its authority's shard epoch is fixed at the start, and an election reserved before the bond activates that epoch without it.
+JOIN_ROOM = 200
+
+
+def election_room(r, election):
+    """Seconds of UC time until the next election is due (ElectionPolicy.thresholds()' time floor), from the head block's timestamp."""
+    due = r.view(election, 'thresholds()(uint256,uint256)')[1]
+    return due - int(r.call('eth_getBlockByNumber', ['latest', False])['timestamp'], 16)
 
 
 def vr_late_joiner(r):
@@ -88,6 +97,16 @@ def vr_late_joiner(r):
     ev.mkdir(parents=True, exist_ok=True)
     epoch = rec.root_view(1)['activeEpoch']
     r.expect(epoch >= 3, 'the generation has passed at least two root handoffs (run after vr-pos-recover)', f'root epoch {epoch}')
+    # #1323: the joiner's authority starts at the current scope; it must be bonded (and so eligible, its delegation admitted first) before
+    # the next election is reserved. Too little room: let that election pass first (the first #1323 lane run started 47 s after an
+    # activation and met the next reservation in its bond's block).
+    room = election_room(r, rec.deployment['election'])
+    if room < JOIN_ROOM:
+        r.say(f'  the next election is due in {room} s (< {JOIN_ROOM} s): it passes first')
+        epoch = rec.participate_until(epoch)
+        advance_members(r, rec, epoch, ev)
+        room = election_room(r, rec.deployment['election'])
+    r.say(f'  the next election is due in {room} s')
 
     # 1. the pin: the newest certified record of root epoch 1 in an incumbent's archive, as old as the release's seed
     gen = r.gen
@@ -126,6 +145,10 @@ def vr_late_joiner(r):
     services[f'authority{j}']['entrypoint'] = vr_recover.authority_entrypoint(services[f'authority{j}']['entrypoint'], info['evm'], epoch,
         certified['shardEpoch'] + 1, '/authority/current-trust.json', r.manifest['genesis_hash'])
     services[f'shard{j}']['entrypoint'] = restore_entry(services[f'shard{j}']['entrypoint'], found.group(1))
+    # the root: a follower until the handoff names it, installed at the current epoch as the container starts it; it starts with the
+    # authority, so its catch-up overlaps the restore checks instead of the window before the bond (#1323)
+    if epoch > 1 and '--install-handoff-epoch' not in services[f'root{j}']['entrypoint']:
+        services[f'root{j}']['entrypoint'] = services[f'root{j}']['entrypoint'] + ['--install-handoff-epoch', str(epoch)]
     shipped = (gen / 'network' / 'ureth-flags.txt').read_text().split()
     services[f'ureth{j}']['entrypoint'] = release_ureth_entry(services[f'ureth{j}']['entrypoint'], shipped)
     (ev / 'ureth-entrypoint.json').write_text(json.dumps(services[f'ureth{j}']['entrypoint'], indent=1) + '\n')
@@ -152,6 +175,7 @@ def vr_late_joiner(r):
     r.wait(f'the joiner\'s execution client {j} answers', lambda: head(j) is not None, 180)
     rec.dc('up', '-d', '--no-deps', f'authority{j}')
     r.wait('the joiner\'s authority answers', lambda: rec.auth_status(j), 60)
+    rec.dc('up', '-d', '--no-deps', f'root{j}')
 
     def caught_up(floor):
         def probe():
@@ -236,8 +260,8 @@ def join_committee(r, rec, ev, j, val, auth, owner, owner_key, epoch, shard_epoc
     r.wait(f'the joiner\'s root {j} answers', lambda: rec.root_view(j), 300)
 
     # `validator apply`, as the container's join (#1323): one run. The authority signs the delegation possession only for the identity its PoS
-    # policy names; apply pins the policy (the release's election, no ids) to the identity VR assigns it, right before the possession, so
-    # register, bond and delegation land together. A bonded identity without its delegation is election work: an election reserved in that
+    # policy names; apply pins the policy (the release's election, no ids) to the identity VR assigns it, right before the possession, and
+    # admits the delegation before the first bond (the bond makes the identity eligible), so register, delegation and bond land together. A bonded identity without its delegation is election work: an election reserved in that
     # gap names only the incumbents, and its handoff moves the shard epoch the joiner's authority was started for (the first #1321 lane run
     # met it while the container's two-step apply was emulated with a minute between the steps).
     mounts = [(auth, '/home/authority')]

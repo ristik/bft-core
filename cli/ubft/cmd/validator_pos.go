@@ -279,35 +279,53 @@ func validatorApplyPoS(cmd *cobra.Command, f *txFlags, pf *posFlags) error {
 		return []step{{what: fmt.Sprintf("admit identity %d's delegation (the node words, keys and payee the election elects)", id), tx: vrclient.Tx{To: election, Data: data}}}, nil
 	}
 
+	// #1323: the order of the steps. A fresh identity (custody generation 1, never bonded) has its delegation admitted BEFORE its first
+	// bond: custody.register already opens generation 1 and the first bond keeps it, and the bond is what puts the identity in the
+	// election's live index. So no election can see the identity bonded but without its delegation (a result reserved in that gap
+	// passes over it, and its handoff moves the shard epoch the joiner's authority was started for). A retired identity's new bond opens
+	// a new generation, so there the delegation still follows the bond.
+	const (
+		doVRRegister = iota
+		doCustodyRegister
+		doAdmitThenBond // fresh: the delegation, then the first bond
+		doBondLast
+		doBondThenAdmit // a re-bond after retirement opens a new generation
+		doAdmitLast
+	)
 	var steps []step
+	stage := doVRRegister
 	switch {
 	case have:
 		// already registered in VR: continue from custody (the id must be free there, or already ours)
-		var pos struct {
-			Owner               common.Address
-			Withdrawal          common.Address
-			RootKeyHash         [32]byte
-			StagedRootKeyHash   [32]byte
-			Generation          uint64
-			RoleNonce           uint64
-			OpenLots            uint32
-			LotCount            uint32
-			RetirementRequested bool
-		}
+		var pos custodyPosition
 		if err := ch.vr.CallPosMulti(ctx, custody, vrclient.CustodyABI, "positions", &pos, id); err != nil {
 			return err
 		}
 		fmt.Fprintf(w, "identity %d is registered in VR\n", id)
 		switch {
 		case pos.Owner == (common.Address{}):
+			stage = doCustodyRegister
 			if steps, err = custodyRegister(); err != nil {
 				return err
 			}
-		case pos.Owner == owner && pos.OpenLots == 0:
+		case pos.Owner == owner && pos.OpenLots == 0 && pos.RetirementRequested:
+			stage = doBondThenAdmit
 			if steps, err = bondStep(id); err != nil {
 				return err
 			}
+		case pos.Owner == owner && pos.OpenLots == 0:
+			stage = doAdmitThenBond
+			if steps, err = admitStep(id); err != nil {
+				return err
+			}
+			if len(steps) == 0 { // the delegation is staged (an interrupted run): only the bond is left
+				stage = doBondLast
+				if steps, err = bondStep(id); err != nil {
+					return err
+				}
+			}
 		case pos.Owner == owner:
+			stage = doAdmitLast
 			if steps, err = admitStep(id); err != nil {
 				return err
 			}
@@ -323,23 +341,11 @@ func validatorApplyPoS(cmd *cobra.Command, f *txFlags, pf *posFlags) error {
 		fmt.Fprintf(w, "identity %d is already registered, bonded and its delegation staged: nothing to do\n", id)
 		return nil
 	}
-	// the chain of steps: each receipt names the next (VR register -> custody register -> bond -> admit); stage is the step just done
-	stage := 0
-	if have {
-		first := steps[0]
-		switch {
-		case strings.Contains(first.what, "register the root key"):
-			stage = 1
-		case strings.Contains(first.what, "bond"):
-			stage = 2
-		default:
-			stage = 3
-		}
-	}
+	// the chain of steps: each receipt names the next; stage is the step just done
 	after := func(i int, r *vrclient.Receipt) ([]step, error) {
-		switch {
-		case stage == 0: // VR.register done
-			stage = 1
+		switch stage {
+		case doVRRegister:
+			stage = doCustodyRegister
 			newID, ok := vrclient.RegisteredID(r, ch.vr.Registry)
 			if !ok {
 				return nil, fmt.Errorf("%w: the register receipt has no Registered log", ErrValidator)
@@ -351,15 +357,23 @@ func validatorApplyPoS(cmd *cobra.Command, f *txFlags, pf *posFlags) error {
 			}
 			fmt.Fprintf(w, "  registered identity %d in VR (saved to %s)\n", id, v.path)
 			return custodyRegister()
-		case stage == 1: // custody.register done
-			stage = 2
+		case doCustodyRegister:
 			cid, ok := vrclient.CustodyRegisteredID(r, custody)
 			if !ok || cid != id {
 				return nil, fmt.Errorf("%w: custody registered identity %d, VR's is %d: the two registries' ids are out of step (another account registered in between); stop and ask the Foundation", ErrValidator, cid, id)
 			}
+			stage = doAdmitThenBond
+			next, err := admitStep(id)
+			if err == nil && len(next) == 0 {
+				stage = doBondLast
+				return bondStep(id)
+			}
+			return next, err
+		case doAdmitThenBond:
+			stage = doBondLast
 			return bondStep(id)
-		case stage == 2:
-			stage = 3
+		case doBondThenAdmit:
+			stage = doAdmitLast
 			return admitStep(id)
 		}
 		return nil, nil
