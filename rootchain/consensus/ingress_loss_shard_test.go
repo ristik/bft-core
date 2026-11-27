@@ -292,6 +292,15 @@ type lossyNet struct {
 
 func (n *lossyNet) ReceivedChannel() <-chan any { return n.out }
 
+func (n *lossyNet) SendCertificationResponse(ctx context.Context, cr *certification.CertificationResponse, receivers ...peer.ID) error {
+	err := n.LibP2PNetwork.SendCertificationResponse(ctx, cr, receivers...)
+	if n.w.trace && cr.Partition == q3fixture.PartitionID && cr.UC.UnicitySeal != nil {
+		n.w.t.Logf("response root=%s seal=%d next=%d leader=%s to=%v status=%d sendErr=%v",
+			n.name, cr.UC.GetRootRoundNumber(), cr.Technical.Round, cr.Technical.Leader, receivers, cr.Status, err)
+	}
+	return err
+}
+
 func (n *lossyNet) run(ctx context.Context) {
 	for {
 		select {
@@ -314,10 +323,11 @@ func (n *lossyNet) run(ctx context.Context) {
 }
 
 type certSample struct {
-	at     time.Time
-	seal   uint64
-	ir     *types.InputRecord
-	leader string
+	nextRound uint64
+	at        time.Time
+	seal      uint64
+	ir        *types.InputRecord
+	leader    string
 }
 
 type handshakeEvent struct {
@@ -332,6 +342,7 @@ type proposalSample struct {
 }
 
 type shardWorld struct {
+	trace     bool
 	t         *testing.T
 	c         *q4bLive
 	transport *liveTransport
@@ -361,6 +372,10 @@ func (w *shardWorld) judge(root string, req *certification.BlockCertificationReq
 		ev.dropped = true
 	}
 	w.events = append(w.events, ev)
+	if w.trace {
+		w.t.Logf("request root=%s sender=%s epoch=%d shardRound=%d prev=%x block=%x signed=%x dropped=%t at=%s",
+			ev.root, ev.node, ev.epoch, ev.round, ev.prev, ev.blockHash, ev.fp, ev.dropped, ev.at.Format(time.RFC3339Nano))
+	}
 	return ev.dropped
 }
 
@@ -447,7 +462,7 @@ type shardWorldConfig struct {
 
 func newShardWorld(t *testing.T, cfg shardWorldConfig) *shardWorld {
 	t.Helper()
-	w := &shardWorld{t: t}
+	w := &shardWorld{t: t, trace: os.Getenv("BFT_976_DIAG") == "1"}
 	ctx, cancel := context.WithCancel(context.Background())
 	w.cancelAll = cancel
 	t.Cleanup(cancel)
@@ -510,7 +525,7 @@ func newShardWorld(t *testing.T, cfg shardWorldConfig) *shardWorld {
 				if s := shardCertOf(n.r.manager); s != nil && s.seal > last {
 					last = s.seal
 					w.mu.Lock()
-					w.certs = append(w.certs, certSample{at: time.Now(), seal: s.seal, ir: s.ir, leader: s.leader})
+					w.certs = append(w.certs, certSample{at: time.Now(), seal: s.seal, ir: s.ir, nextRound: s.nextRound, leader: s.leader})
 					w.mu.Unlock()
 				}
 			}
@@ -620,13 +635,17 @@ func addRealShards(t *testing.T, x *liveTransport, c *q4bLive, opts shardnode.BF
 	}
 	out := map[string]*realShard{}
 	pool := &blockPool{blocks: map[string]shardnode.Block{}}
+	level := slog.LevelInfo
+	if os.Getenv("SHARD_LOG_ALL") != "" {
+		level = slog.LevelDebug
+	}
 	for _, id := range ids {
 		h := hosts[id]
 		diss, err := shardnode.NewNetDisseminator(h.peer, x.obs, peers)
 		require.NoError(t, err)
 		exec := &retainingExecutor{Fake: executortest.NewAt(genesis), pool: pool}
 		node, err := shardnode.New(h.peer, h.net, f.EVMSigners[id], q3fixture.PartitionID, types.ShardID{}, si.ShardConfHash, managerTrust{m: m, old: f.Old}, exec, diss, nil,
-			slog.New(slog.NewTextHandler(&testLogWriter{t: t, prefix: id[len(id)-6:]}, &slog.HandlerOptions{Level: slog.LevelInfo})), opts)
+			slog.New(slog.NewTextHandler(&testLogWriter{t: t, prefix: id[len(id)-6:]}, &slog.HandlerOptions{Level: level})), opts)
 		require.NoError(t, err)
 		// as the production shard node is configured: the follower's wait for the leader's block follows the shard's own T2, and certificates are served
 		node.SetAwaitTimeout(shardnode.AwaitTimeoutForT2(f.ShardConf.T2Timeout))
@@ -1141,27 +1160,13 @@ func runLossCycles(t *testing.T, w *shardWorld, cycles int, silent string, rBudg
 		}
 		require.NotEmpty(t, repeats, "cycle %d: the pending block certified without a T2 repeat of u first (premise: every request was lost)", k)
 		attempts := attemptsOf(w.requestsSince(armed), expected.Hash, w.threshold())
-		assigned := map[attemptKey]bool{}
-		const margin = 100 * time.Millisecond // a request can precede the sampler's first sighting of the certificate it answers
 		report := func(i int) attemptReport {
-			from := repeats[i].at.Add(-margin)
-			to := applied.Add(time.Hour)
-			if i+1 < len(repeats) {
-				to = repeats[i+1].at.Add(-margin)
-			}
-			var best *attemptStats
-			for key, st := range attempts {
-				if assigned[key] || st.first.Before(from) || !st.first.Before(to) {
-					continue
-				}
-				if best == nil || st.first.Before(best.first) {
-					best = st
-				}
-			}
+			repeat := repeats[i]
+			key := attemptKey{round: repeat.nextRound, epoch: repeat.ir.Epoch, prev: string(repeat.ir.Hash)}
+			best := attempts[key]
 			if best == nil {
 				return attemptReport{}
 			}
-			assigned[best.key] = true
 			r := attemptReport{exists: true, nodes: len(best.nodes), arrival: best.first.Sub(repeats[i].at), quorumOK: !best.quorumAt.IsZero()}
 			if r.quorumOK {
 				r.quorum = best.quorumAt.Sub(repeats[i].at)
@@ -1208,7 +1213,7 @@ func runLossCycles(t *testing.T, w *shardWorld, cycles int, silent string, rBudg
 			}
 			return fmt.Sprintf("first request after %s, %d validators, %s; first 2 s: %d requests, %d at a root that had not yet shown the repeat", span(r.arrival), r.nodes, q, r.wave, r.behind)
 		}
-		t.Logf("cycle %d: %d repeat(s) before the block certified. FIRST repeat names %s (paused: %v): %s.", k, row.repeats, row.leader, row.pausedLeader, desc(row.first))
+		t.Logf("cycle %d: %d repeat(s) before the block certified. FIRST repeat at root seal %d authorizes shard round %d and names %s (paused: %v): %s.", k, row.repeats, repeats[0].seal, repeats[0].nextRound, row.leader, row.pausedLeader, desc(row.first))
 		if row.repeats > 1 {
 			t.Logf("cycle %d:   CERTIFIED attempt followed the last repeat (names %s, paused: %v): %s; first repeat -> that attempt's first request %s; -> certified %s; -> applied %s (all from the first repeat's certificate)",
 				k, row.finalLeader, row.finalPaused, desc(row.final), row.toFinalReq.Round(time.Millisecond), row.toCertified.Round(time.Millisecond), row.toApplied.Round(time.Millisecond))
@@ -1299,7 +1304,7 @@ func TestIngressLossWithRealShardsFirstAttemptRate(t *testing.T) {
 			behindFail++
 		}
 	}
-	t.Logf("summary over %d cycles: certified on the first attempt after the repeat %d; needed another repeat %d (of which: threshold never delivered to a single root %d; had first-wave requests at a root that had not yet shown the repeat %d). Causes not established.", len(rows), first, len(rows)-first, noQuorum, behindFail)
+	t.Logf("summary over %d cycles: certified on the first attempt after the repeat %d; needed another repeat %d (of which: threshold never delivered to a single root %d; had first-wave requests at a root that had not yet shown the repeat %d). Ingress counts are observed before admission.", len(rows), first, len(rows)-first, noQuorum, behindFail)
 }
 
 // Control for the loss cycles: the same shards, executors and roots, no request is ever dropped. Entries are queued one after another; every one must be
