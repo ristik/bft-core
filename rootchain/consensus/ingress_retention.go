@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/unicitynetwork/bft-go-base/types"
 
@@ -105,6 +106,11 @@ func (x *ConsensusManager) retainRequest(ctx context.Context, req *drctypes.IRCh
 		x.retained = make(map[types.PartitionShardID]*retainedRequest)
 	}
 	x.retained[key] = entry
+	if x.log.Enabled(ctx, slog.LevelDebug) && len(req.Requests) > 0 {
+		ir := req.Requests[0].InputRecord
+		x.log.DebugContext(ctx, "shard request retained", logger.Shard(req.Partition, req.Shard),
+			slog.Uint64("requestRound", ir.RoundNumber), slog.String("blockHash", fmt.Sprintf("%x", ir.BlockHash)))
+	}
 	x.sendRetained(ctx, key, entry)
 	return nil
 }

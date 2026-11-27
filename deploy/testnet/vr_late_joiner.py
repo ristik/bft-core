@@ -15,7 +15,8 @@ from the incumbents' archives); after a restart with the same command it starts 
 
 Then the joiner joins the committee (#1321), as the container's `join` does: its execution client runs the release's vector
 (network/ureth-flags.txt after its own listeners, as validator.py ureth_command), its owner (a fresh key the funder pays) registers, bonds and
-delegates with `ubft validator apply` through the signing authority, its root starts with --install-handoff-epoch, every member and the joiner
+delegates with `ubft validator apply` through the signing authority, its root starts with --install-handoff-epoch, and
+its first bond lands after one reservation. Its authority refreshes from the missed activation. At the next election every member and the joiner
 prove possession, the roots activate the 5-member epoch and the joiner's authority advances with the verified activation proofs. Asserted:
 the joiner is a member, it leads at least one round (its shard node submits a leader certification request and never logs a refused build),
 and no block gap after the activation exceeds the normal bound (twice the block interval, at least 20 s).
@@ -77,17 +78,6 @@ def max_gap(times):
 
 
 JOINER_STATE = 'joined.json'   # late-joiner/: what vr-joiner-exit continues from
-# #1323: the UC seconds the joiner needs from its authority's start to its bond (restore, restart, funding, the four apply receipts), with
-# a margin. Its authority's shard epoch is fixed at the start, and an election reserved before the bond activates that epoch without it.
-JOIN_ROOM = 200
-
-
-def election_room(r, election):
-    """Seconds of UC time until the next election is due (ElectionPolicy.thresholds()' time floor), from the head block's timestamp."""
-    due = r.view(election, 'thresholds()(uint256,uint256)')[1]
-    return due - int(r.call('eth_getBlockByNumber', ['latest', False])['timestamp'], 16)
-
-
 def vr_late_joiner(r):
     if (r.manifest.get('pos') or {}).get('profile') != 'vr-pos16':
         raise ValueError('vr-late-joiner needs a VR/P85 Compose generation')
@@ -98,17 +88,6 @@ def vr_late_joiner(r):
     ev.mkdir(parents=True, exist_ok=True)
     epoch = rec.root_view(1)['activeEpoch']
     r.expect(epoch >= 3, 'the generation has passed at least two root handoffs (run after vr-pos-recover)', f'root epoch {epoch}')
-    # #1323: the joiner's authority starts at the current scope; it must be bonded (and so eligible, its delegation admitted first) before
-    # the next election is reserved. Too little room: let that election pass first (the first #1323 lane run started 47 s after an
-    # activation and met the next reservation in its bond's block).
-    room = election_room(r, rec.deployment['election'])
-    if room < JOIN_ROOM:
-        r.say(f'  the next election is due in {room} s (< {JOIN_ROOM} s): it passes first')
-        epoch = rec.participate_until(epoch)
-        advance_members(r, rec, epoch, ev)
-        room = election_room(r, rec.deployment['election'])
-    r.say(f'  the next election is due in {room} s')
-
     # 1. the pin: the newest certified record of root epoch 1 in an incumbent's archive, as old as the release's seed
     gen = r.gen
     info = joiner_lib.prepare(gen, r.ubft)
@@ -144,7 +123,7 @@ def vr_late_joiner(r):
     override = json.loads(override_path.read_text())
     services = override['services']
     services[f'authority{j}']['entrypoint'] = vr_recover.authority_entrypoint(services[f'authority{j}']['entrypoint'], info['evm'], epoch,
-        certified['shardEpoch'] + 1, '/authority/current-trust.json', r.manifest['genesis_hash'])
+        certified['shardEpoch'] + 1, '/authority/current-trust.json', r.manifest['genesis_hash']) + ['--pending-join-scope']
     services[f'shard{j}']['entrypoint'] = restore_entry(services[f'shard{j}']['entrypoint'], found.group(1))
     # the root: a follower until the handoff names it, installed at the current epoch as the container starts it; it starts with the
     # authority, so its catch-up overlaps the restore checks instead of the window before the bond (#1323)
@@ -223,16 +202,6 @@ def join_committee(r, rec, ev, j, val, auth, owner, owner_key, epoch, shard_epoc
     live = 1
     started = vr_recover.utc()
     rec.transport = handoff_ops.DockerTransport(gen)   # with the joiner override: its pod is an entity of every call
-    view = rec.root_view(live)
-    now = json.loads(rec.exec(f'root{live}', 'ubft', 'validator', 'last-signed-uc', '--execution', 'http://127.0.0.1:8545',
-                              '--root-rpc', rec.root_rpc, '--epoch', str(view['activeEpoch'])).stdout or 'null')
-    r.expect(view['activeEpoch'] == epoch and now and now['shardEpoch'] + 1 == shard_epoch,
-             f'the joiner authority\'s scope (root epoch {epoch}, shard epoch {shard_epoch}) is still the next one: no election ran meanwhile',
-             f'root epoch {view["activeEpoch"]}, certified shard epoch {now and now["shardEpoch"]}')
-    open_before = r.view_text(rec.deployment['election'], 'openResult()(bytes32)').strip()
-    r.expect(int(open_before, 16) == 0, 'no election result is open before the admission (one reserved now would not name the joiner, and '
-             'its handoff would move the joiner authority\'s scope)', open_before)
-
     # the operator home: the joiner's root keys, its owner key, and the authority mounted at authority/ (validator.json as `validator init`)
     home = val / 'join-operator'
     home.mkdir(mode=0o700)
@@ -260,11 +229,16 @@ def join_committee(r, rec, ev, j, val, auth, owner, owner_key, epoch, shard_epoc
     rec.dc('up', '-d', '--no-deps', f'root{j}')
     r.wait(f'the joiner\'s root {j} answers', lambda: rec.root_view(j), 300)
 
-    # `validator apply`, as the container's join (#1323): one run. The authority signs the delegation possession only for the identity its PoS
-    # policy names; apply pins the policy (the release's election, no ids) to the identity VR assigns it, right before the possession, and
-    # admits the delegation before the first bond (the bond makes the identity eligible), so register, delegation and bond land together. A bonded identity without its delegation is election work: an election reserved in that
-    # gap names only the incumbents, and its handoff moves the shard epoch the joiner's authority was started for (the first #1321 lane run
-    # met it while the container's two-step apply was emulated with a minute between the steps).
+    # Let the incumbents' result freeze its roster before the joiner's first bond.
+    # Hold publication until the bond has landed, so the authority still starts
+    # apply in the old scope and has to refresh during the enrollment wait.
+    def reserved():
+        result = r.view_text(rec.deployment['election'], 'openResult()(bytes32)').strip()
+        return result if int(result, 16) else None
+
+    missed_result = r.wait('an election reserved before the joiner bonds', reserved, 900, every=5)
+    r.expect(rec.root_view(live)['activeEpoch'] == epoch, 'the bond was held past reservation in the starting root epoch', missed_result)
+
     mounts = [(auth, '/home/authority')]
     (auth / 'pos-policy-template.json').write_text(json.dumps({'network': json.loads((gen / 'network/vr-deployment.json').read_text())['networkWord'],
         'chainId': r.manifest['chain_id'], 'election': rec.deployment['election']}) + '\n')
@@ -279,9 +253,34 @@ def join_committee(r, rec, ev, j, val, auth, owner, owner_key, epoch, shard_epoc
              f'{ident}: ' + r.scrub(text.strip()[-300:]))
     r.say(f'  joiner {j}: identity {ident}, owner {owner}: registered, bonded and delegated')
 
-    # the election that admits it: every frozen member's own proof (the joiner's from its authority), anyone's publication
+    missed = rec.participate_until(epoch)
+    missed_conf = json.loads(rec.fetch(f'root{live}', 'q3', 'shard-conf', '--root-rpc', rec.root_rpc, '--epoch', str(shard_epoch)))
+    r.expect(missed == epoch + 1 and len(missed_conf['validators']) == 4 and
+             all(v['nodeId'] != info['evm'] for v in missed_conf['validators']),
+             f'the result reserved before bond activated shard epoch {shard_epoch} without the joiner', missed_result)
+    (ev / 'missed-shard-conf.json').write_text(json.dumps(missed_conf, indent=1) + '\n')
+    before = rec.auth_status(j)
+    if rec.root_view(j)['activeEpoch'] < missed:
+        r.say(f'  joiner {j}: its root is still a follower; installing verified root epoch {missed}')
+        if os.environ.get('VR_LATE_JOINER_UNAVAILABLE_PROOF') == '1':
+            probe_unavailable_activation(r, rec, j, override_path, epoch, missed, ev)
+        install_joiner_root(rec, j, override_path, missed)
+    r.wait(f"the joiner's root follows missed root epoch {missed}",
+           lambda: rec.root_view(j)['activeEpoch'] >= missed, 300)
+    refreshed = advance_joiner(rec, j, auth, missed, j, scope_only=True)
+    after = rec.auth_status(j)
+    r.expect(refreshed['rootEpoch'] == missed and refreshed['shardEpoch'] == shard_epoch + 1 and
+             not after['enrollmentComplete'] and not after['sessionIssued'] and
+             after['signingKeyFingerprint'] == before['signingKeyFingerprint'],
+             'the same pending authority moved to the next shard epoch', str(refreshed))
+    (ev / 'scope-refresh.json').write_text(json.dumps({'before': before, 'refresh': refreshed, 'after': after}, indent=1) + '\n')
+    advance_members(r, rec, missed, ev)
+
+    # The next election admits the joiner with the same authority and bond.
+    shard_epoch += 1
     parts = {j: (ident, home, auth)}
-    target = rec.participate_until(view['activeEpoch'], extra=parts, pods={j: live}, watch=live)
+    target = rec.participate_until(missed, extra=parts, pods={j: live}, watch=live)
+    r.expect(target == missed + 1, 'the election immediately after the missed one admits the joiner', str(target))
     ack = r.wait(f'the first certified block of shard epoch {shard_epoch}', lambda: (lambda u: u if u and u['shardEpoch'] == shard_epoch else None)(
         rec.newest_uc(live, epoch=target)), 600, every=2)
     ack_block = int(rec.block(ack['blockHash'])['number'], 16)
@@ -327,7 +326,52 @@ def join_committee(r, rec, ev, j, val, auth, owner, owner_key, epoch, shard_epoc
     r.say(f'  joiner {j}: member from root epoch {target}, led {len(rounds)} round(s), largest block gap {gap} s')
 
 
-def advance_joiner(rec, j, auth, target, live):
+def install_joiner_root(rec, j, override_path, epoch, *, probe=False):
+    """Reopen the existing follower DB, optionally requesting one verified activation from peers."""
+    override = json.loads(override_path.read_text())
+    service = f'root{j}'
+    root = override['services'][service]
+    entry = root['entrypoint']
+    for flag in ('--install-handoff-epoch', '--install-handoff-wait'):
+        if flag in entry:
+            idx = entry.index(flag)
+            del entry[idx:idx + 2]
+    if epoch is not None and epoch > 1:
+        entry += ['--install-handoff-epoch', str(epoch)]
+    if probe:
+        # A remote proof cannot be fetched within this deadline. Observe the
+        # exit so Compose cannot retry the bad invocation itself.
+        entry += ['--install-handoff-wait', '1ns']
+        root['restart'] = 'no'
+    elif root.get('restart') == 'no':
+        root['restart'] = 'unless-stopped'
+    override_path.write_text(json.dumps(override, indent=1, sort_keys=True) + '\n')
+    rec.dc('up', '-d', '--no-deps', service)
+
+
+def probe_unavailable_activation(r, rec, j, override_path, previous, target, ev):
+    service = f'root{j}'
+    others = [f'{name}{j}' for name in ('shard', 'ureth', 'authority')]
+    def running():
+        return [rec.dc('ps', '-q', name).stdout.strip() for name in others]
+
+    before = running()
+    r.expect(all(before), 'the joiner’s shard, execution and authority are running before the failed install')
+    install_joiner_root(rec, j, override_path, target, probe=True)
+    r.wait('the follower exits when the activation proof cannot be fetched',
+           lambda: rec.dc('ps', '-a', '--status', 'exited', '-q', service).stdout.strip(), 60)
+    r.keep_redacted(ev / 'unavailable-activation.log', rec.dc('logs', '--no-color', service).stdout)
+    install_joiner_root(rec, j, override_path, None)
+    view = r.wait('the follower reopens the old database after the failed install',
+                  lambda: rec.root_view(j), 60)
+    r.expect(view['activeEpoch'] == previous and view.get('follower') and
+             before == running(),
+             'a failed hinted install leaves the shard, execution and authority running and the follower restarts at its old epoch', view)
+    # Match the supervisor's backoff before trying the real installation again.
+    time.sleep(60)
+
+
+def advance_joiner(rec, j, auth, target, live, *, scope_only=False):
     """The joiner's authority advanced to root epoch `target` with the verified activation proofs (validator.py advance), and its shard node
     restarted on the new session, as the container restarts it on the activation journal."""
     with tempfile.TemporaryDirectory(prefix='advance-', dir=auth) as tmp:
@@ -340,9 +384,11 @@ def advance_joiner(rec, j, auth, target, live):
             f.chmod(0o644)
             proofs += ['--proof', f'/authority/{work.name}/{f.name}']
         vr_recover.chown(work)
+        args = ['--scope-only'] if scope_only else ['--client-socket', '/authority/client.sock', '--out', '/authority/client.cred']
         advanced = json.loads(rec.exec(f'authority{j}', 'ubft', 'signing-authority', 'advance-with-proof', *vr_recover.OPERATOR,
-                                       '--client-socket', '/authority/client.sock', '--out', '/authority/client.cred', *proofs).stdout)
-    rec.dc('restart', f'shard{j}')
+                                       *args, *proofs).stdout)
+    if not scope_only:
+        rec.dc('restart', f'shard{j}')
     return advanced
 
 
@@ -457,10 +503,12 @@ def vr_joiner_exit(r):
     r.expect(all(t['to'] == custody and t['status'] == '0x1' for t in sent), 'every one of them went to custody and succeeded', json.dumps(sent)[:300])
 
 
-def publication_summary(txs):
+def publication_summary(txs, *, exclude=()):
     """Per result: how many finalizeCandidate and VR.publish transactions were sent, how many reverted, and their gas."""
     out = {}
     for t in txs:
+        if t['result'] in exclude:
+            continue
         k = out.setdefault(t['result'], {'finalizeCandidate': 0, 'finalizeReverted': 0, 'VR.publish': 0, 'publishReverted': 0, 'gas': 0, 'wastedGas': 0})
         k[t['kind']] += 1
         k['gas'] += t['gasUsed']
@@ -488,6 +536,7 @@ def vr_finalizer(r):
         extra = {state['index']: (state['identity'], Path(state['home']), Path(state['auth']))}
         pods = {state['index']: 1}
     report = {}
+    before_results = set()
     # 'after' names the default step (180 s since the second #1323 lane run) explicitly, so a run against an image built before it measures the
     # same order
     for name, step in (('before', '0s'), ('after', '180s')):
@@ -498,7 +547,9 @@ def vr_finalizer(r):
         target = rec.participate_polling(epoch, rec.participants(extra=extra), pods=pods, outputs=outputs)
         last = int(r.call('eth_blockNumber'), 16)
         txs = rec.publication_txs(first, last)
-        summary = publication_summary(txs)
+        summary = publication_summary(txs, exclude=before_results)
+        if name == 'before':
+            before_results = set(summary)
         report[name] = {'finalizerStep': step or 'default', 'rootEpoch': target, 'blocks': [first, last], 'results': summary, 'txs': txs}
         (ev / f'participation-{name}.json').write_text(json.dumps(outputs, indent=1) + '\n')
         totals = {k: sum(v[k] for v in summary.values()) for k in ('finalizeCandidate', 'finalizeReverted', 'VR.publish', 'publishReverted', 'wastedGas')}

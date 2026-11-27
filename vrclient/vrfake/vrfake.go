@@ -99,9 +99,9 @@ type Chain struct {
 	atFinalized          bool
 	// AfterSend, when set, runs under Mu after each accepted transaction with its calldata: a concurrent change landing in the same block.
 	AfterSend func(c *Chain, data []byte)
-	// AfterCall, when set, runs under Mu after each eth_call with its target and calldata (MoveHeadLocked in it lands a block between two
+	// AfterCall, when set, runs under Mu after each eth_call with its target, calldata and pinned block hash (MoveHeadLocked in it lands a block between two
 	// reads of one caller).
-	AfterCall func(c *Chain, to ethcommon.Address, data []byte)
+	AfterCall func(c *Chain, to ethcommon.Address, data []byte, blockHash ethcommon.Hash)
 	// history keeps the identities and the P85 state of the blocks MoveHeadLocked left behind, by block hash: an eth_call that names
 	// one (EIP-1898) reads that block's state, as a node does.
 	history map[ethcommon.Hash]*blockState
@@ -320,16 +320,23 @@ func (c *Chain) dispatch(req request) (any, *rpcError) {
 		if a.From != nil {
 			from = *a.From
 		}
-		var at struct {
-			BlockHash ethcommon.Hash `json:"blockHash"`
+		var blockHash ethcommon.Hash
+		if len(req.Params) > 1 && bytes.HasPrefix(bytes.TrimSpace(req.Params[1]), []byte("{")) {
+			var selector map[string]json.RawMessage
+			if err := json.Unmarshal(req.Params[1], &selector); err != nil ||
+				len(selector) != 2 || !bytes.Equal(selector["requireCanonical"], []byte("true")) ||
+				json.Unmarshal(selector["blockHash"], &blockHash) != nil || blockHash == (ethcommon.Hash{}) {
+				return nil, &rpcError{Code: -32602, Message: "expected a blockHash selector with requireCanonical: true"}
+			}
+			if blockHash != c.headHash() && c.history[blockHash] == nil &&
+				!(c.FinalizedDelegations != nil && blockHash == finalizedHash) {
+				return nil, &rpcError{Code: -32000, Message: "unknown canonical block"}
+			}
 		}
-		if len(req.Params) > 1 {
-			_ = json.Unmarshal(req.Params[1], &at)
-		}
-		c.atFinalized = c.FinalizedDelegations != nil && at.BlockHash == finalizedHash
+		c.atFinalized = c.FinalizedDelegations != nil && blockHash == finalizedHash
 		var ret []byte
 		var rerr *rpcError
-		if old := c.history[at.BlockHash]; old != nil && c.Pos != nil && !c.atFinalized {
+		if old := c.history[blockHash]; old != nil && c.Pos != nil && !c.atFinalized {
 			// a block MoveHeadLocked left behind: read its state
 			idns, pos, dels := c.Identities, c.Pos.Positions, c.Pos.Delegations
 			c.Identities, c.Pos.Positions, c.Pos.Delegations = old.identities, old.positions, old.delegations
@@ -340,7 +347,7 @@ func (c *Chain) dispatch(req request) (any, *rpcError) {
 		}
 		c.atFinalized = false
 		if c.AfterCall != nil && req.Method == "eth_call" {
-			c.AfterCall(c, a.To, a.Data)
+			c.AfterCall(c, a.To, a.Data, blockHash)
 		}
 		if rerr != nil {
 			return nil, rerr
@@ -645,15 +652,26 @@ func (c *Chain) custody(from ethcommon.Address, data []byte, write bool) ([]byte
 		}
 		return pack(a, "positions", identity.Owner, identity.Owner, [32]byte{}, [32]byte{}, identity.Generation,
 			uint64(0), uint32(len(c.ClaimLots)), uint32(len(c.ClaimLots)), true), nil
+	case "register":
+		if c.Pos != nil {
+			return c.registerCustody(from, in, write)
+		}
 	case "bond":
-		// custody.bond: a retired generation with no open lots opens the next one (StakeCustody.bond); the first bond keeps generation 1
-		if p := c.posOf(in[0].(uint64)); p != nil && write {
-			if p.RetirementRequested {
-				p.Generation++
-				p.RetirementRequested = false
+		// A retired generation opens the next one only after every old lot is closed.
+		if p := c.posOf(in[0].(uint64)); p != nil {
+			if p.RetirementRequested && p.OpenLots != 0 {
+				return nil, revert(vrclient.PosErrorsABI, "GenerationClosing")
 			}
-			p.OpenLots++
-			c.Pos.Order = append(c.Pos.Order, "bond")
+			if write {
+				if p.RetirementRequested {
+					p.Generation++
+					p.RetirementRequested = false
+					p.LotCount = 0
+				}
+				p.LotCount = max(p.LotCount, p.OpenLots) + 1
+				p.OpenLots++
+				c.Pos.Order = append(c.Pos.Order, "bond")
+			}
 		}
 	case "generationLots":
 		return pack(a, "generationLots", c.ClaimLots), nil

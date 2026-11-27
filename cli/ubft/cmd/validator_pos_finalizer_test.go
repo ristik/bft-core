@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"math/big"
 	"strings"
@@ -192,4 +193,65 @@ func TestPublishReadyResultSendsOnlyTheFinalizersTransactions(t *testing.T) {
 		run(f, 2, c)
 		require.Equal(t, []string{"publish"}, f.sent)
 	})
+}
+
+type readinessRPC func(result any, method string, args []any) error
+
+func (f readinessRPC) CallContext(_ context.Context, result any, method string, args ...any) error {
+	return f(result, method, args)
+}
+
+func TestPosPublishReaderReadiness(t *testing.T) {
+	election, result := common.Address{0xe1}, [32]byte{7}
+	for _, tc := range []struct {
+		head, from uint64
+		members    int
+	}{
+		{12, 0, 2},
+		{9999, 0, 2},
+		{10000, 1, 2},
+		{10500, 501, 3}, // two IDs for three members
+	} {
+		ctx := t.Context()
+		head, last := hexutil.EncodeUint64(tc.head), hexutil.EncodeUint64(tc.head-1)
+		var calls []string
+		rpc := readinessRPC(func(out any, method string, args []any) error {
+			calls = append(calls, method)
+			switch method {
+			case "eth_blockNumber":
+				require.Empty(t, args)
+				*out.(*hexutil.Uint64) = hexutil.Uint64(tc.head)
+			case "eth_getBlockByNumber":
+				number := head
+				stamp := `{"timestamp":"0x64"}`
+				if len(calls) > 2 {
+					number, stamp = last, `{"timestamp":"0x5a"}`
+				}
+				require.Equal(t, []any{number, false}, args)
+				return json.Unmarshal([]byte(stamp), out)
+			case "eth_getLogs":
+				require.Equal(t, []any{map[string]any{"address": election, "fromBlock": hexutil.EncodeUint64(tc.from),
+					"toBlock": head, "topics": []any{popAcceptedTopic, common.Hash(result)}}}, args)
+				proof := func(block uint64, id byte) popLog {
+					return popLog{Address: election, BlockNumber: hexutil.Uint64(block),
+						Topics: []common.Hash{popAcceptedTopic, common.Hash(result), {31: id}}}
+				}
+				*out.(*[]popLog) = []popLog{proof(tc.head-3, 1), proof(tc.head-2, 1), proof(tc.head-1, 2)}
+			default:
+				t.Fatalf("unexpected RPC method %s", method)
+			}
+			return nil
+		})
+		reader := posPublishReader{ch: &validatorChain{vr: vrclient.New(rpc, common.Address{})}, election: election}
+		ready, err := reader.Readiness(ctx, result, tc.members)
+		require.NoError(t, err)
+		wantCalls := []string{"eth_blockNumber", "eth_getBlockByNumber", "eth_getLogs"}
+		want := finalizerReadiness{Now: 100}
+		if tc.members == 2 {
+			wantCalls = append(wantCalls, "eth_getBlockByNumber")
+			want.Known, want.ReadyAt = true, 90
+		}
+		require.Equal(t, want, ready)
+		require.Equal(t, wantCalls, calls)
+	}
 }

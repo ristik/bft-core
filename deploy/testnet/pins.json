@@ -1,11 +1,11 @@
 {
-  "bft": "14e2bd215e7940d8373255fe6495bbee528db16e",
-  "ureth": "80b43faf050070c80744764a7eefea8abd31efc8",
+  "bft": "1c1f8eb203bfbfe82e1d7a0e43772226f5514a15",
+  "ureth": "e876ffdf731244f11678473fc8933571d708f967",
   "aggregator-go": "c3ec8b8748dbbf196cc43d1b735e8f6d0470a04f",
   "aggregator-go-upstream": "12ab9074b02dedf39b90b0bb49829ac77fb2da68",
   "mongo": "mongo:7.0.45@sha256:c53852c00c23ca9f23fc39690350ffa9a80e3642fe8f96879726d8da0abe80a7",
   "runtime": "debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587",
   "python": "python:3.13.12-alpine3.22@sha256:41351b07080ccfaa27bf38dde20de79ee6a0ac74a58c00c6d7a7d96ac4e69716",
-  "contracts": "1821d53cd93d5ae50ddb575fd062821cb6b83bf3",
-  "vr-contracts": "1821d53cd93d5ae50ddb575fd062821cb6b83bf3"
+  "contracts": "69f0e116e24aa7e19262d04c2890f2109dae3f7b",
+  "vr-contracts": "69f0e116e24aa7e19262d04c2890f2109dae3f7b"
 }

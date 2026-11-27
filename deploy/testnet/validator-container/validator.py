@@ -283,8 +283,10 @@ def init(a, pins):
         print(f"Payee {info['payee']}. Fund 100 UCT plus gas. One faucet claim pays 200 UCT.")
 
 
-def authority(*args, home=None, **options):
-    return ubft('signing-authority', *args, *auth_flags(home), **options)
+def authority(*args, home=None, binary='ubft', **options):
+    if binary == 'ubft':
+        return ubft('signing-authority', *args, *auth_flags(home), **options)
+    return command(binary, 'signing-authority', *args, *auth_flags(home), **options)
 
 
 def authority_status(home=None):
@@ -355,7 +357,7 @@ def authority_process(a, pins):
                                   '--out', trust, output=True).returncode == 0, limit=300)
         # A lost process must never be recreated with the old enrollment.
         write(d/'lifetime', b'fail-stop\n')
-        args = ['ubft', 'signing-authority', 'run', '--home', d, '--authority-id', node,
+        args = ['handoff-ubft', 'signing-authority', 'run', '--home', d, '--authority-id', node,
                 '--network-id', 3, '--partition-id', 8, '--shard-id', '0x80', '--node-id', node,
                 '--shard-epoch', n['shardEpoch'], '--root-epoch', n['rootEpoch'], '--trust-base', trust,
                 '--client-socket', d/'client.sock', *auth_flags(d),
@@ -364,6 +366,8 @@ def authority_process(a, pins):
                 '--lineage-genesis-trust-base', RELEASE/'trust-base.json', '--lineage-utb-genesis',
                 '--b1-profile', RELEASE/'b1-profile.json', '--activation-source-url', EXECUTION,
                 '--execution-genesis-hash', read(RELEASE/'manifest.json')['genesis_hash']]
+        if rec is None:
+            args += ['--pending-join-scope']
         proc = subprocess.Popen([str(x) for x in args], cwd=HOME)
         signal.signal(signal.SIGTERM, lambda *_: proc.terminate())
         raise SystemExit(proc.wait())
@@ -388,6 +392,28 @@ def root_status():
     if r.get('switch') and r['switch']['phase'] not in ('running', 'following'):
         return None
     return r
+
+
+def registry_root_epoch():
+    result = ubft('validator', 'status', '--rpc', RPC, '--sample', 0, '--json', output=True, check=False, timeout=20)
+    return json.loads(result.stdout).get('rootEpoch') if result.stdout else None
+
+
+def joiner_root_catchup_epoch():
+    progress = HOME/'join.json'
+    if not progress.exists() or read(progress)['phase'] not in ('applying', 'electing', 'activation') or recovering():
+        return None
+    view = root_status()
+    if not view or not view.get('follower', False):
+        return None
+    epoch = view['activeEpoch']
+    observed = registry_root_epoch()
+    if not observed or observed <= epoch:
+        return None
+    # The root could have switched while the registry RPC was in flight.
+    view = root_status()
+    if view and view.get('follower', False) and view['activeEpoch'] == epoch:
+        return epoch + 1
 
 
 def active_member_epoch(status, previous):
@@ -550,14 +576,8 @@ def node(a, pins):
         if not (d/'fingerprint').exists():
             epoch = n['rootEpoch']
             if epoch is None:
-                # A chain observation selects what the local root must
-                # verify from genesis. It cannot authorize the authority.
-                def hint():
-                    result = ubft('validator', 'status', '--rpc', RPC, '--json', output=True, check=False)
-                    if result.stdout:
-                        return json.loads(result.stdout).get('rootEpoch')
-                    return None
-                epoch = wait_for('the current registry epoch', hint, limit=60)
+                # The registry supplies a hint. The root verifies the activation from its pinned history.
+                epoch = wait_for('the current registry epoch', registry_root_epoch, limit=60)
             install = ['--install-handoff-epoch', epoch] if epoch > 1 else []
             start('root', [*root_args, *install])
             scope = wait_for('the locally verified initial root and shard scope',
@@ -573,7 +593,8 @@ def node(a, pins):
                 if not (d/'lifetime').exists():
                     raise
                 print(f'validator: the authority in {d} does not answer. {AUTHORITY_LOST}', flush=True)
-        start('root', [*root_args, '--vr-evm-authority-socket', d/'pop.sock', '--vr-evm-authority-credential', d/'pop.cred'])
+        root_args += ['--vr-evm-authority-socket', d/'pop.sock', '--vr-evm-authority-credential', d/'pop.cred']
+        start('root', root_args)
         active = active_file(k)
 
         def shard():
@@ -581,6 +602,8 @@ def node(a, pins):
 
         shard()
         enrolled = active.read_bytes() if active.exists() else None
+        next_root_check = 0.0
+        hinted_install = None
 
         class Health(BaseHTTPRequestHandler):
             def do_GET(self):
@@ -604,9 +627,37 @@ def node(a, pins):
                     stop('shard')
                     shard()
                     enrolled = active.read_bytes()
+                now = time.monotonic()
                 for name, proc in procs.items():
-                    if proc.poll() is not None:
-                        raise RuntimeError(f'{name} exited with status {proc.returncode}')
+                    status = proc.poll()
+                    if status is None:
+                        continue
+                    if name != 'root' or hinted_install is None:
+                        raise RuntimeError(f'{name} exited with status {status}')
+                    # The hint did not make the proof available. Keep the shard, execution and
+                    # RPC running, and reopen the same root database without a requested epoch.
+                    print(f'validator: root install for epoch {hinted_install} failed; restarting the follower', flush=True)
+                    start('root', root_args)
+                    hinted_install = None
+                    next_root_check = now + 60
+                if now >= next_root_check:
+                    next_root_check = now + 30
+                    target = None
+                    try:
+                        if hinted_install is not None:
+                            view = root_status()
+                            if view and view['activeEpoch'] >= hinted_install:
+                                hinted_install = None
+                        elif enrolled is None:
+                            target = joiner_root_catchup_epoch()
+                    except (OSError, ValueError, subprocess.SubprocessError):
+                        pass
+                    if target is not None and not active.exists():
+                        # Request one verified installation from peers on the current database.
+                        print(f'validator: catching up the follower root to epoch {target}', flush=True)
+                        stop('root')
+                        start('root', [*root_args, '--install-handoff-epoch', target])
+                        hinted_install = target
                 health.handle_request()
     finally:
         if 'halted' in locals():
@@ -768,29 +819,35 @@ def join(a, pins):
             # index). Before, a bonded identity without its delegation was passed over by an election reserved between two runs, and that
             # election's handoff moved the shard epoch this authority was started for. A resumed run pins the same policy again (a no-op).
             template = auth_dir()/'pos-policy-template.json'
-            write(template, json.dumps(pos_policy()).encode())
-            ubft('validator', 'apply', '--pin-pos-policy', template, timeout=900)
+            write(template, json.dumps(pos_policy_template()).encode())
+            command('handoff-ubft', 'validator', 'apply', '--pin-pos-policy', template, timeout=900)
             journal(progress, 'electing', id=read(CONFIG)['id'])
         ident = read(CONFIG)['id']
-        status = authority_status()
-        scope = HOME/'authority-scope.json'
-        base = read(scope if scope.exists() else HOME/'network.json')
-        shard = base['shardEpoch']
         info = read(auth_dir()/'node-info.json')
-        checked = [0.0]
+        conf = auth_dir()/'activated-shard.json'
 
         def elected():
-            if time.monotonic() - checked[0] >= 30:
-                checked[0] = time.monotonic()
-                missed_scope(shard, info)
-            return active_member_epoch(root_status(), base['rootEpoch'])
-        target = wait_for('activated root epoch', elected)
+            view = root_status()
+            if not view:
+                return None
+            status = authority_status()
+            target, shard = view['activeEpoch'], status['shardEpoch']
+            if (target < status['rootEpoch'] or
+                    (target == status['rootEpoch'] and not status['enrollmentComplete'])):
+                return None
+            done = ubft('q3', 'shard-conf', '--root-rpc', ROOT, '--epoch', shard, '--out', conf,
+                        output=True, check=False, timeout=30)
+            if done.returncode == 0 and names_node(read(conf), info):
+                if not view.get('follower', False):
+                    return target
+                return None
+            if not status['enrollmentComplete']:
+                refresh_join_scope(status, target)
+            return None
+
+        target = wait_for('activated root epoch naming this authority', elected)
         journal(progress, 'activation', id=ident, rootEpoch=target)
-        conf = auth_dir()/'activated-shard.json'
-        ubft('q3', 'shard-conf', '--root-rpc', ROOT, '--epoch', shard, '--out', conf)
-        if not names_node(read(conf), info):
-            raise RuntimeError(missed_scope_text(shard))
-        if not status['enrollmentComplete']:
+        if not authority_status()['enrollmentComplete']:
             authority('complete-enrollment', '--shard-conf', conf)
         advance(target)
         journal(progress, 'activated', id=ident, rootEpoch=target)
@@ -799,12 +856,10 @@ def join(a, pins):
         return 0
 
 
-def pos_policy(*ids):
-    """The release's P85 election pin (network word, chain id, election) and the identity ids; without ids it is `validator apply
-    --pin-pos-policy`'s template, to which apply adds the identity it registers."""
-    policy = {'network':read(RELEASE/'vr-deployment.json')['networkWord'],
-              'chainId':read(RELEASE/'manifest.json')['chain_id'], 'election':read(RELEASE/'deployment.json')['election']}
-    return {**policy, 'ids':list(ids)} if ids else policy
+def pos_policy_template():
+    """Read the release's P85 pin template for validator apply and recover."""
+    return {'network':read(RELEASE/'vr-deployment.json')['networkWord'],
+            'chainId':read(RELEASE/'manifest.json')['chain_id'], 'election':read(RELEASE/'deployment.json')['election']}
 
 
 def names_node(conf, info):
@@ -813,20 +868,26 @@ def names_node(conf, info):
     return bool(named) and str(named[0].get('sigKey', '')).lower() == str(info['sigKey']).lower()
 
 
-def missed_scope_text(shard):
-    return (f'shard epoch {shard}, the epoch this authority was started for, activated without this node: an election was held '
-            'before the delegation was admitted, and the authority cannot sign for a later epoch. The identity is registered, bonded '
-            'and delegated. Stop the authority container (keep the volume), then run `ubft-validator recover --yes` and follow the '
-            'steps it prints (Authority loss in the validator handbook): the fresh authority joins at the next election.')
-
-
-def missed_scope(shard, info):
-    """#1323: raise (RuntimeError, which wait_for passes on) once the authority's shard epoch has activated without this node."""
-    with tempfile.TemporaryDirectory(prefix='.scope-', dir=HOME) as temp:
-        path = Path(temp)/'shard.json'
-        done = ubft('q3', 'shard-conf', '--root-rpc', ROOT, '--epoch', shard, '--out', path, output=True, check=False, timeout=30)
-        if done.returncode == 0 and not names_node(read(path), info):
-            raise RuntimeError(missed_scope_text(shard))
+def refresh_join_scope(status, target):
+    """Verify the next activation in the authority's lineage, without opening a signing session."""
+    epoch = max(2, status['lineageEpoch'] + 1)
+    if epoch > target:
+        return
+    with tempfile.TemporaryDirectory(prefix='.join-scope-', dir=HOME) as temp:
+        proof = Path(temp)/f'activation-{epoch}.cbor'
+        ubft('q3', 'proof-envelope', '--root-rpc', ROOT, '--epoch', epoch, '--out', proof, timeout=30)
+        done = authority('advance-with-proof', '--scope-only', '--proof', proof, binary='handoff-ubft',
+                         output=True, check=False, timeout=30)
+        if done.returncode:
+            text = (done.stdout + done.stderr).strip()
+            if 'signing-enrollment-incomplete' in text:
+                raise RuntimeError('This authority started with a fixed shard scope. Stop the authority container (keep the volume), '
+                                   'then run `ubft-validator recover --yes` and follow the steps it prints.')
+            raise RuntimeError(text or f'the authority refused the activation proof for root epoch {epoch}')
+        observed = json.loads(done.stdout)
+        if observed['shardEpoch'] > status['shardEpoch']:
+            print(f"validator: shard epoch {status['shardEpoch']} activated without this node; "
+                  f"waiting for shard epoch {observed['shardEpoch']} with the same authority", flush=True)
 
 
 def next_slot():
@@ -895,12 +956,12 @@ def recover(a, pins):
         if read(HOME/RECOVERY)['phase'] == 'transactions':
             # #1222: recover pins the fresh authority to the identity after VR's binding names its key, then signs the delegation. The
             # template is (re)written here, so a journal that reached this phase under an older container (which pinned first) resumes too
-            write(d/'pos-policy-template.json', json.dumps(pos_policy()).encode())
+            write(d/'pos-policy-template.json', json.dumps(pos_policy_template()).encode())
             with lock('.tx.lock', wait=True):
-                ubft('validator', 'recover', '--old-authority-home', auth_name(old),
-                     '--new-evm-authority-socket', f'{d.name}/operator.sock',
-                     '--new-evm-authority-credential', f'{d.name}/operator.cred', '--new-evm-node-info', f'{d.name}/node-info.json',
-                     '--pin-pos-policy', d/'pos-policy-template.json', '--wait', '10m', timeout=1800)   # the committee certifies on n-1 signers; a re-run resumes either way
+                command('handoff-ubft', 'validator', 'recover', '--old-authority-home', auth_name(old),
+                        '--new-evm-authority-socket', f'{d.name}/operator.sock',
+                        '--new-evm-authority-credential', f'{d.name}/operator.cred', '--new-evm-node-info', f'{d.name}/node-info.json',
+                        '--pin-pos-policy', d/'pos-policy-template.json', '--wait', '10m', timeout=1800)   # the committee certifies on n-1 signers; a re-run resumes either way
             journal(HOME/RECOVERY, 'linking', **{k: rec[k] for k in ('id', 'old', 'new', 'scope')})
         if read(HOME/RECOVERY)['phase'] == 'linking':
             configure_authority(new)

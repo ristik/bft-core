@@ -67,7 +67,11 @@ func (a *Authority) SignHandoffPoP(req HandoffPoPRequest) (evmassign.PoP, error)
 	if err := a.checkPoPBinding(succ, req.NodeID, req.Context); err != nil {
 		return evmassign.PoP{}, err
 	}
-	return evmassign.SignPoP(a.signer, req.Context, succ, enroll.NodeID)
+	proof, err := evmassign.SignPoP(a.signer, req.Context, succ, enroll.NodeID)
+	if err == nil {
+		a.noteJoinScopeProof()
+	}
+	return proof, err
 }
 
 // popEpochInRange is the successor shard epochs a possession proof may name for an authority enrolled at the given shard epoch: that
@@ -93,6 +97,8 @@ func (a *Authority) checkPoPBinding(succ *types.PartitionDescriptionRecord, node
 		return fmt.Errorf("%w: another network", ErrContextMismatch)
 	case succ.PartitionID != enroll.PartitionID || !succ.ShardID.Equal(enroll.ShardID):
 		return fmt.Errorf("%w: another partition or shard", ErrContextMismatch)
+	case a.pendingJoinScope && !enroll.complete() && succ.Epoch != enroll.ShardEpoch:
+		return fmt.Errorf("%w: pending join scope is shard epoch %d, proof is for %d", ErrContextMismatch, enroll.ShardEpoch, succ.Epoch)
 	case !popEpochInRange(enroll.ShardEpoch, succ.Epoch):
 		// A retained validator is enrolled at the installed shard epoch and proves for the next one, or, when it supersedes an
 		// unacknowledged chain of assignments, for one up to the supersession span ahead (the successor's epoch follows the latest
@@ -122,4 +128,11 @@ func (a *Authority) checkPoPBinding(succ *types.PartitionDescriptionRecord, node
 		return fmt.Errorf("%w: the successor does not name this node with this authority's key", ErrContextMismatch)
 	}
 	return nil
+}
+
+// noteJoinScopeProof freezes a pending shard target once the key has proved for it. The caller holds a.mu.
+func (a *Authority) noteJoinScopeProof() {
+	if a.pendingJoinScope && !a.enroll.complete() {
+		a.joinScopeProved = true
+	}
 }
