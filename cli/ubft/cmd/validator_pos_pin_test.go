@@ -140,8 +140,10 @@ func TestFreshValidatorApplyPinsAndBondsThroughTheAuthority(t *testing.T) {
 				v.cfg.ID = id
 				require.NoError(t, v.save())
 
-				out, err := runValidator(t, home, "apply", "--dry-run", "--pin-pos-policy", pin)
-				require.ErrorContains(t, err, "A dry run cannot set the P85 pin", out)
+				for _, args := range [][]string{{"apply", "--dry-run"}, {"apply", "--dry-run", "--pin-pos-policy", pin}} {
+					out, err := runValidator(t, home, args...)
+					require.ErrorContains(t, err, "A dry run cannot set the P85 pin", out)
+				}
 				require.Zero(t, chain.Sends())
 				return
 			}
