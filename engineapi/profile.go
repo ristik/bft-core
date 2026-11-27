@@ -246,6 +246,13 @@ func checkProfileWith(raw json.RawMessage, wantChainID uint64, extra map[string]
 				"(eth_config %q is not null); the pinned profile is %s, because this adapter speaks only the V3 Engine API",
 				when, field.key, PinnedProfileName)
 		}
+		var wire map[string]json.RawMessage
+		if err := json.Unmarshal(field.raw, &wire); err != nil {
+			return ExecutionProfile{}, fmt.Errorf("engineapi: decoding eth_config %q: %w", field.key, err)
+		}
+		if !bytes.Equal(wire["activationTime"], []byte("null")) {
+			return ExecutionProfile{}, fmt.Errorf("engineapi: eth_config %q epoch fork requires explicit null activationTime", field.key)
+		}
 		if err := checkEpochFork(f, cur, wantPrecompiles); err != nil {
 			return ExecutionProfile{}, fmt.Errorf("engineapi: eth_config %q: %w", field.key, err)
 		}

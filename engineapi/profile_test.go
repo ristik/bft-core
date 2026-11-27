@@ -3,6 +3,7 @@ package engineapi
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -237,7 +238,7 @@ func TestCheckProfile_UnicityEpochFork(t *testing.T) {
 		epoch["activationTime"] = nil
 		epoch["activationRootEpoch"] = 2
 		epoch["notBeforeUcTime"] = 0
-		m["next"], m["last"] = epoch, epoch
+		m["next"], m["last"] = epoch, maps.Clone(epoch)
 		return m
 	}
 	t.Run("scheduled interpreter fork accepted", func(t *testing.T) {
@@ -250,6 +251,17 @@ func TestCheckProfile_UnicityEpochFork(t *testing.T) {
 		_, err := checkProfileWith(mustJSON(t, m), 31337, nativeRev2)
 		require.NoError(t, err)
 	})
+	for _, key := range []string{"next", "last", "unicityActive"} {
+		t.Run(key+" requires explicit null activationTime", func(t *testing.T) {
+			m := scheduled()
+			if key == "unicityActive" {
+				m[key], m["next"], m["last"] = m["next"], nil, nil
+			}
+			delete(m[key].(map[string]any), "activationTime")
+			_, err := checkProfileWith(mustJSON(t, m), 31337, nativeRev2)
+			require.ErrorContains(t, err, `"`+key+`" epoch fork requires explicit null activationTime`)
+		})
+	}
 	t.Run("scheduled fork cannot bypass the check of current", func(t *testing.T) {
 		m := scheduled()
 		current(m)["precompiles"].(map[string]any)["BLS12_G1ADD"] = "0x000000000000000000000000000000000000000b"
