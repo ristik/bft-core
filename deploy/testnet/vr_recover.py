@@ -25,12 +25,15 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 
 import handoff_ops
 import operator_rpc
 
+# cast sig 'finalizeCandidate(bytes32)', cast sig 'publish(bytes32)' (vrclient/pos_selectors_test.go)
+FINALIZE, VR_PUBLISH = '0xce48313e', '0x8b2e6dcf'
 OPERATOR = ['--operator-socket', '/authority/operator.sock', '--operator-credential', '/authority/operator.cred']
 NODE_PARTS = ('auth', 'evm', 'archive', 'ureth')
 REFUSAL = ('VR Freeze refused', 'EVM-only validator change', 'registry output refused')
@@ -190,6 +193,8 @@ class Recovery:
         self.transport = handoff_ops.DockerTransport(self.gen)
         self.ev = r.evidence / 'recover'
         self.ev.mkdir(parents=True, exist_ok=True)
+        # #1323: pos-publish --participate's --finalizer-step (None: its default order); '0s' is the pre-#1323 race, every member at once
+        self.finalizer_step = None
 
     # --- docker -------------------------------------------------------------------------------------------------------------------
     def dc(self, *args, check=True):
@@ -527,15 +532,80 @@ class Recovery:
         result = r.view_text(self.deployment['election'], 'openResult()(bytes32)').strip()
         if not int(result, 16):
             return None
-        for m, (ident, home, auth) in parts.items():
-            done = self.cli((pods or {}).get(m, m), home, 'validator', 'pos-publish', '--participate', '--result', result,
-                            '--proof-member', str(ident), mounts=[(auth, '/home/authority')], check=False)
-            text = (done.stdout + done.stderr).strip()
+        step = ['--finalizer-step', self.finalizer_step] if self.finalizer_step is not None else []
+        done = {}
+
+        def one(m, ident, home, auth):
+            # every member at once, as each validator's own participation loop polls the same certified block (#1323)
+            done[m] = self.cli((pods or {}).get(m, m), home, 'validator', 'pos-publish', '--participate', '--result', result,
+                               '--proof-member', str(ident), *step, mounts=[(auth, '/home/authority')], check=False)
+        threads = [threading.Thread(target=one, args=(m, *part)) for m, part in parts.items()]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        for m, (ident, _, _) in parts.items():
+            text = (done[m].stdout + done[m].stderr).strip()
             if outputs is not None:
-                outputs.setdefault(m, []).append({'result': result, 'exit': done.returncode, 'output': r.scrub(text)})
-            r.say(f'  member {ident} on result {result[:18]}: exit {done.returncode}: ' +
+                outputs.setdefault(m, []).append({'result': result, 'exit': done[m].returncode, 'output': r.scrub(text)})
+            r.say(f'  member {ident} on result {result[:18]}: exit {done[m].returncode}: ' +
                   r.scrub(' | '.join(text.splitlines()[-2:])[-240:]))
         return result
+
+    def participate_polling(self, epoch, parts, pods=None, seconds=3600, every=3, outputs=None):
+        """#1323: as each validator's own participation loop does (validator.py polls every 5 s): every participant runs `pos-publish
+        --participate` on the open result in its own loop, independently of the others, until the roots activate an epoch after `epoch`.
+        Unlike participate_until's lockstep rounds, the members then see a result become ready at about the same block, which is when the
+        finalize race happens. Returns the activated epoch."""
+        r = self.r
+        step = ['--finalizer-step', self.finalizer_step] if self.finalizer_step is not None else []
+        stop = threading.Event()
+        lock = threading.Lock()
+
+        def loop(m, ident, home, auth):
+            while not stop.is_set():
+                try:
+                    result = r.view_text(self.deployment['election'], 'openResult()(bytes32)').strip()
+                    if int(result, 16):
+                        done = self.cli((pods or {}).get(m, m), home, 'validator', 'pos-publish', '--participate', '--result', result,
+                                        '--proof-member', str(ident), *step, mounts=[(auth, '/home/authority')], check=False)
+                        text = r.scrub((done.stdout + done.stderr).strip())
+                        if outputs is not None and text:
+                            with lock:
+                                outputs.setdefault(m, []).append({'utc': utc(), 'result': result, 'exit': done.returncode, 'output': text})
+                except Exception as error:   # a failed read is the next poll's
+                    with lock:
+                        if outputs is not None:
+                            outputs.setdefault(m, []).append({'utc': utc(), 'error': str(error)[-300:]})
+                stop.wait(every)
+        threads = [threading.Thread(target=loop, args=(m, *part), daemon=True) for m, part in parts.items()]
+        for t in threads:
+            t.start()
+        try:
+            def activated():
+                view = self.root_view(self.i)
+                switching = view.get('switch') and view['switch']['phase'] not in ('running', 'following')
+                return view['activeEpoch'] if view['activeEpoch'] > epoch and not switching else None
+            return r.wait(f'the roots activate an epoch after {epoch} (every member polling on its own)', activated, seconds, every=10)
+        finally:
+            stop.set()
+            for t in threads:
+                t.join(timeout=700)
+
+    def publication_txs(self, first, last):
+        """#1323: every finalizeCandidate (to the election) and VR.publish (to VR) in blocks first..last, with its sender, status and gas."""
+        r = self.r
+        election, registry = self.deployment['election'].lower(), self.deployment['registry'].lower()
+        out = []
+        for n in range(first, last + 1):
+            for tx in r.call('eth_getBlockByNumber', [hex(n), True])['transactions']:
+                to, sel = (tx.get('to') or '').lower(), tx['input'][:10]
+                kind = {(election, FINALIZE): 'finalizeCandidate', (registry, VR_PUBLISH): 'VR.publish'}.get((to, sel))
+                if kind:
+                    rc = r.call('eth_getTransactionReceipt', [tx['hash']])
+                    out.append({'block': n, 'kind': kind, 'result': '0x' + tx['input'][10:74], 'from': tx['from'].lower(),
+                                'status': rc['status'], 'gasUsed': int(rc['gasUsed'], 16), 'hash': tx['hash']})
+        return out
 
     def participate_until(self, epoch, homes=None, pods=None, seconds=3600, watch=None, extra=None, outputs=None):
         """Until the roots activate an epoch after `epoch`: every genesis member's own `pos-publish --participate` on the open result (its

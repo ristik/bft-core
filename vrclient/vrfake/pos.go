@@ -24,6 +24,8 @@ type Pos struct {
 	ParkedUntil map[uint64]uint64
 	// Admitted counts the accepted admitDelegation transactions.
 	Admitted int
+	// Order is the custody bonds and election admissions in the order they were mined ("bond", "admit") (#1323).
+	Order []string
 }
 
 // Position is custody's position of one identity; the owner is the VR identity's unless Owner is set.
@@ -156,6 +158,7 @@ func (c *Chain) election(from ethcommon.Address, data []byte, write bool) ([]byt
 		if write {
 			c.Pos.Delegations[key] = &Delegated{Binding: r.Binding, NextNonce: next + 1}
 			c.Pos.Admitted++
+			c.Pos.Order = append(c.Pos.Order, "admit")
 		}
 		return nil, nil
 	}

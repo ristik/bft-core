@@ -36,7 +36,7 @@ func (s staticTrustBases) GetByEpoch(context.Context, uint64) (*types.RootTrustB
 
 // startAuthority runs an authority in this process (enrolled as node "e2e-evm-auth") with a registration policy, and returns its operator
 // socket, its operator credential file and its node info file.
-func startAuthority(t *testing.T, policy signingauthority.RegistrationPolicy) (socket, credFile, infoFile string) {
+func startAuthority(t *testing.T, policy signingauthority.RegistrationPolicy, opts ...signingauthority.Option) (socket, credFile, infoFile string) {
 	t.Helper()
 	rootSigner, err := abcrypto.NewInMemorySecp256K1Signer()
 	require.NoError(t, err)
@@ -47,7 +47,7 @@ func startAuthority(t *testing.T, policy signingauthority.RegistrationPolicy) (s
 	require.NoError(t, err)
 	a, err := signingauthority.New(signingauthority.Enrollment{AuthorityID: "e2e", NodeID: "e2e-evm-auth", NetworkID: 5, PartitionID: 8, ShardID: types.ShardID{},
 		RootEpoch: signingauthority.PinRootEpoch(1), ShardConfHash: confHash, Profile: signingauthority.ProfileLegacyBCRv1},
-		staticTrustBases{tb}, signingauthority.WithRegistrationPolicy(policy))
+		staticTrustBases{tb}, append([]signingauthority.Option{signingauthority.WithRegistrationPolicy(policy)}, opts...)...)
 	require.NoError(t, err)
 	t.Cleanup(a.Close)
 	cred, err := service.NewCredential()

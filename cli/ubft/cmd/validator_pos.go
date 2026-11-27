@@ -15,6 +15,7 @@ import (
 	"math/big"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -40,11 +41,45 @@ func (ch *validatorChain) posAddrs(ctx context.Context) (custody, election commo
 type posFlags struct {
 	Bond       string
 	Withdrawal string
+	// PosPolicy is a P85 pin template (network word, chain id, election; no ids) that apply pins on the signing authority for the identity
+	// it registers, just before the delegation possession (#1323): register, bond and delegation then land in one run.
+	PosPolicy string
 }
 
 func (p *posFlags) add(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&p.Bond, "bond", "", "PoS: the stake to bond in base units (decimal; default: one bond unit of the generation)")
 	cmd.Flags().StringVar(&p.Withdrawal, "withdrawal", "", "PoS: the address that receives the matured principal (default: the operator account)")
+	cmd.Flags().StringVar(&p.PosPolicy, "pin-pos-policy", "", "PoS with a signing authority that accepts a late P85 pin: a pin file without ids "+
+		"({\"network\":\"0x..\",\"chainId\":N,\"election\":\"0x..\"}); apply pins it on the authority for the identity it registers, just before the "+
+		"delegation possession, so registration, bond and delegation land in one run (#1323). It must name the chain's election; the same pin again is a no-op")
+}
+
+// readPosPolicyTemplate reads apply's --pin-pos-policy: a P85 pin without identity ids (apply adds the registered one).
+func readPosPolicyTemplate(path string) (signingauthority.PosPolicy, error) {
+	p, err := readPosPolicy(path)
+	if err != nil {
+		return p, err
+	}
+	if len(p.IDs) != 0 {
+		return p, fmt.Errorf("%w: --pin-pos-policy %s lists identity ids: leave them out, apply pins the identity it registers", ErrValidator, path)
+	}
+	return p, nil
+}
+
+// checkPosPolicyTemplate requires the pin template to name the election apply delegates to: the network word custody reports, the chain id
+// and the election address. A template from another release would pin the authority (once, for its lifetime) to an election it never signs in.
+func checkPosPolicyTemplate(p signingauthority.PosPolicy, network [32]byte, chainID *big.Int, election common.Address) error {
+	var chain [32]byte
+	chainID.FillBytes(chain[:])
+	switch {
+	case p.Network != network:
+		return fmt.Errorf("%w: --pin-pos-policy names network word %x, custody's is %x", ErrValidator, p.Network, network)
+	case p.ChainID != chain:
+		return fmt.Errorf("%w: --pin-pos-policy names chain %s, the RPC's is %s", ErrValidator, new(big.Int).SetBytes(p.ChainID[:]), chainID)
+	case common.Address(p.Election) != election:
+		return fmt.Errorf("%w: --pin-pos-policy names election %s, VR's PoS adapter names %s", ErrValidator, common.Address(p.Election).Hex(), election.Hex())
+	}
+	return nil
 }
 
 func validatorApplyPoS(cmd *cobra.Command, f *txFlags, pf *posFlags) error {
@@ -78,6 +113,17 @@ func validatorApplyPoS(cmd *cobra.Command, f *txFlags, pf *posFlags) error {
 			return fmt.Errorf("%w: --bond must be a positive decimal", ErrValidator)
 		}
 	}
+	var pin *signingauthority.PosPolicy
+	if pf.PosPolicy != "" {
+		if keys.EVMAuth == nil {
+			return fmt.Errorf("%w: --pin-pos-policy pins a signing authority; this validator has an EVM key file", ErrValidator)
+		}
+		p, err := readPosPolicyTemplate(pf.PosPolicy)
+		if err != nil {
+			return err
+		}
+		pin = &p
+	}
 	root, evm, payee, err := posKeys(v, keys)
 	if err != nil {
 		return err
@@ -98,6 +144,12 @@ func validatorApplyPoS(cmd *cobra.Command, f *txFlags, pf *posFlags) error {
 		return err
 	}
 	chainID := ch.chainID
+	if pin != nil {
+		// before anything is sent: the pin is fixed for the authority's lifetime
+		if err := checkPosPolicyTemplate(*pin, network, chainID, election); err != nil {
+			return err
+		}
+	}
 	registerVR := func() ([]step, error) {
 		nonce, err := ch.vr.RegistrationNonce(ctx, owner)
 		if err != nil {
@@ -203,6 +255,16 @@ func validatorApplyPoS(cmd *cobra.Command, f *txFlags, pf *posFlags) error {
 			if want := evmassign.DelegationDigest(network, chainWord, election, dreq); want != digest {
 				return nil, fmt.Errorf("%w: the election's delegation digest %x is not the one the authority signs (%x): the deployment's network word or chain differs from custody's", ErrValidator, digest, want)
 			}
+			if pin != nil && !f.DryRun {
+				// #1323: the identity id is known only now (VR assigned it in this run); pinning here keeps register, bond and
+				// delegation in one run, with no window in which a bonded identity has no delegation for an election to pass over
+				p := *pin
+				p.IDs = []uint64{id}
+				if err := keys.EVMAuth.PinPosPolicy(ctx, p); err != nil {
+					return nil, err
+				}
+				fmt.Fprintf(w, "  pinned the signing authority's P85 scope to identity %d\n", id)
+			}
 			evmSig, err = keys.EVMAuth.DelegationPossession(ctx, signingauthority.DelegationPossessionRequest{Network: network, Chain: chainWord, Election: election, Request: dreq})
 		} else {
 			evmSig, err = vrclient.SignDigest(evm.Key, digest)
@@ -217,35 +279,53 @@ func validatorApplyPoS(cmd *cobra.Command, f *txFlags, pf *posFlags) error {
 		return []step{{what: fmt.Sprintf("admit identity %d's delegation (the node words, keys and payee the election elects)", id), tx: vrclient.Tx{To: election, Data: data}}}, nil
 	}
 
+	// #1323: the order of the steps. A fresh identity (custody generation 1, never bonded) has its delegation admitted BEFORE its first
+	// bond: custody.register already opens generation 1 and the first bond keeps it, and the bond is what puts the identity in the
+	// election's live index. So no election can see the identity bonded but without its delegation (a result reserved in that gap
+	// passes over it, and its handoff moves the shard epoch the joiner's authority was started for). A retired identity's new bond opens
+	// a new generation, so there the delegation still follows the bond.
+	const (
+		doVRRegister = iota
+		doCustodyRegister
+		doAdmitThenBond // fresh: the delegation, then the first bond
+		doBondLast
+		doBondThenAdmit // a re-bond after retirement opens a new generation
+		doAdmitLast
+	)
 	var steps []step
+	stage := doVRRegister
 	switch {
 	case have:
 		// already registered in VR: continue from custody (the id must be free there, or already ours)
-		var pos struct {
-			Owner               common.Address
-			Withdrawal          common.Address
-			RootKeyHash         [32]byte
-			StagedRootKeyHash   [32]byte
-			Generation          uint64
-			RoleNonce           uint64
-			OpenLots            uint32
-			LotCount            uint32
-			RetirementRequested bool
-		}
+		var pos custodyPosition
 		if err := ch.vr.CallPosMulti(ctx, custody, vrclient.CustodyABI, "positions", &pos, id); err != nil {
 			return err
 		}
 		fmt.Fprintf(w, "identity %d is registered in VR\n", id)
 		switch {
 		case pos.Owner == (common.Address{}):
+			stage = doCustodyRegister
 			if steps, err = custodyRegister(); err != nil {
 				return err
 			}
-		case pos.Owner == owner && pos.OpenLots == 0:
+		case pos.Owner == owner && pos.OpenLots == 0 && pos.RetirementRequested:
+			stage = doBondThenAdmit
 			if steps, err = bondStep(id); err != nil {
 				return err
 			}
+		case pos.Owner == owner && pos.OpenLots == 0:
+			stage = doAdmitThenBond
+			if steps, err = admitStep(id); err != nil {
+				return err
+			}
+			if len(steps) == 0 { // the delegation is staged (an interrupted run): only the bond is left
+				stage = doBondLast
+				if steps, err = bondStep(id); err != nil {
+					return err
+				}
+			}
 		case pos.Owner == owner:
+			stage = doAdmitLast
 			if steps, err = admitStep(id); err != nil {
 				return err
 			}
@@ -261,23 +341,11 @@ func validatorApplyPoS(cmd *cobra.Command, f *txFlags, pf *posFlags) error {
 		fmt.Fprintf(w, "identity %d is already registered, bonded and its delegation staged: nothing to do\n", id)
 		return nil
 	}
-	// the chain of steps: each receipt names the next (VR register -> custody register -> bond -> admit); stage is the step just done
-	stage := 0
-	if have {
-		first := steps[0]
-		switch {
-		case strings.Contains(first.what, "register the root key"):
-			stage = 1
-		case strings.Contains(first.what, "bond"):
-			stage = 2
-		default:
-			stage = 3
-		}
-	}
+	// the chain of steps: each receipt names the next; stage is the step just done
 	after := func(i int, r *vrclient.Receipt) ([]step, error) {
-		switch {
-		case stage == 0: // VR.register done
-			stage = 1
+		switch stage {
+		case doVRRegister:
+			stage = doCustodyRegister
 			newID, ok := vrclient.RegisteredID(r, ch.vr.Registry)
 			if !ok {
 				return nil, fmt.Errorf("%w: the register receipt has no Registered log", ErrValidator)
@@ -289,15 +357,23 @@ func validatorApplyPoS(cmd *cobra.Command, f *txFlags, pf *posFlags) error {
 			}
 			fmt.Fprintf(w, "  registered identity %d in VR (saved to %s)\n", id, v.path)
 			return custodyRegister()
-		case stage == 1: // custody.register done
-			stage = 2
+		case doCustodyRegister:
 			cid, ok := vrclient.CustodyRegisteredID(r, custody)
 			if !ok || cid != id {
 				return nil, fmt.Errorf("%w: custody registered identity %d, VR's is %d: the two registries' ids are out of step (another account registered in between); stop and ask the Foundation", ErrValidator, cid, id)
 			}
+			stage = doAdmitThenBond
+			next, err := admitStep(id)
+			if err == nil && len(next) == 0 {
+				stage = doBondLast
+				return bondStep(id)
+			}
+			return next, err
+		case doAdmitThenBond:
+			stage = doBondLast
 			return bondStep(id)
-		case stage == 2:
-			stage = 3
+		case doBondThenAdmit:
+			stage = doAdmitLast
 			return admitStep(id)
 		}
 		return nil, nil
@@ -515,6 +591,7 @@ func validatorPosPublishCmd(base *baseFlags) *cobra.Command {
 	var ownProof, participate bool
 	var expectedResult string
 	var memberID uint64
+	var finalizerStep time.Duration
 	cmd := &cobra.Command{
 		Use:   "pos-publish",
 		Short: "Submit P85 possession proofs or finalize and publish an election result",
@@ -573,8 +650,10 @@ func validatorPosPublishCmd(base *baseFlags) *cobra.Command {
 						break
 					}
 				}
+				reader := posPublishReader{ch, election}
 				return publishReadyResult(ctx, w, posPublishRun{Election: election, Registry: ch.vr.Registry,
-					Rid: rid, Members: members, Chain: posPublishReader{ch, election}, Sender: s, DryRun: f.DryRun})
+					Rid: rid, Members: members, Chain: reader, Sender: s, DryRun: f.DryRun,
+					Order: &finalizerOrder{ID: memberID, Step: finalizerStep, Clock: reader}})
 			}
 			return runPosPublish(ctx, w, posPublishRun{Election: election, Registry: ch.vr.Registry, Rid: rid, Members: members, Chain: posPublishReader{ch, election},
 				Sender: s, DryRun: f.DryRun, Pops: func(ctx context.Context) ([]vrclient.PoPInput, error) {
@@ -647,7 +726,11 @@ func validatorPosPublishCmd(base *baseFlags) *cobra.Command {
 	}
 	f.add(cmd)
 	cmd.Flags().BoolVar(&ownProof, "own-proof", false, "submit only the configured validator's authority-held proof; leave finalization to a relayer")
-	cmd.Flags().BoolVar(&participate, "participate", false, "submit only this node's own proof and permissionlessly publish when every proof is recorded")
+	cmd.Flags().BoolVar(&participate, "participate", false, "the member mode: submit only this node's own proof and permissionlessly publish when every proof is "+
+		"recorded, in the finalizer order (--finalizer-step). It sends nothing for an operator that owns no bonded, active identity (#1316): a pure relayer runs without it")
+	cmd.Flags().DurationVar(&finalizerStep, "finalizer-step", defaultFinalizerStep, "--participate: the chain time between finalizer turns (#1323). The lowest "+
+		"frozen identity finalizes and publishes a ready result at once; the member of rank k only k steps after the block that made it ready (at most "+
+		fmt.Sprint(finalizerMaxRank)+" steps), if nobody has by then. 0: every member at once")
 	cmd.Flags().Uint64Var(&memberID, "proof-member", 0, "the local authority's member ID for --participate, when the gas payer is separate")
 	cmd.Flags().StringVar(&expectedResult, "result", "", "restrict this call to the exact open result id")
 	cmd.Flags().StringArrayVar(&authArgs, "evm-authority", nil, "id=socket,credential,nodeInfo of the signing authority that holds a member's EVM key (repeat per member; instead of --evm-keys)")
@@ -689,7 +772,8 @@ func planPosParticipation(st posParticipationState) posParticipation {
 	case st.Position.Owner == (common.Address{}):
 		return posParticipation{Reason: fmt.Sprintf("custody knows no identity %d", st.ID)}
 	case st.Position.RetirementRequested:
-		return posParticipation{Reason: fmt.Sprintf("identity %d requested retirement: it leaves at the next election, and the remaining members publish the results", st.ID)}
+		return posParticipation{Reason: fmt.Sprintf("identity %d requested retirement (generation %d): it takes no part in the elections from the request on, "+
+			"and the remaining members publish the results", st.ID, st.Position.Generation)}
 	case st.Excluded:
 		return posParticipation{Reason: fmt.Sprintf("identity %d is excluded by evidence", st.ID)}
 	case st.Position.OpenLots == 0:
@@ -915,6 +999,8 @@ type posPublishRun struct {
 	Pops               func(ctx context.Context) ([]vrclient.PoPInput, error)
 	Sender             vrclient.Sender
 	DryRun             bool
+	// Order is --participate's finalizer order (#1323): nil lets this run finalize at once
+	Order *finalizerOrder
 }
 
 func publishReadyResult(ctx context.Context, w io.Writer, r posPublishRun) error {
@@ -924,6 +1010,15 @@ func publishReadyResult(ctx context.Context, w io.Writer, r posPublishRun) error
 	}
 	if len(r.Members) == 0 || int(view.PopCount) != len(r.Members) || view.Lost {
 		return nil
+	}
+	if view.Published {
+		// finalized in P85: done once VR holds the publication too (quietly: every member polls until the result activates)
+		if out, err := r.Chain.Output(ctx, r.Rid); err == nil && requireVRPublished(out) == nil {
+			return nil
+		}
+	}
+	if due, err := awaitFinalizerTurn(ctx, w, r.Order, r.Rid, r.Members); err != nil || !due {
+		return err
 	}
 	// No peer credentials are accepted. Publication is safe to repeat or race.
 	r.Pops = func(context.Context) ([]vrclient.PoPInput, error) {

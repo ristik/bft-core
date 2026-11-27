@@ -25,6 +25,13 @@ vr-joiner-exit (#1316) follows, on the same entity: `validator exit` (requestRet
 term when the preview plans it), keeps a log per attempt, and the first claim attempt after maturity succeeds. Asserted besides: every
 transaction of the joiner's owner after the retirement request goes to custody (anchorTerm, mature, claim), none to the election or VR.
 It waits out custody's time floor (3,600 s), so it is not in the default stage list.
+
+vr-finalizer (#1323) follows: two elections in which every member (and the joiner, if it is still one) runs `pos-publish --participate` in its
+own loop every few seconds, as each validator's own participation loop polls the certified block (lockstep rounds do not race: the last
+prover finalizes in its own run before the others poll again). The first runs with --finalizer-step 0s, the pre-#1323
+behaviour in which every member finalizes a ready result at once; the second with the default order, in which the lowest frozen identity
+finalizes and publishes and the others only after a delay that grows with their rank. It counts each election's finalizeCandidate and
+VR.publish transactions and their reverts, and asserts that the ordered election sent exactly one of each, neither reverted.
 """
 import json
 import os
@@ -70,6 +77,15 @@ def max_gap(times):
 
 
 JOINER_STATE = 'joined.json'   # late-joiner/: what vr-joiner-exit continues from
+# #1323: the UC seconds the joiner needs from its authority's start to its bond (restore, restart, funding, the four apply receipts), with
+# a margin. Its authority's shard epoch is fixed at the start, and an election reserved before the bond activates that epoch without it.
+JOIN_ROOM = 200
+
+
+def election_room(r, election):
+    """Seconds of UC time until the next election is due (ElectionPolicy.thresholds()' time floor), from the head block's timestamp."""
+    due = r.view(election, 'thresholds()(uint256,uint256)')[1]
+    return due - int(r.call('eth_getBlockByNumber', ['latest', False])['timestamp'], 16)
 
 
 def vr_late_joiner(r):
@@ -82,6 +98,16 @@ def vr_late_joiner(r):
     ev.mkdir(parents=True, exist_ok=True)
     epoch = rec.root_view(1)['activeEpoch']
     r.expect(epoch >= 3, 'the generation has passed at least two root handoffs (run after vr-pos-recover)', f'root epoch {epoch}')
+    # #1323: the joiner's authority starts at the current scope; it must be bonded (and so eligible, its delegation admitted first) before
+    # the next election is reserved. Too little room: let that election pass first (the first #1323 lane run started 47 s after an
+    # activation and met the next reservation in its bond's block).
+    room = election_room(r, rec.deployment['election'])
+    if room < JOIN_ROOM:
+        r.say(f'  the next election is due in {room} s (< {JOIN_ROOM} s): it passes first')
+        epoch = rec.participate_until(epoch)
+        advance_members(r, rec, epoch, ev)
+        room = election_room(r, rec.deployment['election'])
+    r.say(f'  the next election is due in {room} s')
 
     # 1. the pin: the newest certified record of root epoch 1 in an incumbent's archive, as old as the release's seed
     gen = r.gen
@@ -120,6 +146,10 @@ def vr_late_joiner(r):
     services[f'authority{j}']['entrypoint'] = vr_recover.authority_entrypoint(services[f'authority{j}']['entrypoint'], info['evm'], epoch,
         certified['shardEpoch'] + 1, '/authority/current-trust.json', r.manifest['genesis_hash'])
     services[f'shard{j}']['entrypoint'] = restore_entry(services[f'shard{j}']['entrypoint'], found.group(1))
+    # the root: a follower until the handoff names it, installed at the current epoch as the container starts it; it starts with the
+    # authority, so its catch-up overlaps the restore checks instead of the window before the bond (#1323)
+    if epoch > 1 and '--install-handoff-epoch' not in services[f'root{j}']['entrypoint']:
+        services[f'root{j}']['entrypoint'] = services[f'root{j}']['entrypoint'] + ['--install-handoff-epoch', str(epoch)]
     shipped = (gen / 'network' / 'ureth-flags.txt').read_text().split()
     services[f'ureth{j}']['entrypoint'] = release_ureth_entry(services[f'ureth{j}']['entrypoint'], shipped)
     (ev / 'ureth-entrypoint.json').write_text(json.dumps(services[f'ureth{j}']['entrypoint'], indent=1) + '\n')
@@ -146,6 +176,7 @@ def vr_late_joiner(r):
     r.wait(f'the joiner\'s execution client {j} answers', lambda: head(j) is not None, 180)
     rec.dc('up', '-d', '--no-deps', f'authority{j}')
     r.wait('the joiner\'s authority answers', lambda: rec.auth_status(j), 60)
+    rec.dc('up', '-d', '--no-deps', f'root{j}')
 
     def caught_up(floor):
         def probe():
@@ -229,32 +260,23 @@ def join_committee(r, rec, ev, j, val, auth, owner, owner_key, epoch, shard_epoc
     rec.dc('up', '-d', '--no-deps', f'root{j}')
     r.wait(f'the joiner\'s root {j} answers', lambda: rec.root_view(j), 300)
 
-    # `validator apply`, as the container's join. The authority signs the delegation possession only for the identity its PoS policy names,
-    # and VR assigns ids in order: the policy names the next id before the first run, so register, bond and delegation land together. A
-    # bonded identity without its delegation is election work: an election reserved in that gap names only the incumbents, and its
-    # handoff moves the shard epoch the joiner's authority was started for (the first lane run met it while the container's two-step
-    # apply was emulated with a minute between the steps).
+    # `validator apply`, as the container's join (#1323): one run. The authority signs the delegation possession only for the identity its PoS
+    # policy names; apply pins the policy (the release's election, no ids) to the identity VR assigns it, right before the possession, and
+    # admits the delegation before the first bond (the bond makes the identity eligible), so register, delegation and bond land together. A bonded identity without its delegation is election work: an election reserved in that
+    # gap names only the incumbents, and its handoff moves the shard epoch the joiner's authority was started for (the first #1321 lane run
+    # met it while the container's two-step apply was emulated with a minute between the steps).
     mounts = [(auth, '/home/authority')]
-
-    def provision(ident):
-        (auth / 'pos-policy.json').write_text(json.dumps({'network': json.loads((gen / 'network/vr-deployment.json').read_text())['networkWord'],
-            'chainId': r.manifest['chain_id'], 'election': rec.deployment['election'], 'ids': [ident]}) + '\n')
-        vr_recover.chown(auth)
-        rec.exec(f'authority{j}', 'ubft', 'signing-authority', 'pos-policy', *vr_recover.OPERATOR, '--policy', '/authority/pos-policy.json')
-    predicted = next_identity(r, rec.deployment['registry'])
-    provision(predicted)
-    first = rec.cli(live, home, 'validator', 'apply', '--wait', '5m', mounts=mounts, check=False)
-    r.keep_redacted(ev / 'apply-1.log', first.stdout + first.stderr)
-    text = first.stdout + first.stderr
+    (auth / 'pos-policy-template.json').write_text(json.dumps({'network': json.loads((gen / 'network/vr-deployment.json').read_text())['networkWord'],
+        'chainId': r.manifest['chain_id'], 'election': rec.deployment['election']}) + '\n')
+    vr_recover.chown(auth)
+    applied = rec.cli(live, home, 'validator', 'apply', '--wait', '5m', '--pin-pos-policy', '/home/authority/pos-policy-template.json',
+                      mounts=mounts, check=False)
+    r.keep_redacted(ev / 'apply-1.log', applied.stdout + applied.stderr)
+    text = applied.stdout + applied.stderr
     ident = json.loads((home / 'validator.json').read_text()).get('id')
-    r.expect(bool(ident), 'validator apply registered the joiner and recorded its identity id', f'{ident} (predicted {predicted}); ' +
-             r.scrub(text.strip()[-300:]))
-    if first.returncode or ident != predicted:
-        r.expect(ident != predicted and 'signing-pos-policy-refused' in text, 'the only refusal is the PoS policy of a mispredicted id',
-                 r.scrub(text.strip()[-300:]))
-        provision(ident)
-        again = rec.cli(live, home, 'validator', 'apply', '--wait', '5m', mounts=mounts)
-        r.keep_redacted(ev / 'apply-2.log', again.stdout + again.stderr)
+    r.expect(applied.returncode == 0 and bool(ident) and f'pinned the signing authority\'s P85 scope to identity {ident}' in text,
+             'one validator apply registered, bonded and delegated the joiner, pinning its authority to the identity it registered',
+             f'{ident}: ' + r.scrub(text.strip()[-300:]))
     r.say(f'  joiner {j}: identity {ident}, owner {owner}: registered, bonded and delegated')
 
     # the election that admits it: every frozen member's own proof (the joiner's from its authority), anyone's publication
@@ -273,21 +295,9 @@ def join_committee(r, rec, ev, j, val, auth, owner, owner_key, epoch, shard_epoc
 
     # the joiner's authority: enrolled under the activated configuration, advanced with the verified activation proofs (validator.py advance)
     rec.exec(f'authority{j}', 'ubft', 'signing-authority', 'complete-enrollment', *vr_recover.OPERATOR, '--shard-conf', '/authority/activated-shard.json')
-    with tempfile.TemporaryDirectory(prefix='advance-', dir=auth) as tmp:
-        work = Path(tmp)
-        work.chmod(0o755)
-        proofs = []
-        for e in range(2, target + 1):
-            f = work / f'activation-{e}.cbor'
-            f.write_bytes(rec.fetch(f'root{live}', 'q3', 'proof-envelope', '--root-rpc', rec.root_rpc, '--epoch', str(e)))
-            f.chmod(0o644)
-            proofs += ['--proof', f'/authority/{work.name}/{f.name}']
-        vr_recover.chown(work)
-        advanced = json.loads(rec.exec(f'authority{j}', 'ubft', 'signing-authority', 'advance-with-proof', *vr_recover.OPERATOR,
-                                       '--client-socket', '/authority/client.sock', '--out', '/authority/client.cred', *proofs).stdout)
+    advanced = advance_joiner(rec, j, auth, target, live)
     (ev / 'authority-advanced.json').write_text(json.dumps(advanced, indent=1) + '\n')
     r.expect(advanced['rootEpoch'] == target and not advanced['retired'], f'the joiner\'s authority serves root epoch {target}', str(advanced))
-    rec.dc('restart', f'shard{j}')   # the shard node loads the new session, as the container restarts it on the activation journal
     advance_members(r, rec, target, ev)
 
     # the joiner leads: its shard node submits a leader's certification request, and its builder is never refused (#1321)
@@ -317,6 +327,25 @@ def join_committee(r, rec, ev, j, val, auth, owner, owner_key, epoch, shard_epoc
     r.say(f'  joiner {j}: member from root epoch {target}, led {len(rounds)} round(s), largest block gap {gap} s')
 
 
+def advance_joiner(rec, j, auth, target, live):
+    """The joiner's authority advanced to root epoch `target` with the verified activation proofs (validator.py advance), and its shard node
+    restarted on the new session, as the container restarts it on the activation journal."""
+    with tempfile.TemporaryDirectory(prefix='advance-', dir=auth) as tmp:
+        work = Path(tmp)
+        work.chmod(0o755)
+        proofs = []
+        for e in range(2, target + 1):
+            f = work / f'activation-{e}.cbor'
+            f.write_bytes(rec.fetch(f'root{live}', 'q3', 'proof-envelope', '--root-rpc', rec.root_rpc, '--epoch', str(e)))
+            f.chmod(0o644)
+            proofs += ['--proof', f'/authority/{work.name}/{f.name}']
+        vr_recover.chown(work)
+        advanced = json.loads(rec.exec(f'authority{j}', 'ubft', 'signing-authority', 'advance-with-proof', *vr_recover.OPERATOR,
+                                       '--client-socket', '/authority/client.sock', '--out', '/authority/client.cred', *proofs).stdout)
+    rec.dc('restart', f'shard{j}')
+    return advanced
+
+
 def advance_members(r, rec, target, ev):
     """The genesis members' authorities to root epoch `target`: each follows it itself, or the operator's advance (vr_advance.py) moves the
     lagging ones and restarts their shard nodes. A rehearsal generation runs no participant containers that would do it."""
@@ -332,19 +361,6 @@ def advance_members(r, rec, target, ev):
         import vr_advance
         r.say(f'  advancing authorities {lagging} to root epoch {target}')
         vr_advance.advance(r.gen, target, ev / f'advance-{target}', only=lagging)
-
-
-def next_identity(r, registry):
-    """The id VR assigns to the next registration: identityCount + 1, read as the first id with no owner."""
-    k = 1
-    while True:
-        try:
-            owner = r.view_text(registry, 'ownerOf(uint64)(address)', str(k)).strip()
-        except Exception:   # an unknown id reverts
-            return k
-        if int(owner, 16) == 0:
-            return k
-        k += 1
 
 
 def tx_selectors(r):
@@ -372,7 +388,10 @@ def vr_joiner_exit(r):
     done = rec.cli(live, home, 'validator', 'exit', mounts=mounts)
     r.keep_redacted(exit_ev / 'exit.log', done.stdout + done.stderr)
     r.expect('retirement requested' in done.stdout, f'validator exit requested identity {ident}\'s retirement', r.scrub(done.stdout.strip()[-300:]))
-    exit_block = int(r.call('eth_blockNumber'), 16)
+    # the block of the requestRetirement receipt (`sent: <hash>, included in block N`): the owner's later transactions are scanned from it
+    found = re.findall(r'included in block (\d+)', done.stdout)
+    r.expect(bool(found), 'validator exit printed the block of its requestRetirement receipt', r.scrub(done.stdout.strip()[-300:]))
+    exit_block = int(found[-1])
     epoch = rec.root_view(live)['activeEpoch']
 
     # 2. the next election excludes it; the joiner's own participation sends nothing
@@ -426,7 +445,7 @@ def vr_joiner_exit(r):
     allowed = {sel['anchorTerm'], sel['mature'], sel['claim'], sel['requestRetirement']}
     head = int(r.call('eth_blockNumber'), 16)
     sent = []
-    for n in range(exit_block - 3, head + 1):
+    for n in range(exit_block, head + 1):
         for tx in r.call('eth_getBlockByNumber', [hex(n), True])['transactions']:
             if tx['from'].lower() == owner.lower():
                 rc = r.call('eth_getTransactionReceipt', [tx['hash']])
@@ -436,3 +455,64 @@ def vr_joiner_exit(r):
     r.expect(not election_txs, f'every transaction of the owner from the retirement request on is a custody step ({len(sent)}), none an election one',
              json.dumps(election_txs[:2]))
     r.expect(all(t['to'] == custody and t['status'] == '0x1' for t in sent), 'every one of them went to custody and succeeded', json.dumps(sent)[:300])
+
+
+def publication_summary(txs):
+    """Per result: how many finalizeCandidate and VR.publish transactions were sent, how many reverted, and their gas."""
+    out = {}
+    for t in txs:
+        k = out.setdefault(t['result'], {'finalizeCandidate': 0, 'finalizeReverted': 0, 'VR.publish': 0, 'publishReverted': 0, 'gas': 0, 'wastedGas': 0})
+        k[t['kind']] += 1
+        k['gas'] += t['gasUsed']
+        if t['status'] != '0x1':
+            k['finalizeReverted' if t['kind'] == 'finalizeCandidate' else 'publishReverted'] += 1
+    for rid, k in out.items():   # every transaction but the first successful one of its kind does nothing useful
+        ok = [t for t in txs if t['result'] == rid and t['status'] == '0x1']
+        firsts = {}
+        for t in ok:
+            firsts.setdefault(t['kind'], t)
+        k['wastedGas'] = sum(t['gasUsed'] for t in txs if t['result'] == rid and firsts.get(t['kind']) is not t)
+    return out
+
+
+def vr_finalizer(r):
+    """#1323: the finalizeCandidate and VR.publish race without the finalizer order, and the single finalizer with it."""
+    rec = vr_recover.Recovery(r, 1)
+    rec.since = vr_recover.utc()
+    ev = r.evidence / 'finalizer'
+    ev.mkdir(parents=True, exist_ok=True)
+    extra, pods = {}, {}
+    joined = r.evidence / 'late-joiner' / JOINER_STATE
+    if joined.exists():
+        state = json.loads(joined.read_text())
+        extra = {state['index']: (state['identity'], Path(state['home']), Path(state['auth']))}
+        pods = {state['index']: 1}
+    report = {}
+    # 'after' names the default step (180 s since the second #1323 lane run) explicitly, so a run against an image built before it measures the
+    # same order
+    for name, step in (('before', '0s'), ('after', '180s')):
+        rec.finalizer_step = step
+        epoch = rec.root_view(1)['activeEpoch']
+        first = int(r.call('eth_blockNumber'), 16)
+        outputs = {}
+        target = rec.participate_polling(epoch, rec.participants(extra=extra), pods=pods, outputs=outputs)
+        last = int(r.call('eth_blockNumber'), 16)
+        txs = rec.publication_txs(first, last)
+        summary = publication_summary(txs)
+        report[name] = {'finalizerStep': step or 'default', 'rootEpoch': target, 'blocks': [first, last], 'results': summary, 'txs': txs}
+        (ev / f'participation-{name}.json').write_text(json.dumps(outputs, indent=1) + '\n')
+        totals = {k: sum(v[k] for v in summary.values()) for k in ('finalizeCandidate', 'finalizeReverted', 'VR.publish', 'publishReverted', 'wastedGas')}
+        report[name]['totals'] = totals
+        r.say(f'  {name} (--finalizer-step {step or "default"}): root epoch {target}: {totals}')
+        advance_members(r, rec, target, ev)
+        for j, (ident, home, auth) in extra.items():
+            if rec.status(1, home, auth).get('member'):
+                advanced = advance_joiner(rec, j, auth, target, 1)
+                r.say(f'  joiner {j}: authority at root epoch {advanced["rootEpoch"]} (retired: {advanced["retired"]})')
+    (ev / 'finalizer.json').write_text(json.dumps(report, indent=1) + '\n')
+    after = report['after']['totals']
+    published = [k for k in report['after']['results'].values() if k['VR.publish']]
+    r.expect(len(published) == 1 and after['finalizeCandidate'] == 1 and after['VR.publish'] == 1,
+             'with the finalizer order one member sent the election\'s finalizeCandidate and VR.publish, once each', json.dumps(after))
+    r.expect(after['finalizeReverted'] == 0 and after['publishReverted'] == 0, 'none of them reverted',
+             f'before: {json.dumps(report["before"]["totals"])}; after: {json.dumps(after)}')
