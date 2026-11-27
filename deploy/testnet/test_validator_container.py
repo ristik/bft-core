@@ -710,6 +710,22 @@ class JoinInOneRun(unittest.TestCase):
         self.assertEqual(json.loads((self.home/'join.json').read_text()), {'phase': 'electing', 'id': 5})
         self.assertFalse(any(c[:2] == ('signing-authority', 'pos-policy') for c in calls), 'apply pins the policy itself')
 
+    def test_a_lagging_joiner_follower_installs_one_epoch_at_a_time(self):
+        (self.home/'join.json').write_text(json.dumps({'phase': 'electing', 'id': 5}))
+        with patch.object(validator, 'root_status') as root, patch.object(validator, 'registry_root_epoch') as registry:
+            root.return_value = {'activeEpoch': 3, 'follower': True}
+            registry.return_value = 5
+            self.assertEqual(validator.joiner_root_catchup_epoch(), 4)
+            registry.return_value = 3
+            self.assertIsNone(validator.joiner_root_catchup_epoch())
+            registry.reset_mock()
+            root.return_value = {'activeEpoch': 3, 'follower': False}
+            self.assertIsNone(validator.joiner_root_catchup_epoch())
+            registry.assert_not_called()
+            root.side_effect = [{'activeEpoch': 3, 'follower': True}, {'activeEpoch': 4, 'follower': False}]
+            registry.return_value = 4
+            self.assertIsNone(validator.joiner_root_catchup_epoch())
+
     def test_join_refreshes_the_same_authority_after_a_missed_activation(self):
         path = self.home/'join.json'
         path.write_text(json.dumps({'phase': 'electing', 'id': 5}))

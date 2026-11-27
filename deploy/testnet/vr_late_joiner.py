@@ -125,33 +125,8 @@ def vr_late_joiner(r):
     services[f'authority{j}']['entrypoint'] = vr_recover.authority_entrypoint(services[f'authority{j}']['entrypoint'], info['evm'], epoch,
         certified['shardEpoch'] + 1, '/authority/current-trust.json', r.manifest['genesis_hash']) + ['--pending-join-scope']
     services[f'shard{j}']['entrypoint'] = restore_entry(services[f'shard{j}']['entrypoint'], found.group(1))
-    # the root: a follower until the handoff names it, installed at the current epoch as the container starts it; it starts with the
-    # authority, so its catch-up overlaps the restore checks instead of the window before the bond (#1323)
-    if epoch > 1 and '--install-handoff-epoch' not in services[f'root{j}']['entrypoint']:
-        services[f'root{j}']['entrypoint'] = services[f'root{j}']['entrypoint'] + ['--install-handoff-epoch', str(epoch)]
-    shipped = (gen / 'network' / 'ureth-flags.txt').read_text().split()
-    services[f'ureth{j}']['entrypoint'] = release_ureth_entry(services[f'ureth{j}']['entrypoint'], shipped)
-    (ev / 'ureth-entrypoint.json').write_text(json.dumps(services[f'ureth{j}']['entrypoint'], indent=1) + '\n')
-    r.expect(any(a.startswith('--builder.gaslimit=') for a in shipped), 'the release\'s ureth vector names the builder\'s gas limit (#1321)',
-             ' '.join(a for a in shipped if a.startswith(('--builder', '--unicity.max-gas'))))
-    override_path.write_text(json.dumps(override, indent=1, sort_keys=True) + '\n')
-    vr_recover.chown(val)
-    r.rescan()
-    (ev / 'shard-entrypoint.json').write_text(json.dumps(services[f'shard{j}']['entrypoint'], indent=1) + '\n')
-
-    rpc_image = rec.compose['services']['rpc']['image']
-    transport = handoff_ops.DockerTransport(gen)   # with the joiner override written: its pod is a service of every call
-
-    def head(i):
-        """eth_blockNumber of entity i's execution client, which serves its RPC on its pod's loopback only: asked from inside that pod."""
-        code = ('import json,urllib.request as u;r=u.Request("http://127.0.0.1:8545",json.dumps({"jsonrpc":"2.0","id":1,"method":"eth_blockNumber",'
-                '"params":[]}).encode(),{"Content-Type":"application/json"});print(int(json.load(u.urlopen(r,timeout=10))["result"],16))')
-        done = subprocess.run(['docker', 'run', '--rm', '--network', f'container:{transport.holder(i)}', '--read-only', '--cap-drop', 'ALL',
-                               '--security-opt', 'no-new-privileges', '--entrypoint', 'python3', rpc_image, '-c', code],
-                              text=True, capture_output=True, timeout=60)
-        return int(done.stdout.strip()) if done.returncode == 0 and done.stdout.strip() else None
-
-    rec.dc('up', '-d', '--no-deps', f'pod{j}', f'ureth{j}')
+    # The joiner's root serves its verified local view while the election runs.
+    install_joiner_root(rec, j, override_path, epoch)
     r.wait(f'the joiner\'s execution client {j} answers', lambda: head(j) is not None, 180)
     rec.dc('up', '-d', '--no-deps', f'authority{j}')
     r.wait('the joiner\'s authority answers', lambda: rec.auth_status(j), 60)
@@ -260,6 +235,9 @@ def join_committee(r, rec, ev, j, val, auth, owner, owner_key, epoch, shard_epoc
              f'the result reserved before bond activated shard epoch {shard_epoch} without the joiner', missed_result)
     (ev / 'missed-shard-conf.json').write_text(json.dumps(missed_conf, indent=1) + '\n')
     before = rec.auth_status(j)
+    if rec.root_view(j)['activeEpoch'] < missed:
+        r.say(f'  joiner {j}: its root is still a follower; installing verified root epoch {missed}')
+        install_joiner_root(rec, j, override_path, missed)
     r.wait(f"the joiner's root follows missed root epoch {missed}",
            lambda: rec.root_view(j)['activeEpoch'] >= missed, 300)
     refreshed = advance_joiner(rec, j, auth, missed, j, scope_only=True)
@@ -319,6 +297,19 @@ def join_committee(r, rec, ev, j, val, auth, owner, owner_key, epoch, shard_epoc
              'ackBlock': ack_block, 'ledRounds': len(rounds), 'largestGap': gap}
     (ev / JOINER_STATE).write_text(json.dumps(state, indent=1) + '\n')
     r.say(f'  joiner {j}: member from root epoch {target}, led {len(rounds)} round(s), largest block gap {gap} s')
+
+
+def install_joiner_root(rec, j, override_path, epoch):
+    """As the validator container does, keep the follower's DB and install the observed epoch from its peers."""
+    override = json.loads(override_path.read_text())
+    service = f'root{j}'
+    entry = override['services'][service]['entrypoint']
+    if '--install-handoff-epoch' in entry:
+        entry[entry.index('--install-handoff-epoch') + 1] = str(epoch)
+    elif epoch > 1:
+        entry += ['--install-handoff-epoch', str(epoch)]
+    override_path.write_text(json.dumps(override, indent=1, sort_keys=True) + '\n')
+    rec.dc('up', '-d', '--no-deps', service)
 
 
 def advance_joiner(rec, j, auth, target, live, *, scope_only=False):

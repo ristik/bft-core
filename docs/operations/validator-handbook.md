@@ -450,7 +450,7 @@ On PoS, apply registers the keys in VR and P85 custody, admits the delegation an
 
 After retirement, a new bond opens the next custody generation before its delegation can be admitted. An election reserved between those two receipts can pass over the identity.
 
-If the local root installs an activation that excludes your pending authority, refresh through that root epoch before the next handoff asks for possession. The authority verifies each bundle from its pinned genesis, adopts the new root trust and moves the pending shard target past the excluded configuration. Get bundles from the same loopback root used for shard configuration. Repeat when a later activation also excludes this node and key. When an activation names your key, continue to first enrollment below.
+For an activation that excludes your pending authority, first make sure your local root has [installed the missed epoch](#bring-a-lagging-root-to-an-activated-epoch). Refresh through that root epoch before the next handoff asks for possession. The authority verifies each bundle from its pinned genesis, adopts the new root trust and moves the pending shard target past the excluded configuration. Get bundles from the same loopback root used for shard configuration. Repeat when a later activation also excludes this node and key. When an activation names your key, continue to first enrollment below.
 
 ```bash
 advance_authority_from_local_root() (

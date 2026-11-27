@@ -396,6 +396,28 @@ def root_status():
     return r
 
 
+def registry_root_epoch():
+    result = ubft('validator', 'status', '--rpc', RPC, '--sample', 0, '--json', output=True, check=False, timeout=20)
+    return json.loads(result.stdout).get('rootEpoch') if result.stdout else None
+
+
+def joiner_root_catchup_epoch():
+    progress = HOME/'join.json'
+    if not progress.exists() or read(progress)['phase'] not in ('applying', 'electing', 'activation') or recovering():
+        return None
+    view = root_status()
+    if not view or not view.get('follower', False):
+        return None
+    epoch = view['activeEpoch']
+    observed = registry_root_epoch()
+    if not observed or observed <= epoch:
+        return None
+    # The root could have switched while the registry RPC was in flight.
+    view = root_status()
+    if view and view.get('follower', False) and view['activeEpoch'] == epoch:
+        return epoch + 1
+
+
 def active_member_epoch(status, previous):
     if status and not status.get('follower', False) and status['activeEpoch'] > previous:
         return status['activeEpoch']
@@ -556,14 +578,8 @@ def node(a, pins):
         if not (d/'fingerprint').exists():
             epoch = n['rootEpoch']
             if epoch is None:
-                # A chain observation selects what the local root must
-                # verify from genesis. It cannot authorize the authority.
-                def hint():
-                    result = ubft('validator', 'status', '--rpc', RPC, '--json', output=True, check=False)
-                    if result.stdout:
-                        return json.loads(result.stdout).get('rootEpoch')
-                    return None
-                epoch = wait_for('the current registry epoch', hint, limit=60)
+                # The registry supplies a hint. The root verifies the activation from its pinned history.
+                epoch = wait_for('the current registry epoch', registry_root_epoch, limit=60)
             install = ['--install-handoff-epoch', epoch] if epoch > 1 else []
             start('root', [*root_args, *install])
             scope = wait_for('the locally verified initial root and shard scope',
@@ -579,7 +595,8 @@ def node(a, pins):
                 if not (d/'lifetime').exists():
                     raise
                 print(f'validator: the authority in {d} does not answer. {AUTHORITY_LOST}', flush=True)
-        start('root', [*root_args, '--vr-evm-authority-socket', d/'pop.sock', '--vr-evm-authority-credential', d/'pop.cred'])
+        root_args += ['--vr-evm-authority-socket', d/'pop.sock', '--vr-evm-authority-credential', d/'pop.cred']
+        start('root', root_args)
         active = active_file(k)
 
         def shard():
@@ -587,6 +604,7 @@ def node(a, pins):
 
         shard()
         enrolled = active.read_bytes() if active.exists() else None
+        next_root_check = 0.0
 
         class Health(BaseHTTPRequestHandler):
             def do_GET(self):
@@ -613,6 +631,18 @@ def node(a, pins):
                 for name, proc in procs.items():
                     if proc.poll() is not None:
                         raise RuntimeError(f'{name} exited with status {proc.returncode}')
+                if enrolled is None and time.monotonic() >= next_root_check:
+                    next_root_check = time.monotonic() + 30
+                    try:
+                        target = joiner_root_catchup_epoch()
+                    except (OSError, ValueError, subprocess.SubprocessError):
+                        target = None
+                    if target is not None and not active.exists():
+                        # A follower excluded from the successor may never see that switch in process.
+                        # Keep its database and request exactly one verified installation from peers.
+                        print(f'validator: catching up the follower root to epoch {target}', flush=True)
+                        stop('root')
+                        start('root', [*root_args, '--install-handoff-epoch', target])
                 health.handle_request()
     finally:
         if 'halted' in locals():
