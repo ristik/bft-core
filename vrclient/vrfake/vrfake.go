@@ -99,9 +99,9 @@ type Chain struct {
 	atFinalized          bool
 	// AfterSend, when set, runs under Mu after each accepted transaction with its calldata: a concurrent change landing in the same block.
 	AfterSend func(c *Chain, data []byte)
-	// AfterCall, when set, runs under Mu after each eth_call with its target and calldata (MoveHeadLocked in it lands a block between two
+	// AfterCall, when set, runs under Mu after each eth_call with its target, calldata and pinned block hash (MoveHeadLocked in it lands a block between two
 	// reads of one caller).
-	AfterCall func(c *Chain, to ethcommon.Address, data []byte)
+	AfterCall func(c *Chain, to ethcommon.Address, data []byte, blockHash ethcommon.Hash)
 	// history keeps the identities and the P85 state of the blocks MoveHeadLocked left behind, by block hash: an eth_call that names
 	// one (EIP-1898) reads that block's state, as a node does.
 	history map[ethcommon.Hash]*blockState
@@ -347,7 +347,7 @@ func (c *Chain) dispatch(req request) (any, *rpcError) {
 		}
 		c.atFinalized = false
 		if c.AfterCall != nil && req.Method == "eth_call" {
-			c.AfterCall(c, a.To, a.Data)
+			c.AfterCall(c, a.To, a.Data, blockHash)
 		}
 		if rerr != nil {
 			return nil, rerr

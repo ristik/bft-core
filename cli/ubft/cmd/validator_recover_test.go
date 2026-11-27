@@ -548,7 +548,7 @@ func TestValidatorRecoverReadsOneBlockPerSnapshot(t *testing.T) {
 	delegationCalls := 0
 	f.chain.With(func(c *vrfake.Chain) {
 		c.Pos.Delegations[[2]uint64{f.id, 1}] = &vrfake.Delegated{Binding: delegationOf(f.want), NextNonce: 2}
-		c.AfterCall = func(c *vrfake.Chain, to ethcommon.Address, data []byte) {
+		c.AfterCall = func(c *vrfake.Chain, to ethcommon.Address, data []byte, _ ethcommon.Hash) {
 			if to != c.Election || !bytes.Equal(data[:4], vrclient.PosElectionABI.Methods["delegation"].ID[:4]) {
 				return
 			}
@@ -573,16 +573,38 @@ func TestValidatorRecoverReadsOneBlockPerSnapshot(t *testing.T) {
 
 func TestValidatorRecoverUsesCanonicalSnapshots(t *testing.T) {
 	f := newRecoverFixture(t)
+	var snapshotHash ethcommon.Hash
+	snapshots := 0
+	inSnapshot := false
 	f.chain.With(func(c *vrfake.Chain) {
 		c.FinalizedDelegations = map[[2]uint64]*vrfake.Delegated{
 			{f.id, 1}: {Binding: delegationOf(f.old), NextNonce: 1},
 		}
+		c.Pos.OpenResult = [32]byte{1} // Include the optional frozen-member read.
+		c.AfterCall = func(c *vrfake.Chain, to ethcommon.Address, data []byte, hash ethcommon.Hash) {
+			if to == c.Custody && bytes.HasPrefix(data, vrclient.CustodyABI.Methods["positions"].ID) {
+				snapshots++
+				inSnapshot, snapshotHash = true, hash
+			}
+			if !inSnapshot {
+				return
+			}
+			// The fake already rejects a hash selector without requireCanonical.
+			// Check tag-only reads as well as a different hash within this snapshot.
+			if hash == (ethcommon.Hash{}) || hash != snapshotHash {
+				t.Errorf("snapshot %d call %x at %s, want canonical hash %s", snapshots, data[:4], hash, snapshotHash)
+			}
+			if to == c.Election && bytes.HasPrefix(data, vrclient.PosPublishABI.Methods["frozenMembers"].ID) {
+				inSnapshot = false
+			}
+		}
 	})
-	// The fake rejects a hash selector without requireCanonical on any read.
-	// Successful recovery exercises the finalized preflight and every latest
-	// snapshot through the confirmation of both writes.
 	out, err := f.recover(t)
 	require.NoError(t, err, out)
+	f.chain.With(func(*vrfake.Chain) {
+		require.Equal(t, 6, snapshots, "finalized preflight and five latest snapshots")
+		require.False(t, inSnapshot)
+	})
 	require.Equal(t, 2, f.chain.Sends(), out)
 	require.Contains(t, out, "equal to VR's binding", out)
 }
