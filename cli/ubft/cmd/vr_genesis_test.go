@@ -52,14 +52,14 @@ func TestTheVRGenerationIsConsistent(t *testing.T) {
 	require.NoError(t, vrStrictJSON(vrTestdata(t, "vr-deployment.json"), &want))
 	require.Equal(t, want, dep)
 	// the pins this generation carries (VT-14 report)
-	require.Equal(t, "0x19094777cb74c783f82392439d1f6c79fe62b6b57c2915790f00a9e16ee490e9", dep.RegistryCodeHash)
+	require.Equal(t, "0x3abfd37f4f7c1f3e7af8b0a449a4c0b509ec49a1bfdfb7e669855f9c557c7b39", dep.RegistryCodeHash)
 	v := vrFixtureInput(t)
 	require.EqualValues(t, 32, v.profile.HRecords)
-	require.EqualValues(t, 2_743_763, v.profile.HookRecordGas)
-	require.EqualValues(t, 9_976_804, v.profile.ElectGas)
+	require.EqualValues(t, 2_743_866, v.profile.HookRecordGas)
+	require.EqualValues(t, 9_976_859, v.profile.ElectGas)
 	env, err := v.profile.HookEnvelopeGas()
 	require.NoError(t, err)
-	require.EqualValues(t, 97_927_220, env)
+	require.EqualValues(t, 97_930_571, env)
 }
 
 // The plan is a pure function of the trust base, the shard configuration, the bindings, the profile and the governance and fee choices:
@@ -321,12 +321,12 @@ func TestTheVRGenerationRefusesAnyMismatch(t *testing.T) {
 		"identity payee":  func(v *vrVerifyInput) { v.identities[1].OperatorPayee = common.HexToAddress("0x01").Bytes() },
 		"identity order":  func(v *vrVerifyInput) { v.identities[0], v.identities[1] = v.identities[1], v.identities[0] },
 		"ureth lacks a hook": func(v *vrVerifyInput) {
-			v.urethFlags = strings.ReplaceAll(v.urethFlags, "--unicity.elect-gas=9976804", "")
+			v.urethFlags = strings.ReplaceAll(v.urethFlags, "--unicity.elect-gas=9976859", "")
 		},
 		"ureth hook value": func(v *vrVerifyInput) {
-			v.urethFlags = replaceFlag(v.urethFlags, "--unicity.elect-gas=", "--unicity.elect-gas=9976805")
+			v.urethFlags = replaceFlag(v.urethFlags, "--unicity.elect-gas=", "--unicity.elect-gas=9976860")
 		},
-		"ureth repeated flag":     func(v *vrVerifyInput) { v.urethFlags += " --unicity.elect-gas=9976804" },
+		"ureth repeated flag":     func(v *vrVerifyInput) { v.urethFlags += " --unicity.elect-gas=9976859" },
 		"ureth denominator split": func(v *vrVerifyInput) { v.urethFlags += " --unicity.base-fee-change-denominator 9" },
 		"ureth elasticity":        func(v *vrVerifyInput) { v.urethFlags += " --unicity.elasticity=3" },
 		"no ureth flags":          func(v *vrVerifyInput) { v.urethFlags = "" },

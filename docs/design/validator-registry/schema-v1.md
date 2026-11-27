@@ -620,6 +620,8 @@ MissCertificate = [stakingID uint, [[nodeID text, sig bstr65]] strictly ascendin
   distinct members of the entire predecessor committee with weight ≥ `Threshold(total)`, the ordinary commit quorum. Each stands alone:
   roots may disagree about other members without blocking expiry. A certificate that fails refuses the control; ordinary expiry still
   closes without certificates.
+- **Known limits.** Voters do not require certificates: a faulty leader can order the expiry without them, which costs one more lifetime.
+  Only the PoP is attested: an incumbent that proves but withholds its readiness still makes the output expire uncertified.
 - They attest quorum non-receipt by a deadline. Network delay can still certify an honest member, so the only consequence is a fixed,
   non-escalating election park. The leader bitmap, repeated expiries and a vote of the remaining incumbents carry no such authority.
 

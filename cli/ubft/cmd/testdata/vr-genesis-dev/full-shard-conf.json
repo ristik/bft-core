@@ -13,32 +13,32 @@
     "chain_id": "3",
     "continuity_max_distance": "1/2",
     "proof_type": "exec",
-    "seal_registry_genesis": "d98b748efed3729b090899eba4d4d02852f9285e93ed04e9d9f22b46b138b0bb",
+    "seal_registry_genesis": "023d46c467435a449ead4c39eea84061fa6f7535ad19e35ab0dde172a75446a5",
     "validator_coupling": "true",
     "validator_registry": "0xff00000000000000000000000000000000000003",
-    "validator_registry_code_hash": "0x19094777cb74c783f82392439d1f6c79fe62b6b57c2915790f00a9e16ee490e9"
+    "validator_registry_code_hash": "0x3abfd37f4f7c1f3e7af8b0a449a4c0b509ec49a1bfdfb7e669855f9c557c7b39"
   },
   "epoch": 0,
   "epochStart": 1,
   "validators": [
     {
-      "nodeId": "16Uiu2HAmQVbLKC4xkSSgg2BbS9tPkEbjYmERVEVDHxZw1WoH9kMQ",
-      "sigKey": "0x038317fd490f496e757173d4caca3a5f89ec6d9155b8b69667ad49c9a46f496809",
+      "nodeId": "16Uiu2HAmBdQXxiXZja8jUZDjBLCZNckgcsFvFB2NP64fF6PkxS32",
+      "sigKey": "0x02ca3917879ded5aebd351213d80855e541e2e016a1a4a609e6eb4f94af3430546",
       "stake": 1
     },
     {
-      "nodeId": "16Uiu2HAmJWB59TZM9DMJebKpFpk3RB7ZXKFzo1zS5HDmmFvykNpr",
-      "sigKey": "0x02df8bda82fb73ca08aa89d416ae33b9077ecbdcc26fe7bd09b446896c4033d778",
+      "nodeId": "16Uiu2HAm26T9S4pJ3uvd6Y2rQvdRqmudCwFEoXqqwSPZwvQQDEAT",
+      "sigKey": "0x03a7f0a012801a0012a87e15c4ca9948ecaa1fa80d6a47b47c0aa33d01b9e53cd2",
       "stake": 1
     },
     {
-      "nodeId": "16Uiu2HAmT6YbqHaUeHpSLGnDFs58V5SAkV6EKQnPYvRJGjLZbMwF",
-      "sigKey": "0x0261a68244860b93334a1a03c398a0fb40cd1d2f453a23ff3be49e260ef23a8b61",
+      "nodeId": "16Uiu2HAmLkfBGrHUcVDdR7YwN1bRZ9tmURjRBHMzpwxBcaL9mH4C",
+      "sigKey": "0x03c66c9e24ace06e48ddf0ee8459e0a1eeb4eb386143c26fbd59d9de626116b7b6",
       "stake": 1
     },
     {
-      "nodeId": "16Uiu2HAm6sRxHEzWHib6uopHQDvak3Vm2qgyMuDQUdjBeo9BEDCD",
-      "sigKey": "0x02916fa80a635638af22368680100b3d21c99d5b2028f274669720c343685f3e12",
+      "nodeId": "16Uiu2HAmS3aDLKSDvNvCjEb4FbHMg866yV98ShFDSsmpAkcTWfwZ",
+      "sigKey": "0x0341aa6d47a5a4b015e389a1b39686ebd5dd46ea856deb85ee561d161b92247289",
       "stake": 1
     }
   ]

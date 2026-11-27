@@ -2,49 +2,49 @@
   {
     "stakingId": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE=",
     "generation": 1,
-    "rootNodeId": "16Uiu2HAm1fcLChkojjKjUe84AmXdYYaQFLw1e2U2cZeoCYArbXDU",
-    "rootKey": "A9uP9lrbFn33xqFru57rwuwv0YfLFWnajmX//ppNGcgx",
-    "evmNodeId": "16Uiu2HAmLXEgwLc3qorVVgxnZ7DLXDjMc6Jing9UosDEgQasAPxh",
-    "evmKey": "AvsCIH44w/zlHppRAk5BC5aY+1L0juZPwiBk3YUgKApf",
+    "rootNodeId": "16Uiu2HAkw9UhK6USgHfQVQ9jwjDg5k72DXdKoGnrrkdgrVTtZUoJ",
+    "rootKey": "AvhyNwsDpI6SJM5xXAVNvH05sg7wMzSXPNsa01Os5ukk",
+    "evmNodeId": "16Uiu2HAmGkUyjMvir24L41iVXCWHNFgDko4bMrzcautUyUuzoU5P",
+    "evmKey": "AiJOipJkCDzVEsVZpeabxoKMrmLtYP3UMedO8+g5whoR",
     "weight": 1,
     "rawWeight": 1,
-    "operatorPayee": "O8+E3cIl10iI0bLsu0c2+qE9YCU=",
-    "exposureDigest": "2/qEF0FCd3KSC6MA4vPIRvL7KLzWknN2JscTBuDR20U="
+    "operatorPayee": "zb6Jh5g2EdbN5UrKusLK1JDMMZI=",
+    "exposureDigest": "w0RfRNz//3S60Jic3StO0Xj6LiHEfqhjWbtIFYvnvfU="
   },
   {
     "stakingId": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAI=",
     "generation": 1,
-    "rootNodeId": "16Uiu2HAmAEZfaqNKyN3oDEm3A3kbApELdi6dwHcpPXcyPDbXNkwP",
-    "rootKey": "A8d7h6KI3KuyAxUhxZHW6syI7lzxXrDy4KIAUIjs0Ji6",
-    "evmNodeId": "16Uiu2HAmHvTtpc7iXs9QjNm9ky7HZ7Ua6XxVRoUfa96zEHf5os1r",
-    "evmKey": "Azujfz9HaA68w1szTMyxhKCLouPFSjvOy6iRSxm9iBhs",
+    "rootNodeId": "16Uiu2HAm15V8iVMcdX4yjGy1HwPq3AfaJCYeZwDgU6KvEy8cacm5",
+    "rootKey": "AqtGGMerS6C6LykbXxTBQr3iP22NDG1yVcOR4MzN5yh5",
+    "evmNodeId": "16Uiu2HAm9KRNmFNBD74a9NuHEynZynEt3qRSJvr1fNRUMX1ammSD",
+    "evmKey": "Ano5CJsb0ZQvYSHSsOhPqjD1pq0va7ilxQ4gemCZHeuL",
     "weight": 1,
     "rawWeight": 1,
-    "operatorPayee": "kLMDWdLRYZd4/SI0xSQ5GUbVtjo=",
-    "exposureDigest": "w9ttdACSyW8L32gjIoZ03zWBkmoN9WYhds7P5d9Vgv4="
+    "operatorPayee": "59KKPjvkyim+51yGMFRuwKweYeQ=",
+    "exposureDigest": "ZIs4j0MYz4ueatHOYPKtgXfQByuTHERpWpI4Tm1neRs="
   },
   {
     "stakingId": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM=",
     "generation": 1,
-    "rootNodeId": "16Uiu2HAmJT6rGJhKd9XmkL46zsQsGoyyg2k2RHZWZJY2SB5BURWn",
-    "rootKey": "AxY9c+Xb9ix6b2fjRYymtRc3hi+TyqlGSstAGfraFnQO",
-    "evmNodeId": "16Uiu2HAm4jkq6UryXWLhyvMdwB2RbUcrRhi4PtMqVPxnVRqvsWDJ",
-    "evmKey": "A7n43JUjg/zMJeu0joH2IMpdIdGisOt1GOh0Np+qO3q2",
+    "rootNodeId": "16Uiu2HAmCwvWNT2R9obMcdZ1aJHHU2Ti6ch4rapHwPGPxCoGcyzC",
+    "rootKey": "Aq8C2aCp7tF3dvvzIrqX6pDjNdk6Y6yLQqQLLDIL2kCp",
+    "evmNodeId": "16Uiu2HAmLnYVBtTKdwK6ymeRuFyKSbBLCEHBnGKHW9CP41RzQRyp",
+    "evmKey": "Ah9vNoH1EvQ5HgFI9q7RYo2F6Lk35pSKePAF0nVHhGMT",
     "weight": 1,
     "rawWeight": 1,
-    "operatorPayee": "3xRLZLT8WKs4REje4R/goRAOdbI=",
-    "exposureDigest": "FSxu65JiErgw8nd31BCKmY29EcOVDymE9x5snI3YYT8="
+    "operatorPayee": "WYNdu6c9c5J8jBZrk03VNWFJapg=",
+    "exposureDigest": "ofPpGp3t/Kr53M6MlBEaKnqSVwrKyIQ+ZC6bUOwUS0k="
   },
   {
     "stakingId": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQ=",
     "generation": 1,
-    "rootNodeId": "16Uiu2HAmShoRjDXzoUvsCwYiBkgX5QbJRTtc5rQPtvktTbDTf3Th",
-    "rootKey": "A4eyy/ZUAif7PHDyF8hTR8nH9fmxM5+L62mBBg+Wgjia",
-    "evmNodeId": "16Uiu2HAm5oJj5CfPiZnECnrULfuUZeca75ZKAZQYUYJ65AwEBe6a",
-    "evmKey": "A4r3C6iDEikFV0fAs2JZEyBdgLNC9XnXRgSlw4mOp8gc",
+    "rootNodeId": "16Uiu2HAmMboePDuGiCj6LwvgQfZtrV2Rm1AC33e2vU2qrbCCUgec",
+    "rootKey": "A170QYxJDj+xHWMq8DJgQVHx+ZgwnCHoJ5B9Z5S74tTE",
+    "evmNodeId": "16Uiu2HAm3UWUCXu34Y7W5yEwBFSWxNLz6D8E7jpAfN4xgGqRT65i",
+    "evmKey": "AtfghHQU17cPKlD6i/rc7yCT4iHiax/cYnaPUqV42B8W",
     "weight": 1,
     "rawWeight": 1,
-    "operatorPayee": "0eO3yldphpUl6mVBVM+Wbe18q4I=",
-    "exposureDigest": "ma0hRG5k5PmUl7CNqNylTNaYk20y9KjM8+kNHxQY7OU="
+    "operatorPayee": "tqyrtPxj+DVKhxziRDxqzd7WJA0=",
+    "exposureDigest": "y+nILW8oZ0/louIxJxPYkhwnXclJUMU0HY++g2fSzUQ="
   }
 ]

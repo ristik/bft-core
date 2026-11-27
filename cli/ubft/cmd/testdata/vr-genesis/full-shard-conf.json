@@ -13,32 +13,32 @@
     "chain_id": "3",
     "continuity_max_distance": "1/2",
     "proof_type": "exec",
-    "seal_registry_genesis": "6e0ea0ef60ffbc57c34b4e09e7550aee1ab3cde213c42f2a847087bbe0a5d1e6",
+    "seal_registry_genesis": "4844296affabb043597fb04e367e66195183724db58972ead19fe6f509cabc1e",
     "validator_coupling": "true",
     "validator_registry": "0xff00000000000000000000000000000000000003",
-    "validator_registry_code_hash": "0x19094777cb74c783f82392439d1f6c79fe62b6b57c2915790f00a9e16ee490e9"
+    "validator_registry_code_hash": "0x3abfd37f4f7c1f3e7af8b0a449a4c0b509ec49a1bfdfb7e669855f9c557c7b39"
   },
   "epoch": 0,
   "epochStart": 1,
   "validators": [
     {
-      "nodeId": "16Uiu2HAm5oJj5CfPiZnECnrULfuUZeca75ZKAZQYUYJ65AwEBe6a",
-      "sigKey": "0x038af70ba8831229055747c0b3625913205d80b342f579d74604a5c3898ea7c81c",
+      "nodeId": "16Uiu2HAm9KRNmFNBD74a9NuHEynZynEt3qRSJvr1fNRUMX1ammSD",
+      "sigKey": "0x027a39089b1bd1942f6121d2b0e84faa30f5a6ad2f6bb8a5c50e207a60991deb8b",
       "stake": 1
     },
     {
-      "nodeId": "16Uiu2HAmLXEgwLc3qorVVgxnZ7DLXDjMc6Jing9UosDEgQasAPxh",
-      "sigKey": "0x02fb02207e38c3fce51e9a51024e410b9698fb52f48ee64fc22064dd8520280a5f",
+      "nodeId": "16Uiu2HAmGkUyjMvir24L41iVXCWHNFgDko4bMrzcautUyUuzoU5P",
+      "sigKey": "0x02224e8a9264083cd512c559a5e69bc6828cae62ed60fdd431e74ef3e839c21a11",
       "stake": 1
     },
     {
-      "nodeId": "16Uiu2HAmHvTtpc7iXs9QjNm9ky7HZ7Ua6XxVRoUfa96zEHf5os1r",
-      "sigKey": "0x033ba37f3f47680ebcc35b334cccb184a08ba2e3c54a3bcecba8914b19bd88186c",
+      "nodeId": "16Uiu2HAm3UWUCXu34Y7W5yEwBFSWxNLz6D8E7jpAfN4xgGqRT65i",
+      "sigKey": "0x02d7e0847414d7b70f2a50fa8bfadcef2093e221e26b1fdc62768f52a578d81f16",
       "stake": 1
     },
     {
-      "nodeId": "16Uiu2HAm4jkq6UryXWLhyvMdwB2RbUcrRhi4PtMqVPxnVRqvsWDJ",
-      "sigKey": "0x03b9f8dc952383fccc25ebb48e81f620ca5d21d1a2b0eb7518e874369faa3b7ab6",
+      "nodeId": "16Uiu2HAmLnYVBtTKdwK6ymeRuFyKSbBLCEHBnGKHW9CP41RzQRyp",
+      "sigKey": "0x021f6f3681f512f4391e0148f6aed1628d85e8b937e6948a78f005d27547846313",
       "stake": 1
     }
   ]

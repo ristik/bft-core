@@ -1,17 +1,16 @@
 diff --git a/crates/unicity/execution/tests/vr_hook.rs b/crates/unicity/execution/tests/vr_hook.rs
-index e0ef9ba2b5..e5e1083e54 100644
 --- a/crates/unicity/execution/tests/vr_hook.rs
 +++ b/crates/unicity/execution/tests/vr_hook.rs
-@@ -85,7 +85,7 @@ const FIXTURE_SHA256_POS: B256 =
+@@ -85,7 +85,7 @@
  const FIXTURE_SOURCE: &str =
-     "unicity-pos-contracts e2b995b with the origin of the bft-core#1297 registry genesis (VRHookState ORIGIN)";
+     "unicity-pos-contracts 85950b44 (bft-core#1319: record kind 9 PoPMissed; the origin of its registry genesis)";
  const FIXTURE_SOURCE_POS: &str =
--    "unicity-pos-contracts f0e569c2 (bft-core#1286 package pin; byte-identical since 7e64c0c: ElectionPolicy, PosElectionAdapter, the PoS-capable build, H = 16)";
+-    "unicity-pos-contracts 85950b44 (bft-core#1319: record kind 9 PoPMissed; ElectionPolicy, PosElectionAdapter, the PoS-capable build, H = 16)";
 +    "#1215 PoS compact, H = 16, cap-bounded hook fixture";
  /// Every scenario the generator (`test/vr/VRHookState.t.sol`) dumps, exactly.
  const SCENARIOS: [&str; 36] = [
      "attach-revert",
-@@ -299,11 +299,11 @@ const POS: Build = Build {
+@@ -299,11 +299,11 @@
      fixture_sha256: FIXTURE_SHA256_POS,
      fixture_source: FIXTURE_SOURCE_POS,
      h: 16,
@@ -22,7 +21,7 @@ index e0ef9ba2b5..e5e1083e54 100644
 -    elect_requirement: 9_596_639,
 -    record_requirement: 19_926_554,
 +    elect_requirement: 16_000_000,
-+    record_requirement: 19_926_696,
++    record_requirement: 19_926_739,
      batch_requirement: 43_320_364,
      retire_requirement: 43_605_367,
      expected_hook_record_gas: 4_963_432,

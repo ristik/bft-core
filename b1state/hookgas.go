@@ -149,10 +149,10 @@ type VRBuild struct {
 var (
 	VRBuildPoA = VRBuild{
 		Name: "poa", Caps: VRCaps,
-		RegistryCodeHash: mustHash32("19094777cb74c783f82392439d1f6c79fe62b6b57c2915790f00a9e16ee490e9"),
+		RegistryCodeHash: mustHash32("3abfd37f4f7c1f3e7af8b0a449a4c0b509ec49a1bfdfb7e669855f9c557c7b39"),
 		GovernanceFacet:  mustHash32("9bab91fbab48ab8099d5992975bbc613f2e685f249907d09181b9d5986270db1"),
 		RepairFacet:      mustHash32("f6ca6bba00e97a6736334b0c3f77bb4515ab7a816cb93a5995964e261d532418"),
-		RecordsFacet:     mustHash32("0fb689f1df19530291691b9a702cdfcbf31fb7f93d33f493686fc88fe5e38f0f"),
+		RecordsFacet:     mustHash32("b4a2d13c53a52d0b0a994ff414528442e21718cff1c1278008ad53bb9b07c1aa"),
 	}
 	VRBuildPos = VRBuild{
 		Name: "pos", Caps: VRCapsPos,
@@ -163,10 +163,10 @@ var (
 	}
 	VRBuildPos16 = VRBuild{
 		Name: "pos16", Caps: VRCapsPos16,
-		RegistryCodeHash: mustHash32("bd919cb812ebf204a45fce24526dd06460f93fa53a1a212d4501c8e02e8233ff"),
+		RegistryCodeHash: mustHash32("e1a8cc6bae5801ef7b2d9f87154fbe65094a428961cf1e082134dd12ec78f39a"),
 		GovernanceFacet:  mustHash32("a9479510a1a78aff1c589fbe6b6c95904e61609d27debab1c4966e65e58069f9"),
 		RepairFacet:      mustHash32("f6ca6bba00e97a6736334b0c3f77bb4515ab7a816cb93a5995964e261d532418"),
-		RecordsFacet:     mustHash32("46a2a1b9f58fe9955ddc9bf6cfa20612dd5ba566ab91c527a33a083fb0d04743"),
+		RecordsFacet:     mustHash32("d5cef299a9c6f678b8a992710a4942077fd3f0c6de9598278e258e75e1b90362"),
 	}
 	// VRBuilds enumerates every recognized build.
 	VRBuilds = []VRBuild{VRBuildPoA, VRBuildPos, VRBuildPos16}
