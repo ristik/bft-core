@@ -80,6 +80,10 @@ if [[ "${NB2_QUALIFY_OFFLINE:-0}" = 1 ]]; then
     fi
     for ((i = 0; i < 900; ++i)); do
       [[ ! -e "$NB2_OUT/.offline-handoff" ]] && break
+      if [[ -n "$load_pid" ]] && ! kill -0 "$load_pid" 2>/dev/null; then
+        wait "$load_pid"
+        load_pid=
+      fi
       sleep 1
     done
     [[ ! -e "$NB2_OUT/.offline-handoff" ]]

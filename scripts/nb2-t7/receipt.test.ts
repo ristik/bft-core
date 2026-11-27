@@ -15,6 +15,19 @@ const trie = buildTrie([[rlpIndexKey(0n), encodeReceiptJson(receipt)]], rlpIndex
 const header = { number: 55n, receiptsRoot: trie.root } as Header;
 const hash = new Uint8Array(32);
 
+test('a stopped archive falls through on the pinned wallet transport error', async () => {
+  const primary = receiptArchive(new HttpJsonRpc('http://127.0.0.1:1', {
+    retries: 0,
+    fetch: async () => { throw new TypeError('fetch failed'); },
+  }));
+  const alternate = receiptArchive(new HttpJsonRpc('http://127.0.0.1:2', {
+    fetch: async () => new Response(JSON.stringify({ result: [receipt] })),
+  }));
+  const found = await firstAvailableReceipt([primary, alternate], async (reader, source) =>
+    ({ source, path: await reader.receiptPath(header, hash, 0n) }));
+  assert.deepEqual(found, { source: 1, path: trie.path });
+});
+
 test('a size-limited receipt gateway falls through to a verified alternate', async () => {
   const calls: string[] = [];
   const archive = (name: string, status: number) => receiptArchive(new HttpJsonRpc('http://127.0.0.1:1', {
