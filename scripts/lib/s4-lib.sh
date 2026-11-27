@@ -22,8 +22,13 @@ S4_EPOCH=${S4_EPOCH:-2}
 
 s4_pass() { printf 'PASS: s4: %s\n' "$1"; }
 s4_cast() { "${P85_CAST:-cast}" "$@"; }
-s4_round() { curl -fsS "$(h3_rpc_url "$1")/api/v1/roundInfo" 2>/dev/null | jq -r '.roundNumber'; }
-s4_epoch() { curl -fsS "$(h3_rpc_url "$1")/api/v1/roundInfo" 2>/dev/null | jq -r '.epochNumber'; }
+s4_round_info() { # root, jq field, timeout in seconds
+  local response
+  response=$(curl -fsS --max-time "$3" "$(h3_rpc_url "$1")/api/v1/roundInfo" 2>/dev/null) || return
+  jq -er "$2" <<<"$response"
+}
+s4_round() { s4_round_info "$1" '.roundNumber' "${2:-3}"; }
+s4_epoch() { s4_round_info "$1" '.epochNumber' 3; }
 s4_short() { grep -a -m1 -o 'node_id=16\*[A-Za-z0-9]*' "test-nodes/root$1/debug.log" | head -1 | sed 's/node_id=//'; }
 
 # the offender root's public signing key as the evidence scan names it (66 hex = 33 bytes, no 0x). node-info.json carries it as .sigKey, "0x" + hex (an earlier spelling,
@@ -95,7 +100,7 @@ s4_equivocate() {
 # written last, so a copy taken while the process is stopped is a consistent crash-point snapshot, and no root restart disturbs the lane (S4_RESTART_ROOTS=1 stops and
 # restarts the root instead, as the first S4 runs did: in those runs the execution chain stopped certifying afterwards in the milestone runs, see docs/root-evidence.md).
 s4_snapshot_journal() {
-  local i=$1 pid
+  local i=$1 pid epoch
   pid=$(cat "test-nodes/root$i/pid" 2>/dev/null) || return
   if [ "${S4_RESTART_ROOTS:-0}" != 1 ]; then
     kill -0 "$pid" 2>/dev/null || { echo "root $i is not running" >&2; return 1; }
@@ -104,7 +109,9 @@ s4_snapshot_journal() {
     grep -a 'evidence observer stats' "test-nodes/root$i/debug.log" | tail -1 >"$S4_DIR/observer-stats-root$i.txt"
     return 0
   fi
-  lane_with_root_watch_paused s4_copy_and_restart_root "$i" "$pid"
+  epoch=$(s4_epoch "$i") || return
+  [ "$epoch" -gt 0 ] 2>/dev/null || return 1
+  lane_with_root_watch_paused s4_copy_and_restart_root "$i" "$pid" "$epoch"
 }
 
 s4_copy_stopped_journal() {
@@ -116,8 +123,7 @@ s4_copy_stopped_journal() {
 }
 
 s4_copy_and_restart_root() {
-  local i=$1 pid=$2 ref= epoch k
-  epoch=$(s4_epoch "$i") || return
+  local i=$1 pid=$2 epoch=$3 ref= k deadline remaining round
   for k in 1 2 3 4; do [ "$k" = "$i" ] || { ref=$k; break; }; done
   stop_pidfile "test-nodes/root$i/pid" 'ubft root-node' || return
   for k in $(seq 1 100); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
@@ -125,7 +131,14 @@ s4_copy_and_restart_root() {
   cp "test-nodes/root$i/evidence.db" "$S4_DIR/journal-root$i.db" || return 1
   grep -a 'evidence observer stats' "test-nodes/root$i/debug.log" | tail -1 >"$S4_DIR/observer-stats-root$i.txt"
   m2_start_root "$i" "$epoch" "$(m2_root_addr "$ref")" || return
-  for k in $(seq 1 60); do [ "$(s4_round "$i" 2>/dev/null)" -gt 0 ] 2>/dev/null && return 0; sleep 1; done
+  deadline=$((SECONDS + 60))
+  while (( (remaining = deadline - SECONDS) > 0 )); do
+    (( remaining <= 3 )) || remaining=3
+    if round=$(s4_round "$i" "$remaining" 2>/dev/null) && [ "$round" -gt 0 ] 2>/dev/null && (( SECONDS <= deadline )); then
+      return 0
+    fi
+    if (( SECONDS < deadline )); then sleep 1; fi
+  done
   echo "root $i did not report a positive round within 60 s after restart" >&2
   return 1
 }

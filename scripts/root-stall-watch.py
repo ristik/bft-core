@@ -19,6 +19,15 @@ class Pause(Enum):
     ABSENT = auto()
     ACTIVE = auto()
     EXPIRED = auto()
+    FAILED = auto()
+
+
+def marker_generation(path):
+    try:
+        stat = path.stat()
+        return stat.st_ino, stat.st_mtime_ns
+    except OSError:
+        return None
 
 
 def read_root(port, pid, path, timeout):
@@ -45,43 +54,45 @@ class Root:
     dumped: bool = False
     last_attempt: float | None = None
     paused: bool = False
-    resume_generation: tuple[int, int] | None = None
+    completion_generation: tuple[int, int] | None = None
 
     def restart_pause(self):
         # A rolling restart can delay peers that were never stopped, so the marker covers the lane.
         nodes = self.home.parent
-        try:
-            started = (nodes / ".stall-watch-pause").stat().st_mtime
-        except OSError:
-            pass
-        else:
-            age = time.time() - started
+        started = marker_generation(nodes / ".stall-watch-pause")
+        if started is not None:
+            age = time.time() - started[1] / 1_000_000_000
             if 0 <= age < PAUSE_MAX_AGE:
                 self.paused = True
                 self.dumped = False
-                return Pause.ACTIVE
+                return Pause.ACTIVE, started
             if age >= PAUSE_MAX_AGE:
                 self.paused = False
-                return Pause.EXPIRED
+                return Pause.EXPIRED, started
 
-        try:
-            completed = (nodes / ".stall-watch-resumed").stat()
-            generation = (completed.st_ino, completed.st_mtime_ns)
-        except OSError:
-            generation = None
-        if self.paused or (generation is not None and generation != self.resume_generation):
+        failed = marker_generation(nodes / ".stall-watch-failed")
+        if failed is not None:
+            if failed != self.completion_generation:
+                self.dumped = False
+            self.completion_generation = failed
+            self.paused = False
+            return Pause.FAILED, failed
+
+        resumed = marker_generation(nodes / ".stall-watch-resumed")
+        if self.paused or (resumed is not None and resumed != self.completion_generation):
             self.progressed = time.monotonic()
             self.dumped = False
             self.last_attempt = None
         self.paused = False
-        self.resume_generation = generation
-        return Pause.ABSENT
+        self.completion_generation = resumed
+        return Pause.ABSENT, resumed
 
-    def sample(self, threshold):
-        if self.restart_pause() is Pause.ACTIVE:
+    def sample(self, threshold, stopping=False):
+        pause, _ = self.restart_pause()
+        if pause is Pause.ACTIVE:
             return
         current = read_root(self.port, self.pid, "/debug/consensus/round", 0.5)
-        pause = self.restart_pause()
+        pause, generation = self.restart_pause()
         if pause is Pause.ACTIVE:
             return
         now = time.monotonic()
@@ -92,11 +103,12 @@ class Root:
                 self.round_number = round_number
                 self.progressed = now
                 self.dumped = False
-        elif pause is not Pause.EXPIRED:
+        elif pause not in (Pause.EXPIRED, Pause.FAILED):
             return
         progressed = self.progressed
         elapsed = now - progressed
-        if self.dumped or elapsed < threshold:
+        failed_at_teardown = stopping and pause is Pause.FAILED and not round_available
+        if self.dumped or (elapsed < threshold and not failed_at_teardown):
             return
         if self.last_attempt is not None and now - self.last_attempt < threshold:
             return
@@ -106,7 +118,13 @@ class Root:
             if int(pidfile.read_text()) != self.pid:
                 return
             stacks = read_root(self.port, self.pid, "/debug/pprof/goroutine?debug=2", 2)
-            if not stacks or self.restart_pause() is Pause.ACTIVE or self.progressed != progressed:
+            if not stacks:
+                return
+            after, after_generation = self.restart_pause()
+            rearmed = self.progressed != progressed
+            # The same expired pause may be renamed as the already-eligible request completes.
+            resumed_expired_pause = pause is Pause.EXPIRED and after_generation == generation
+            if after is Pause.ACTIVE or (rearmed and not resumed_expired_pause):
                 return
             if int(pidfile.read_text()) != self.pid:
                 return  # The lane has replaced this root since we began sampling it.
@@ -122,14 +140,18 @@ class Root:
         except (OSError, ValueError) as err:
             print(f"STALL: could not save stacks for {self.home}: {err}", flush=True)
             return
-        self.dumped = True
+        self.dumped = not rearmed
         print(f"STALL: root {self.home}, {reason}: goroutine dump in {log}", flush=True)
 
 
 def watch(nodes, base_port, threshold, should_stop):
     roots = {}
     with ThreadPoolExecutor(max_workers=16) as pool:
-        while not should_stop():
+        while True:
+            stopping = should_stop()
+            # The lane waits for the watcher before stopping roots or cleaning up the marker.
+            if stopping and not (nodes / ".stall-watch-failed").is_file():
+                return
             current = {}
             for pidfile in nodes.glob("root[0-9]*/pid"):
                 home = pidfile.parent
@@ -146,8 +168,10 @@ def watch(nodes, base_port, threshold, should_stop):
                 current[home] = root
             roots = current
             # Sample roots in parallel so their timeouts do not add up.
-            for _ in pool.map(lambda root: root.sample(threshold), roots.values()):
+            for _ in pool.map(lambda root: root.sample(threshold, stopping), roots.values()):
                 pass
+            if stopping:
+                return
             if not should_stop():
                 time.sleep(min(1, threshold / 2))
 

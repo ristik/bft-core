@@ -193,6 +193,7 @@ set -eu
 source "$1"
 mkdir test-nodes
 marker=test-nodes/.stall-watch-pause
+touch test-nodes/.stall-watch-resumed test-nodes/.stall-watch-failed
 failed_stage=$2
 check_stage() { [ -f "$marker" ] || exit 2; [ "$1" != "$failed_stage" ] || return 37; }
 stop_pidfile() { check_stage stop; }
@@ -209,8 +210,15 @@ m2_measure_pause() { :; }
 status=0
 m2_install_epoch 2 "1 2" || status=$?
 [ ! -e "$marker" ]
-[ -f test-nodes/.stall-watch-resumed ]
-if [ -z "$failed_stage" ]; then [ "$status" = 0 ]; else [ "$status" = 37 ]; fi`
+if [ -z "$failed_stage" ]; then
+  [ -f test-nodes/.stall-watch-resumed ]
+  [ ! -e test-nodes/.stall-watch-failed ]
+  [ "$status" = 0 ]
+else
+  [ -f test-nodes/.stall-watch-failed ]
+  [ ! -e test-nodes/.stall-watch-resumed ]
+  [ "$status" = 37 ]
+fi`
 	for _, stage := range []string{"", "stop", "archive", "start", "ready"} {
 		name := stage
 		if name == "" {
@@ -225,7 +233,7 @@ if [ -z "$failed_stage" ]; then [ "$status" = 0 ]; else [ "$status" = 37 ]; fi`
 	}
 }
 
-func TestS4SnapshotKeepsWatchdogPausedUntilRoundReadiness(t *testing.T) {
+func TestS4SnapshotBoundsRPCsAndPausesOnlyTheRestart(t *testing.T) {
 	libDir, err := filepath.Abs("../lib")
 	require.NoError(t, err)
 	script := `
@@ -237,25 +245,57 @@ mkdir -p "$S4_DIR" test-nodes/root1
 touch test-nodes/root1/evidence.db test-nodes/root1/debug.log
 echo 123 >test-nodes/root1/pid
 marker=test-nodes/.stall-watch-pause
-kill() { return 1; } # the original root has stopped
-sleep() { :; }
-s4_epoch() { echo 2; }
-stop_pidfile() { [ -f "$marker" ]; }
-m2_root_addr() { echo "addr$1"; }
-m2_start_root() { [ -f "$marker" ]; }
 outcome=$2
-s4_round() {
-  [ -f "$marker" ] || { touch unpaused; return 1; }
-  if [ "$outcome" = ready ] && [ -f polled ]; then echo 17; else touch polled; echo 0; fi
+unset SECONDS
+SECONDS=0
+kill() { return 1; } # the original root has stopped
+sleep() { SECONDS=$((SECONDS + 29)); }
+h3_rpc_url() { echo "http://root$1"; }
+stop_pidfile() { [ -f "$marker" ] && touch stopped; }
+m2_root_addr() { echo "addr$1"; }
+m2_start_root() { [ -f "$marker" ] && [ "$2" = 2 ] && touch started; }
+curl() {
+  if [ "$#" != 4 ] || [ "$1" != -fsS ] || [ "$2" != --max-time ] || [ "$4" != 'http://root1/api/v1/roundInfo' ]; then
+    touch bad-request
+    return 1
+  fi
+  if [ ! -e started ]; then
+    [ ! -e "$marker" ] && [ ! -e stopped ] || touch bad-request
+    printf 'epoch %s\n' "$3" >>calls
+    [ "$outcome" != epoch-timeout ] || return 28
+    echo '{"epochNumber":2}'
+    return
+  fi
+  [ -f "$marker" ] || touch bad-request
+  printf 'round %s\n' "$3" >>calls
+  [ "$outcome" = ready ] || return 28
+  if [ -e polled ]; then echo '{"roundNumber":17}'; else touch polled; echo '{"roundNumber":0}'; fi
 }
 status=0
 s4_snapshot_journal 1 || status=$?
-[ -f polled ]
-[ ! -e unpaused ]
+[ ! -e bad-request ]
 [ ! -e "$marker" ]
-[ -f test-nodes/.stall-watch-resumed ]
-if [ "$outcome" = ready ]; then [ "$status" = 0 ]; else [ "$status" = 1 ]; fi`
-	for _, outcome := range []string{"ready", "timeout"} {
+
+case "$outcome" in
+  ready)
+    [ "$status" = 0 ]
+    [ -f test-nodes/.stall-watch-resumed ]
+    diff -u <(printf 'epoch 3\nround 3\nround 3\n') calls
+    ;;
+  readiness-timeout)
+    [ "$status" = 1 ]
+    [ -f test-nodes/.stall-watch-failed ]
+    diff -u <(printf 'epoch 3\nround 3\nround 3\nround 2\n') calls
+    ;;
+  epoch-timeout)
+    [ "$status" = 28 ]
+    [ ! -e stopped ]
+    [ ! -e test-nodes/.stall-watch-resumed ]
+    [ ! -e test-nodes/.stall-watch-failed ]
+    diff -u <(printf 'epoch 3\n') calls
+    ;;
+esac`
+	for _, outcome := range []string{"ready", "readiness-timeout", "epoch-timeout"} {
 		t.Run(outcome, func(t *testing.T) {
 			cmd := exec.Command("bash", "-c", script, "s4-watchdog-fixture", libDir, outcome)
 			cmd.Dir = t.TempDir()

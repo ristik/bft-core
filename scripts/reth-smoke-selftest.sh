@@ -367,7 +367,7 @@ rootStallWatchPid= laneStallDumpSecs=0 nb2DriverPid=
 # a fast stand-in cleanup let that race be won or lost by timing.
 trap 'cleanup; sleep 2; echo ran >"$T/nested-\$mode.ran"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
 mkdir -p test-nodes/root1 test-nodes/root2 test-nodes/evm1 test-nodes/evm2 test-nodes/reth1 test-nodes/reth2 test-nodes/reth-wrong
-touch test-nodes/.stall-watch-pause test-nodes/.stall-watch-resumed
+touch test-nodes/.stall-watch-pause test-nodes/.stall-watch-resumed test-nodes/.stall-watch-failed
 build/ubft root-node run --home test-nodes/root1 >test-nodes/root1/debug.log 2>&1 & echo \$! >test-nodes/root1/pid; echo \$! >"$T/nested-\$mode.owned"
 build/ubft shard-node run --home test-nodes/evm1 >test-nodes/evm1/debug.log 2>&1 & echo \$! >test-nodes/evm1/pid; echo \$! >>"$T/nested-\$mode.owned"
 fake/reth node --datadir test-nodes/reth1/dd >test-nodes/reth1/reth.log 2>&1 & echo \$! >test-nodes/reth1/pid; echo \$! >>"$T/nested-\$mode.owned"
@@ -389,21 +389,21 @@ nestedCancel() {
   kill -TERM "$sup"; wait "$sup"
 }
 ownedStopped() { local p; [ -s "$T/nested-$1.owned" ] || { echo "nothing was started"; return 1; }; for p in $(cat "$T/nested-$1.owned"); do kill -0 "$p" 2>/dev/null && { echo "$p still alive"; return 1; }; done; return 0; }
-noRootWatchMarkers() { [ ! -e "$CO/test-nodes/.stall-watch-pause" ] && [ ! -e "$CO/test-nodes/.stall-watch-resumed" ]; }
+noRootWatchMarkers() { [ ! -e "$CO/test-nodes/.stall-watch-pause" ] && [ ! -e "$CO/test-nodes/.stall-watch-resumed" ] && [ ! -e "$CO/test-nodes/.stall-watch-failed" ]; }
 check "a passing run whose scenarios clean up with the paired devnet's cleanup passes" nestedRun pass
 check "…the nested cleanup did run" test -e "$T/nested-pass.ran"
-check "…the nested cleanup removed both watchdog markers" noRootWatchMarkers
+check "…the nested cleanup removed the watchdog markers" noRootWatchMarkers
 check "…its own processes were stopped" ownedStopped pass
 check "…and every sentinel survived" sentinelsAlive
 check "…the stale pid files no nested cleanup removed were still there for the supervisor's sweep" test -f "$CO/test-nodes/leftover/pid" -a -f "$CO/test-nodes/leftover2/pid"
 refuses "a failing run whose scenarios clean up with the paired devnet's cleanup fails" "reth-smoke: FAIL" nestedRun fail
 check "…the nested cleanup did run" test -e "$T/nested-fail.ran"
-check "…the nested cleanup removed both watchdog markers on failure" noRootWatchMarkers
+check "…the nested cleanup removed the watchdog markers on failure" noRootWatchMarkers
 check "…its own processes were stopped" ownedStopped fail
 check "…and every sentinel survived" sentinelsAlive
 refuses "a cancelled run whose scenarios clean up with the paired devnet's cleanup fails as interrupted" "reth-smoke: FAIL run interrupted" nestedCancel
 check "…the nested cleanup did run, on the cancellation" test -e "$T/nested-cancel.ran"
-check "…the nested cleanup removed both watchdog markers on cancellation" noRootWatchMarkers
+check "…the nested cleanup removed the watchdog markers on cancellation" noRootWatchMarkers
 check "…its own processes were stopped" ownedStopped cancel
 check "…and every sentinel survived" sentinelsAlive
 
