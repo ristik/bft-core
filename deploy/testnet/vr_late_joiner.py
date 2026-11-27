@@ -277,18 +277,8 @@ def join_committee(r, rec, ev, j, val, auth, owner, owner_key, epoch, shard_epoc
                                        '--client-socket', '/authority/client.sock', '--out', '/authority/client.cred', *proofs).stdout)
     (ev / 'authority-advanced.json').write_text(json.dumps(advanced, indent=1) + '\n')
     r.expect(advanced['rootEpoch'] == target and not advanced['retired'], f'the joiner\'s authority serves root epoch {target}', str(advanced))
-    lagging = []
-    for m in r.members():
-        try:
-            if not rec.follows(m):
-                raise ValueError('no root-follow mode')
-            r.wait(f'authority {m} follows root epoch {target} itself', lambda m=m: rec.auth_status(m)['rootEpoch'] >= target or None, 120)
-        except Exception:   # rehearse.Failure (the module runs as __main__)
-            lagging.append(m)
-    if lagging:
-        import vr_advance
-        r.say(f'  advancing authorities {lagging} to root epoch {target}')
-        vr_advance.advance(gen, target, ev / 'advance', only=lagging)
+    rec.dc('restart', f'shard{j}')   # the shard node loads the new session, as the container restarts it on the activation journal
+    advance_members(r, rec, target, ev)
 
     # the joiner leads: its shard node submits a leader's certification request, and its builder is never refused (#1321)
     def led():
@@ -315,6 +305,23 @@ def join_committee(r, rec, ev, j, val, auth, owner, owner_key, epoch, shard_epoc
              'ackBlock': ack_block, 'ledRounds': len(rounds), 'largestGap': gap}
     (ev / JOINER_STATE).write_text(json.dumps(state, indent=1) + '\n')
     r.say(f'  joiner {j}: member from root epoch {target}, led {len(rounds)} round(s), largest block gap {gap} s')
+
+
+def advance_members(r, rec, target, ev):
+    """The genesis members' authorities to root epoch `target`: each follows it itself, or the operator's advance (vr_advance.py) moves the
+    lagging ones and restarts their shard nodes. A rehearsal generation runs no participant containers that would do it."""
+    lagging = []
+    for m in r.members():
+        try:
+            if not rec.follows(m):
+                raise ValueError('no root-follow mode')
+            r.wait(f'authority {m} follows root epoch {target} itself', lambda m=m: rec.auth_status(m)['rootEpoch'] >= target or None, 120)
+        except Exception:   # rehearse.Failure (the module runs as __main__)
+            lagging.append(m)
+    if lagging:
+        import vr_advance
+        r.say(f'  advancing authorities {lagging} to root epoch {target}')
+        vr_advance.advance(r.gen, target, ev / f'advance-{target}', only=lagging)
 
 
 def tx_selectors(r):
@@ -351,6 +358,8 @@ def vr_joiner_exit(r):
                       lambda: (lambda s: s if not s.get('member') else None)(rec.status(live, home, auth)), 900, every=10)
     (exit_ev / 'status-excluded.json').write_text(json.dumps(excluded, indent=1) + '\n')
     r.say(f'  identity {ident} excluded at root epoch {target}')
+    advance_members(r, rec, target, exit_ev)
+    active = target
 
     # 3. the claim watcher: every minute the members' participation, then the preview; an anchoring run when it plans one; then the claim
     attempts, anchors, deadline = 0, 0, time.monotonic() + 100 * 60
@@ -358,6 +367,11 @@ def vr_joiner_exit(r):
     watch = exit_ev / 'claim-watch.jsonl'
     while time.monotonic() < deadline and claimed is None:
         rec.participate_once(parts, {j: live}, outputs)
+        now = rec.root_view(live)
+        if now['activeEpoch'] > active and not (now.get('switch') and now['switch']['phase'] not in ('running', 'following')):
+            active = now['activeEpoch']
+            r.say(f'  root epoch {active} activated during the wait')
+            advance_members(r, rec, active, exit_ev)
         dry = rec.cli(live, home, 'validator', 'claim', '--dry-run', mounts=mounts, check=False)
         text = r.scrub(dry.stdout + dry.stderr)
         with watch.open('a') as w:
