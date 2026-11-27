@@ -4,7 +4,7 @@ election proceeds with an eligible replacement at the four-member floor.
 
 On a Compose VR/P85 generation with four genesis validators (run it after vr-pos-publish):
 
-1. a fifth entity (joiner.py) joins fully: its pod, execution client, authority and root node run, it registers, bonds and is admitted
+1. a fifth entity (joiner.py) joins fully: its pod, execution client, authority, shard and root nodes run, it registers, bonds and is admitted
    (`ubft validator apply`), so its root sends its own handoff possession proof;
 2. the last genesis validator's root node stops: its pod, execution client, authority and shard node keep running, so its P85 possession
    proof still makes the next output Published, but its root never sends the VR handoff possession proof;
@@ -17,7 +17,7 @@ On a Compose VR/P85 generation with four genesis validators (run it after vr-pos
 6. the next election names the three live incumbents and the joiner: the floor of four with an eligible replacement; they publish it and the
    roots activate the next root epoch, while the parked incumbent stays bonded, indexed and not retiring.
 
-The joiner's shard node is not started: the new four-member EVM committee runs on three. The stopped root stays down until the teardown.
+The stopped root stays down until the teardown.
 """
 import json
 import re
@@ -150,9 +150,10 @@ def vr_pop_miss(r):
                  r.scrub((first.stdout + first.stderr).strip()[-300:]))
         second = cli('validator', 'apply', '--wait', '5m')
         r.keep_redacted(ev / 'apply-2.log', second.stdout + second.stderr)
-    rec.dc('up', '-d', '--no-deps', f'root{j}')
+    # its shard node feeds its execution client, whose certified blocks its root observes: without it the root derives no intent and sends no proof
+    rec.dc('up', '-d', '--no-deps', f'shard{j}', f'root{j}')
     times['joined'] = vr_recover.utc()
-    r.say(f'  joiner {j} is identity {ident}; its root node runs')
+    r.say(f'  joiner {j} is identity {ident}; its shard and root nodes run')
 
     members = {**ids, j: ident}
 
