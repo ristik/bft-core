@@ -170,7 +170,7 @@ def workload(directory, tx_limit, gas_limit):
 
 
 def public_files(run):
-    allowed = {'.json', '.txt', '.pin', '.cbor', '.bin', '.initcode', '.sha256'}
+    allowed = {'.json', '.txt', '.pin', '.cbor', '.bin', '.initcode', '.sha256', '.calldata', '.state'}
     for path in run.rglob('*'):
         parts = path.relative_to(run).parts
         if (path.is_file() and path.suffix in allowed and

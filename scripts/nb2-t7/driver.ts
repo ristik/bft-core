@@ -1172,6 +1172,9 @@ async function runOfflineRelayer(stage: string) {
   assert.equal(await reader.balance(c.vault), BigInt(backup.initialBalance) + BigInt(backup.value) - amount);
   assert.equal(await reader.balance(recipient), BigInt(backup.recipientBefore) + amount);
   assert.equal(final.outstanding, BigInt(backup.initialBalance) + BigInt(backup.value) - amount);
+  assert.equal(final.segment, cursor.next);
+  assert.equal(final.population, 1n);
+  assert.equal(hex(final.head), hex(cursor.head));
   json('offline-result.json', { eta: hex(verdict.eta), holderPID: backup.holderPID, relayerPID: process.pid,
     relayerOS: process.platform,
     consumedOperationsAtRestore: checkpoint.from, session: hex(completed.session.id), progressCalls: completed.prior.seq,
