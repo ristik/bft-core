@@ -5,6 +5,7 @@ import (
 	"crypto"
 	"fmt"
 	"maps"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -160,24 +161,45 @@ func flatFixtureDenseResume(t *testing.T, w *World, v *FlatVerifier, registry b1
 	}
 	prior.SeenRoot = scratch.seen.lookup(256, [32]byte{})
 	prior.ClaimRoot = scratch.claims.lookup(256, [32]byte{})
-	session := v.Session(evidence.Header())
-	progress := FlatEvent{Kind: FlatProgressEvent, Session: session, Seq: prior.Seq, StateDigest: prior.Digest(session)}
-	predecessor, err := w.ReceiptProof(progress.Log(v.deployment.Recovery), opts.predecessor)
-	require.NoError(t, err)
+	certifyState := func(state FlatState, session [32]byte) []byte {
+		progress := FlatEvent{Kind: FlatProgressEvent, Session: session, Seq: state.Seq, StateDigest: state.Digest(session)}
+		predecessor, err := w.ReceiptProof(progress.Log(v.deployment.Recovery), opts.predecessor)
+		require.NoError(t, err)
+		return predecessor.Bytes()
+	}
+	baseSession := v.Session(evidence.Header())
+	baseReceipt := certifyState(prior, baseSession)
 	for _, tc := range []struct {
-		name string
-		cut  int
-	}{{"-sparse", 16}, {"-sparse-split", 8}} {
+		name      string
+		cut       int
+		deepPages bool
+	}{{"-sparse", 16, false}, {"-sparse-split", 8, false}, {"-sparse-deep-pages", 8, true}} {
 		wallet := *scratch
 		wallet.values = maps.Clone(scratch.values)
 		for height := range wallet.seen.nodes {
 			wallet.seen.nodes[height] = maps.Clone(scratch.seen.nodes[height])
 			wallet.claims.nodes[height] = maps.Clone(scratch.claims.nodes[height])
 		}
-		state, receipt := &prior, predecessor.Bytes()
+		initial, header := prior, evidence.Header()
+		session, receipt := baseSession, baseReceipt
+		var shiftedPages map[uint64]FlatPage
+		if tc.deepPages {
+			var shift uint64
+			shift, header, shiftedPages = flatQualificationDeepPages(t, evidence)
+			initial.Pos += shift
+			session = v.Session(header)
+			receipt = certifyState(initial, session)
+		}
+		state := &initial
 		var trace []flatFixtureTrace
 		for i := 2; i < len(records); i += tc.cut {
 			packet := wallet.packet(t, state, receipt, records[i:min(i+tc.cut, len(records))])
+			if tc.deepPages {
+				packet.Header = header
+				for j, page := range packet.Pages {
+					packet.Pages[j] = shiftedPages[page.Index]
+				}
+			}
 			calldata, err := packet.Calldata()
 			require.NoError(t, err)
 			if tc.cut == 16 {
@@ -209,5 +231,58 @@ func flatFixtureDenseResume(t *testing.T, w *World, v *FlatVerifier, registry b1
 		}
 		require.Nil(t, state)
 		flatFixtureExports(t, opts.name+tc.name, w, v, registry, wire, verdict.ABI(), trace)
+		if dir := os.Getenv("NB2_FLAT_VECTOR_OUT"); tc.deepPages && dir != "" {
+			// evidence.bin contains only the ordinary control. The cold trace
+			// uses this separate synthetic header and certified checkpoint.
+			name := filepath.Join(dir, opts.name+tc.name, "synthetic-header.bin")
+			require.NoError(t, os.WriteFile(name, header.appendTo(nil), 0644))
+		}
 	}
+}
+
+// flatQualificationDeepPages commits to the original witness bytes at the end
+// of a synthetic object with 52-step page paths. The unopened prefix is a
+// commitment only. The fixture does not claim eligibility of its full lineage.
+func flatQualificationDeepPages(t *testing.T, evidence *FlatEvidence) (uint64, FlatHeader, map[uint64]FlatPage) {
+	t.Helper()
+	originalLength := evidence.Header().Length
+	shift := (math.MaxUint64 - originalLength) &^ (FlatPageBytes - 1)
+	header := FlatHeader{Length: shift + originalLength}
+	depth := flatPageDepth(header.Length)
+	require.Equal(t, 52, depth)
+	pages := make(map[uint64]FlatPage)
+	nodes := make(map[uint64][32]byte)
+	for index := range flatPageCount(originalLength) {
+		page, err := evidence.Page(index)
+		require.NoError(t, err)
+		page.Index += shift / FlatPageBytes
+		page.Siblings = make([][32]byte, depth)
+		pages[index] = page
+		nodes[page.Index] = flatPageLeaf(header.Length, page.Index, page.Data)
+	}
+	for height := range depth {
+		next := make(map[uint64][32]byte)
+		for _, page := range pages {
+			index := page.Index >> height
+			sibling, found := nodes[index^1]
+			if !found {
+				sibling = flatPagePadding[height]
+				if ((index ^ 1) << height) < flatPageCount(header.Length) {
+					sibling = HU([]byte("qualification/unopened-pages/"), flatU64(uint64(height)), flatU64(index^1))
+				}
+			}
+			page.Siblings[height] = sibling
+			if index&1 == 0 {
+				next[index>>1] = flatPageNode(nodes[index], sibling)
+			} else {
+				next[index>>1] = flatPageNode(sibling, nodes[index])
+			}
+		}
+		nodes = next
+	}
+	header.Root = nodes[0]
+	for _, page := range pages {
+		require.True(t, page.verifies(header))
+	}
+	return shift, header, pages
 }
