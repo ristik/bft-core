@@ -111,7 +111,11 @@ Bundle.Snapshot.Block.Payload.PosControls[].Registry hashed
 Bundle.Snapshot.Block.Payload.PosControls[].Reject.Attempt hashed
 Bundle.Snapshot.Block.Payload.PosControls[].Reject.EVMBlockHash hashed
 Bundle.Snapshot.Block.Payload.PosControls[].Reject.EVMStateRoot hashed
+Bundle.Snapshot.Block.Payload.PosControls[].Reject.Misses[].Sigs[].NodeID hashed
+Bundle.Snapshot.Block.Payload.PosControls[].Reject.Misses[].Sigs[].Sig hashed
+Bundle.Snapshot.Block.Payload.PosControls[].Reject.Misses[].StakingID hashed
 Bundle.Snapshot.Block.Payload.PosControls[].Reject.PredecessorBodyID hashed
+Bundle.Snapshot.Block.Payload.PosControls[].Request.IntentDigest hashed
 Bundle.Snapshot.Block.Payload.PosControls[].Retire.EVMBlockHash hashed
 Bundle.Snapshot.Block.Payload.PosControls[].Retire.EVMStateRoot hashed
 Bundle.Snapshot.Block.Payload.PosControls[].Support[].BindingRef hashed
