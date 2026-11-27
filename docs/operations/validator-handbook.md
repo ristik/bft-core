@@ -56,9 +56,16 @@ Keep the authority container running during node updates. Replace only
 `unicity-node`, with the same data volume, then repeat `join --yes` if the
 join was interrupted. For authority process loss, follow [Authority loss](#authority-loss).
 For retirement run
-`docker exec unicity-node ubft-validator exit --yes`. After the maturity
-conditions in section 6 hold, run
-`docker exec unicity-node ubft-validator exit --claim --yes`.
+`docker exec unicity-node ubft-validator exit --yes`. Keep both containers
+running until the next election excludes the identity. From the retirement
+request on, the node sends no election transactions for it: its proofs could
+not be used and its finalizations could only revert. The other members publish
+the results. After the maturity conditions in section 6 hold, run
+`docker exec unicity-node ubft-validator exit --claim --yes`. A claim waits
+for an election transaction the node has in flight, and each run keeps its
+output in `/data/exit-logs/`. After a successful claim the command says that
+the node and authority containers can be stopped. Keep the volume while you
+still want its keys and logs.
 
 The manual procedure below is the reference for incident recovery and
 for validating the resulting committee and certification evidence.
@@ -705,7 +712,37 @@ If PoS registration already committed, keep the authority running. While it runs
 - An output expires, a module faults or a handoff stalls. Record the result ID, root epoch, timings and status JSON. See the [output expiry runbook](monitoring/runbooks.md#unicityoutputexpired), [module runbook](monitoring/runbooks.md#unicityvrmoduleunhealthy), and [handoff recovery](root-handoff-abort.md).
 - A shard restart reports that `eth_getProof` exceeded the proof window. Check which [release proof profile](#choose-the-releases-execution-proof-profile) is active. Restart only ureth with the same datadir, peer key and the correct release flags. VT-07 also needs the requested historical state to exist on the private proof source. Wait for both listeners, then check restart admission's exact-parent witness request.
 - The journal reports a certified candidate missing its resulting observation. Preserve the journal and logs and use the recovery release designated for the incident. Keep the signing authority, its enrolled key and its session state. While the shard stays unready, report root participation and shard certification separately. A PoS exit request uses the operator wallet and public RPC. Keep the root serving until the acknowledged exclusion.
+- A joined validator's rounds as leader time out and its shard log shows `payload job rejected: next-block gas_limit mismatch`. Its ureth runs without `--builder.gaslimit`. Releases made from bft-core#1321 on ship it in `ureth-flags.txt`, from the same source as the genesis validators' flags. An older release has only `--unicity.max-gas`. On the host path, append `--builder.gaslimit "$(sed -n 's/.*--unicity.max-gas=\([0-9]*\).*/\1/p' release/ureth-flags.txt)"` to the `unicity-reth node` command and restart only ureth. For the container, see [Older releases without the builder gas limit](#older-releases-without-the-builder-gas-limit).
+- A claim preview says `REFUSED`. The decoded custody error names the gate. `TimeGateNotMet`, `RoundGateNotMet` and `EvidenceGateNotMet` mean maturity is not reached yet. `RecordsPending` means custody has root records to apply or an election is pending: try again a block later. `TermAnchorPending` means `validator claim` should anchor the term first.
 - The signing authority is unavailable or faulted. Stop the signing client and follow the [authority runbook](monitoring/runbooks.md#unicityauthorityfaulted). Preserve all signing and node state. Never duplicate an active signing identity.
+
+### Older releases without the builder gas limit
+
+The validator container runs `unicity-reth` from its `PATH` and checks the
+pinned binary at `/usr/local/bin/unicity-reth`. For a release whose
+`ureth-flags.txt` lacks `--builder.gaslimit`, put this wrapper first on the
+node container's `PATH`. It takes the gas limit from the release's own
+`--unicity.max-gas` and changes nothing else. Recreate only `unicity-node`
+with it, on the same volume. Never restart the authority container.
+
+```bash
+install -d -m 0755 "$HOME/ureth-wrapper"
+cat > "$HOME/ureth-wrapper/unicity-reth" <<'EOF'
+#!/bin/sh
+case " $* " in *" --builder.gaslimit"*) exec /usr/local/bin/unicity-reth "$@" ;; esac
+gas=$(sed -n 's/.*--unicity.max-gas=\([0-9][0-9]*\).*/\1/p' /data/release/ureth-flags.txt)
+if [ "$1" = node ] && [ -n "$gas" ]; then exec /usr/local/bin/unicity-reth "$@" --builder.gaslimit "$gas"; fi
+exec /usr/local/bin/unicity-reth "$@"
+EOF
+chmod 0755 "$HOME/ureth-wrapper/unicity-reth"
+docker stop unicity-node && docker rm unicity-node
+docker run -d --name unicity-node --network host -v unicity-validator:/data \
+  -v "$HOME/ureth-wrapper/unicity-reth:/opt/ureth-wrapper/unicity-reth:ro" \
+  -e PATH=/opt/ureth-wrapper:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  "$IMAGE" run
+```
+
+Remove the wrapper once you run an image of a release that ships the flag.
 
 ### Rehearsal recovery for an interrupted journal observation
 

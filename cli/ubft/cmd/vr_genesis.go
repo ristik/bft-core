@@ -728,9 +728,12 @@ var vrGenesisCommitmentSlot = vrschema.Keccak([]byte("unicity.seal-registry/gene
 // with no value, and every flag at most once (the client refuses repeated --unicity options; a repeat here is a conflict, never a choice).
 type urethArgs map[string]string
 
-// urethUnicityFlags are the flags of the vector verify certifies: ureth's --unicity.* options (bin/unicity-reth/src/main.rs UnicityArgs)
-// and the two pool bounds the profile sets. true marks a value-less switch. Any other argument is not part of the certified vector.
+// urethUnicityFlags are the flags of the vector verify certifies: ureth's --unicity.* options (bin/unicity-reth/src/main.rs UnicityArgs),
+// the two pool bounds the profile sets, and the two runtime flags every validator of a generation runs with (#1321): the block builder's
+// gas limit, which must be the profile's maxGas (ureth refuses to build any other next-block gas limit), and the persistence threshold.
+// true marks a value-less switch. Any other argument is not part of the certified vector.
 var urethUnicityFlags = map[string]bool{
+	"--builder.gaslimit": false, "--engine.persistence-threshold": false,
 	"--unicity.fee-collector": false, "--unicity.network-id": false, "--unicity.root-genesis-id": false, "--unicity.chain-id": false,
 	"--unicity.profile-hash": false, "--unicity.genesis-commitment": false, "--unicity.max-epochs-per-update": false,
 	"--unicity.records-custody": false, "--unicity.h-records": false, "--unicity.hook-record-gas": false, "--unicity.election": false,
@@ -1123,6 +1126,12 @@ func vrVerify(v vrVerifyInput) (vrRootDeployment, error) {
 	}
 	if err := args.typed(); err != nil {
 		return out, err
+	}
+	// #1321: a validator whose builder targets another gas limit has every block it leads refused ("next-block gas_limit mismatch")
+	if _, ok := args["--builder.gaslimit"]; ok {
+		if got, _ := args.uint("--builder.gaslimit", 0); got != v.profile.MaxGas {
+			return fail("ureth --builder.gaslimit is %d, the profile's maxGas is %d", got, v.profile.MaxGas)
+		}
 	}
 	for flag, want := range map[string]uint64{"--unicity.base-fee-floor": in.Fees.BaseFeeFloor, "--unicity.base-fee-change-denominator": in.Fees.ChangeDenominator,
 		"--unicity.elasticity": 2} {

@@ -11,7 +11,7 @@ One command produces every artifact of the generation and refuses any mismatch b
   vr/alloc.json     VR + facets, PoaElection, PoaComposerEngine (first, checked), FoundationMultisig (contracts script/vr-genesis.sh)
   genesis.json      the EVM genesis with the SealRegistry and the VR accounts; full-shard-conf.json (engine-api genesis)
   vr-deployment.json the roots' --vr-deployment, written by `ubft vr-genesis verify` only when everything agrees
-  ureth-flags.txt   the paired ureth's --unicity.* flags (the profile's, plus the genesis commitment)
+  ureth-flags.txt   the paired ureth's --unicity.* flags (the profile's, plus the genesis commitment), its builder gas limit and persistence threshold
 
 The recorded measurement (--measurement) is ureth's complete-path measurement the profile is pinned from; its VR and module code hashes are
 what the PDR pins before anything is deployed. The fresh measurement is a generation step: with --ureth the plan runs the paired ureth's
@@ -54,6 +54,19 @@ POS_REWARD_FUNDING = 10_000 * 10**18
 POS_REWARD_RATE = 10**18
 POS_CADENCE = (400, 300)
 POS_LIMITS = '4,5,5'   # nMin,nTarget,nMax: nTarget 5 so the fifth identity (the joiner) is elected
+
+
+# #1321: the execution client's arguments beyond the certified --unicity.* vector that every validator of a generation runs with. The
+# builder's gas limit is the profile's maxGas: ureth refuses to build any other next-block gas limit, so a validator without it has every
+# round it leads time out. The persistence threshold is the genesis ureths'.
+PERSISTENCE_THRESHOLD = 64
+
+
+def ureth_runtime_flags(flags, max_gas):
+    """The one source of the chain-bound ureth vector: what ureth-flags.txt ships (the validator container and the host package read it) and
+    what generate.py starts the genesis ureths with. `flags` is the profile's vector with the genesis commitment, as tokens."""
+    return [*flags, f'--unicity.fee-collector={FEE_COLLECTOR}', f'--builder.gaslimit={int(max_gas)}',
+            f'--engine.persistence-threshold={PERSISTENCE_THRESHOLD}']
 
 
 class VRGenesisError(RuntimeError):
@@ -259,7 +272,8 @@ def compose_pos_genesis(a, *, ubft, home, network, generation, roots, evms, fund
         raise VRGenesisError('the contracts allocation changed the full shard configuration')
     fresh, provenance = fresh_measurement(a, network)
     flags = [*flags, '--unicity.genesis-commitment=' + genesis_commitment(json.loads((home / 'genesis.json').read_text()))]
-    (network / 'ureth-flags.txt').write_text(' '.join(flags) + f' --unicity.fee-collector={FEE_COLLECTOR}\n')
+    max_gas = int(json.loads(profile.read_text())['maxGas'])
+    (network / 'ureth-flags.txt').write_text(' '.join(ureth_runtime_flags(flags, max_gas)) + '\n')
     (network / 'fee-collector.txt').write_text(FEE_COLLECTOR + '\n')
     print(verify_compose_pos(ubft, network, generation, home))
     deployment = json.loads((network / 'deployment.json').read_text())
@@ -391,7 +405,7 @@ def plan(a):
         raise VRGenesisError('the full shard configuration changed after the genesis assignment was fixed (the contracts accounts moved seal_registry_genesis?)')
     fresh, provenance = fresh_measurement(a, out, pos_hash)
     provenance['sha256'] = hashlib.sha256(fresh.read_bytes()).hexdigest()
-    ureth = flags[0] + f' --unicity.genesis-commitment={genesis_commitment(genesis)} --unicity.fee-collector={FEE_COLLECTOR}'
+    ureth = ' '.join(ureth_runtime_flags([*flags[0].split(), f'--unicity.genesis-commitment={genesis_commitment(genesis)}'], profile['maxGas']))
     (out / 'ureth-flags.txt').write_text(ureth + '\n')
     shutil.copy2(trust, out / 'trust-base.json')
 
