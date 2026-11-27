@@ -284,14 +284,14 @@ vrp_recovery_evidence() { # <old root epoch> <handoff = the handoff committed | 
   fi
 }
 
-vrp_k_shard_serving() {
-  local i=$1 node status
+vrp_k_shard_serving() { # <node> [root epoch] [shard epoch]
+  local i=$1 root_epoch=${2:-4} shard_epoch=${3:-3} node status
   node=$(evm_validator_id "$i") || return 1
   status=$(curl -fsS -m 2 "http://$(evm_validator_rpc_addr "$i")/api/v1/health") || return 1
-  jq -e --arg node "$node" --argjson partition "$partitionID" '
+  jq -e --arg node "$node" --argjson partition "$partitionID" --argjson root "$root_epoch" --argjson shard "$shard_epoch" '
     .executorOk == true and .voting == true and .binding.member == true and
     .binding.nodeId == $node and .binding.partitionId == $partition and
-    .binding.shardEpoch == 3 and .binding.history[-1].epoch == 4
+    .binding.shardEpoch == $shard and .binding.history[-1].epoch == $root
   ' <<<"$status" >/dev/null || return 1
   printf '%s\n' "$status" >"$VR_EVIDENCE/evm$i-k-health.json"
 }
