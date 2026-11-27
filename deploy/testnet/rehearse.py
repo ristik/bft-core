@@ -573,6 +573,11 @@ class Rehearsal:
         import vr_late_joiner
         vr_late_joiner.vr_late_joiner(self)
 
+    def vr_pop_miss(self):
+        """#1319: an incumbent that stops answering its handoff PoP is parked by a certified miss (vr_pop_miss.py)."""
+        import vr_pop_miss
+        vr_pop_miss.vr_pop_miss(self)
+
     def vr_reject(self):
         """#1311: an elected joiner that never sends its handoff PoP; its output expires and the roots reject it themselves (vr_reject.py)."""
         import vr_reject
@@ -1988,7 +1993,7 @@ POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-observe', 'pos_observe'), ('pos-
 POS_STAGE_NAMES = frozenset(n for n, _ in POS_STAGES)
 # Stages of the package built with --utb (the signed trust-base history, either aggregator): not in the hosted-runner rehearsal, whose package is the one without it. They run after the PoS stages.
 UTB_STAGES = (('utb-live', 'utb_live'),)
-VR_STAGES = (('vr-pos-publish', 'vr_pos_publish'), ('vr-pos-advance', 'vr_pos_advance'), ('vr-pos-recover', 'vr_pos_recover'), ('vr-late-joiner', 'vr_late_joiner'), ('vr-reject', 'vr_reject'))
+VR_STAGES = (('vr-pos-publish', 'vr_pos_publish'), ('vr-pos-advance', 'vr_pos_advance'), ('vr-pos-recover', 'vr_pos_recover'), ('vr-late-joiner', 'vr_late_joiner'), ('vr-reject', 'vr_reject'), ('vr-pop-miss', 'vr_pop_miss'))
 
 
 def main():

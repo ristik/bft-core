@@ -6,6 +6,7 @@ import (
 
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/vrschema"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -125,6 +126,7 @@ func (x *ConsensusManager) orderRejectionWith(ctx context.Context, block *drctyp
 
 // addRejection is orderRejectionWith once the candidates are known: the first one the whole block accepts in a trial execution is placed.
 func (x *ConsensusManager) addRejection(ctx context.Context, block *drctypes.BlockData, candidates []drctypes.PosControl, trialExecute func(*drctypes.BlockData) error) bool {
+	candidates = x.withMissCertificates(candidates)
 	for i, c := range candidates {
 		if i == maxPosTrials {
 			return false
@@ -185,4 +187,29 @@ func insertRejection(controls []drctypes.PosControl, c drctypes.PosControl) []dr
 		}
 	}
 	return slices.Insert(append([]drctypes.PosControl(nil), controls...), at, c)
+}
+
+// withMissCertificates puts, before each VR Expired rejection the leader holds certified handoff-PoP misses for (#1319), the same rejection
+// carrying them: the trial then prefers it, and the ordinary rejection without certificates still follows it. The builder (posreject) is
+// unchanged; certificates are attached only here, at ordering.
+func (x *ConsensusManager) withMissCertificates(candidates []drctypes.PosControl) []drctypes.PosControl {
+	if x.vr == nil {
+		return candidates
+	}
+	var out []drctypes.PosControl
+	for _, c := range candidates {
+		if c.Registry && c.Op == drctypes.OpRejectResult && c.Reject != nil && c.Reject.Misses == nil {
+			if o, err := vrschema.DecodeOutputRejected(c.Data); err == nil && o.Reason == vrschema.RejExpired {
+				if ms := x.vrMissCertificates(o.ResultID, c.Reject.Attempt); len(ms) > 0 {
+					with := c
+					r := *c.Reject
+					r.Misses = ms
+					with.Reject = &r
+					out = append(out, with)
+				}
+			}
+		}
+		out = append(out, c)
+	}
+	return out
 }

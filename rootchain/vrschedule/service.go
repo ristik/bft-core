@@ -99,6 +99,11 @@ type Committed struct {
 	// FrozenParent and FrozenRoot are the frozen EVM parent a committed Prepare bound and its certified state root (zero otherwise): the
 	// Freeze witness is fetched there in the background.
 	FrozenParent, FrozenRoot [32]byte
+	// Request is the committed handoff-PoP request (#1319), nil when none is held; Progress is the committed block's root canonical
+	// progress (ProgressOK false when it is unknown): at or past the request's cutoff this root states the misses it saw.
+	Request    *vrschema.PoPRequest
+	Progress   uint64
+	ProgressOK bool
 }
 
 // Outcome is how one offered message was judged.
@@ -137,7 +142,9 @@ type ServiceConfig struct {
 	Signer abcrypto.Signer // its root key: the assembly
 	// Send hands an outbound message (this root's assembly) to the transport, never under the service's lock; nil sends nothing.
 	Send func(Message)
-	Log  *slog.Logger
+	// SendMiss hands this root's miss statements to the transport (#1319), never under the service's lock; nil sends nothing.
+	SendMiss func([]MissMessage)
+	Log      *slog.Logger
 }
 
 type viewState struct {
@@ -178,6 +185,11 @@ type intentState struct {
 	assembled  map[uint64]bool
 	basis      [32]byte // the committed schedule and support table the intent's verdicts were judged under
 	basisVer   uint64   // counts the basis changes under the intent: a support verdict is of the version it was judged under
+	// since is the root progress of the committed update that staged this intent here (sinceOK false when unknown): a root states misses
+	// only for an intent it held from before the request's cutoff, so a root that (re)learned the intent later never states one (#1319)
+	since   uint64
+	sinceOK bool
+	relayed map[string]bool // EVM nodes whose proof this root relayed
 }
 
 type bufItem struct {
@@ -207,6 +219,33 @@ type Service struct {
 	// requeue hands a buffered message that became judgeable back to the verification queue (set by NewQueue); false when the queue does not
 	// admit it, and the message stays buffered
 	requeue func(sender string, m Message) bool
+	// misses are the verified miss statements by request digest (at most MissBooks), and own this root's statements of the committed request
+	// it decided on (decided), re-sent every MissResendEvery updates until another request is committed (#1319)
+	misses  map[[32]byte]*missBook
+	decided [32]byte
+	own     []MissMessage
+}
+
+// MissBooks bounds the request digests whose miss statements a root keeps; MissResendEvery is how many committed updates pass between two
+// sends of this root's own statements.
+const (
+	MissBooks       = 2
+	MissResendEvery = 64
+)
+
+// MissMessage is one miss statement on the wire: the request digest, the member's staking id and the signature; the signer is the stream's
+// authenticated peer.
+type MissMessage struct {
+	Request   [32]byte
+	StakingID uint64
+	Sig       []byte
+}
+
+// missBook is the statements of one request: by staking id, then signer node id.
+type missBook struct {
+	sigs  map[uint64]map[string][]byte
+	count map[string]int // statements kept per signer (at most MaxCommittee)
+	at    uint64         // the update it was last written at
 }
 
 func NewService(cfg ServiceConfig) *Service {
@@ -227,9 +266,15 @@ type followUp struct {
 	asm     *assemblyTask
 	cert    *certTask
 	requeue func(string, Message) bool
+	// out are messages this root sends as they are (a relayed proof)
+	out []Message
+	// misses are this root's miss statements to send
+	misses []MissMessage
 }
 
 func (f *followUp) merge(g followUp) {
+	f.out = append(f.out, g.out...)
+	f.misses = append(f.misses, g.misses...)
 	f.pend = append(f.pend, g.pend...)
 	if g.asm != nil {
 		f.asm = g.asm
@@ -277,10 +322,11 @@ func (s *Service) isDead(d []byte) bool {
 	return false
 }
 
-func (s *Service) updateLocked(c Committed) followUp {
+func (s *Service) updateLocked(c Committed) (f followUp) {
 	s.updates++
 	s.k, s.tab, s.sch, s.incumbents, s.membership = c.K, c.Table, c.Schedule, c.Incumbents, true
 	defer s.pruneBuffered()
+	defer func() { f.misses = append(f.misses, s.missesLocked(c)...) }()
 	if !c.Derivable {
 		if s.cur != nil {
 			s.markDead(s.cur.digest)
@@ -303,6 +349,7 @@ func (s *Service) updateLocked(c Committed) followUp {
 			return followUp{}
 		}
 		st.basis = basis
+		st.since, st.sinceOK = c.Progress, c.ProgressOK
 		s.cur = st
 		s.lastSeat = map[string]bool{}
 		for i, d := range s.dead {
@@ -401,7 +448,8 @@ func newIntentState(c Committed) (*intentState, error) {
 	}
 	st := &intentState{d: c.Derived, digest: c.Derived.Digest, order: vrhandoff.AssemblerOrder(c.Derived.Digest, ids), incumbents: c.Incumbents,
 		successors: cand.Identities, byRoot: map[string]evmassign.Identity{}, byEVM: map[string]evmassign.Identity{}, trustBase: tb,
-		pops: map[string]vrhandoff.PoPOffer{}, popRefused: map[string]int{}, views: map[uint64]*viewState{}, assembled: map[uint64]bool{}}
+		pops: map[string]vrhandoff.PoPOffer{}, popRefused: map[string]int{}, views: map[uint64]*viewState{}, assembled: map[uint64]bool{},
+		relayed: map[string]bool{}}
 	for _, m := range cand.Identities {
 		st.byRoot[m.RootNodeID], st.byEVM[m.EVMNodeID] = m, m
 	}
@@ -639,6 +687,12 @@ func (s *Service) apply(j Job, verr error) (Outcome, error, followUp) {
 	var f followUp
 	if o == Retained {
 		f = s.followLocked()
+		if p := j.msg.PoP; p != nil && j.sender != s.cfg.Self && s.cur != nil && !s.cur.relayed[p.EVMNodeID] {
+			// a proof a member sent to this root reaches every honest root: relayed once (#1319)
+			s.cur.relayed[p.EVMNodeID] = true
+			relay := *p
+			f.out = append(f.out, Message{PoP: &relay})
+		}
 	}
 	return o, err, f
 }
@@ -785,7 +839,9 @@ func (s *Service) followLocked() followUp {
 
 // finish does a state change's follow-up work outside the lock, until none is left, and sends this root's messages it produced.
 func (s *Service) finish(f followUp) []Message {
-	var out []Message
+	out := f.out
+	misses := f.misses
+	f.out, f.misses = nil, nil
 	for !f.empty() {
 		switch {
 		case f.cert != nil:
@@ -814,7 +870,9 @@ func (s *Service) finish(f followUp) []Message {
 			f.merge(more)
 		}
 	}
+	out, misses = append(out, f.out...), append(misses, f.misses...)
 	s.send(out)
+	s.sendMisses(misses)
 	return out
 }
 
@@ -1279,4 +1337,180 @@ func (s *Service) Presence(resultID [32]byte) uint16 {
 		}
 	}
 	return bm
+}
+
+// sendMisses hands this root's own miss statements to the transport, outside the service's lock.
+func (s *Service) sendMisses(ms []MissMessage) {
+	if s.cfg.SendMiss == nil || len(ms) == 0 {
+		return
+	}
+	s.cfg.SendMiss(ms)
+}
+
+// missesLocked is this root's part in the certified handoff-PoP miss (#1319, astra option (a)). At the first committed update at or past the
+// committed request's cutoff it decides once: if it held the request's intent from before the cutoff, it signs, for every roster member
+// whose valid proof it lacks, the statement CBOR(["UNICITY_VR_POP_MISS", 1, requestDigest, stakingID]) by its root key, keeps it and sends
+// it to its peers; a root that learned the intent only at or after the cutoff (a restart) states nothing. Its own statements are re-sent
+// every MissResendEvery updates while the request is the committed one.
+func (s *Service) missesLocked(c Committed) []MissMessage {
+	r := c.Request
+	if r == nil {
+		s.own = nil
+		return nil
+	}
+	digest, err := r.Digest()
+	if err != nil {
+		return nil
+	}
+	if s.decided == digest {
+		if len(s.own) > 0 && s.updates%MissResendEvery == 0 {
+			return append([]MissMessage(nil), s.own...)
+		}
+		return nil
+	}
+	if !c.ProgressOK || c.Progress < r.Deadline {
+		return nil
+	}
+	s.decided, s.own = digest, nil
+	st := s.cur
+	if st == nil || !bytes.Equal(st.digest[:], r.Intent) || !st.sinceOK || st.since >= r.Deadline || s.cfg.Signer == nil {
+		s.log().Info("VR handoff: no PoP miss is stated: this root did not hold the request's intent from before its cutoff",
+			"request", fmt.Sprintf("%x", digest[:8]), "deadline", r.Deadline, "progress", c.Progress)
+		return nil
+	}
+	if len(st.successors) != len(r.Roster) {
+		return nil
+	}
+	var missing []uint64
+	for i, m := range st.successors {
+		id, ok := vrschema.StakingIDU64(m.StakingID)
+		if !ok || id != r.Roster[i] {
+			return nil
+		}
+		if _, have := st.pops[m.EVMNodeID]; have {
+			continue
+		}
+		msg, err := vrschema.MissStatementBytes(digest, id)
+		if err != nil {
+			return nil
+		}
+		sig, err := s.cfg.Signer.SignBytes(msg)
+		if err != nil {
+			s.log().Warn("VR handoff: a PoP miss statement could not be signed", "error", err)
+			return nil
+		}
+		s.own = append(s.own, MissMessage{Request: digest, StakingID: id, Sig: sig})
+		s.keepMissLocked(s.cfg.Self, digest, id, sig)
+		missing = append(missing, id)
+	}
+	s.log().Info("VR handoff: PoP misses stated at the request's cutoff", "request", fmt.Sprintf("%x", digest[:8]), "result",
+		fmt.Sprintf("%x", r.ResultID[:8]), "deadline", r.Deadline, "progress", c.Progress, "missing", fmt.Sprint(missing))
+	return append([]MissMessage(nil), s.own...)
+}
+
+// keepMissLocked stores one verified statement, within the bounds: MissBooks request digests (the oldest-written other than the decided one
+// goes) and MaxCommittee statements per signer and digest.
+func (s *Service) keepMissLocked(signer string, digest [32]byte, id uint64, sig []byte) bool {
+	if s.misses == nil {
+		s.misses = map[[32]byte]*missBook{}
+	}
+	b := s.misses[digest]
+	if b == nil {
+		if len(s.misses) >= MissBooks {
+			var drop [32]byte
+			found := false
+			for d, x := range s.misses {
+				if d != s.decided && (!found || x.at < s.misses[drop].at) {
+					drop, found = d, true
+				}
+			}
+			if !found {
+				return false
+			}
+			delete(s.misses, drop)
+		}
+		b = &missBook{sigs: map[uint64]map[string][]byte{}, count: map[string]int{}}
+		s.misses[digest] = b
+	}
+	b.at = s.updates
+	if b.sigs[id] == nil {
+		b.sigs[id] = map[string][]byte{}
+	}
+	if _, have := b.sigs[id][signer]; have {
+		return false
+	}
+	if b.count[signer] >= vrschema.MaxCommittee {
+		return false
+	}
+	b.sigs[id][signer], b.count[signer] = bytes.Clone(sig), b.count[signer]+1
+	return true
+}
+
+// OfferMiss judges one miss statement a peer sent (#1319): the signer must be an incumbent of the last committed update and its signature
+// over the statement must verify by its root key (checked outside the lock). A verified statement is kept for its request digest.
+func (s *Service) OfferMiss(signer string, m MissMessage) (Outcome, error) {
+	s.mu.Lock()
+	key, ok := s.incumbents[signer]
+	if b := s.misses[m.Request]; ok && b != nil && b.sigs[m.StakingID] != nil {
+		if _, have := b.sigs[m.StakingID][signer]; have {
+			s.mu.Unlock()
+			return Duplicate, nil
+		}
+	}
+	s.mu.Unlock()
+	if !ok {
+		return Dropped, fmt.Errorf("vrschedule: a PoP miss statement by %s, who is no incumbent", signer)
+	}
+	if len(m.Sig) != 65 {
+		return Refused, errors.New("vrschedule: a PoP miss statement's signature is not 65 bytes")
+	}
+	msg, err := vrschema.MissStatementBytes(m.Request, m.StakingID)
+	if err != nil {
+		return Refused, err
+	}
+	if err := vrschema.Verify(key, m.Sig, msg); err != nil {
+		return Refused, fmt.Errorf("vrschedule: a PoP miss statement by %s does not verify: %w", signer, err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if k, still := s.incumbents[signer]; !still || !bytes.Equal(k, key) {
+		return Dropped, nil
+	}
+	if !s.keepMissLocked(signer, m.Request, m.StakingID, m.Sig) {
+		return Dropped, nil
+	}
+	return Retained, nil
+}
+
+// MissCertificates are the miss statements this root holds for a request, as one certificate per roster member that has any (signatures
+// ascending by node id), in roster order. Whether a certificate reaches the quorum is the caller's to judge against the committee.
+func (s *Service) MissCertificates(r vrschema.PoPRequest) []vrschema.MissCertificate {
+	digest, err := r.Digest()
+	if err != nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b := s.misses[digest]
+	if b == nil {
+		return nil
+	}
+	var out []vrschema.MissCertificate
+	for _, id := range r.Roster {
+		sigs := b.sigs[id]
+		if len(sigs) == 0 {
+			continue
+		}
+		ids := make([]string, 0, len(sigs))
+		for n := range sigs {
+			ids = append(ids, n)
+		}
+		sort.Strings(ids)
+		c := vrschema.MissCertificate{StakingID: id}
+		for _, n := range ids {
+			c.Sigs = append(c.Sigs, vrschema.MissSig{NodeID: n, Sig: bytes.Clone(sigs[n])})
+		}
+		out = append(out, c)
+	}
+	return out
 }

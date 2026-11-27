@@ -270,6 +270,8 @@ func genEncoding() ([]Vector, error) {
 		{"OutputRejected Invalid with member", RecOutputRejected, OutputRejected{ResultID: rid, Reason: RejInvalid, MemberID: 3}.Encode()},
 		{"HolderRetirement", RecHolderRetirement, HolderRetirement{Holder: 0, ID: 7, Generation: 1, RefDigest: w("ref")}.Encode()},
 		{"HolderRetirement max ids", RecHolderRetirement, HolderRetirement{Holder: 7, ID: ^uint64(0), Generation: ^uint64(0), RefDigest: w("ref")}.Encode()},
+		{"PoPMissed", RecPoPMissed, PoPMissed{ResultID: rid, Deadline: 14_096, MissedBitmap: 0b10000}.Encode()},
+		{"PoPMissed sixteen members", RecPoPMissed, PoPMissed{ResultID: rid, Deadline: ^uint64(0), MissedBitmap: 0xffff}.Encode()},
 	}
 	decodeRec := func(kind uint8, data []byte) error {
 		switch kind {
@@ -281,6 +283,9 @@ func genEncoding() ([]Vector, error) {
 			return e
 		case RecHolderRetirement:
 			_, e := DecodeHolderRetirement(data)
+			return e
+		case RecPoPMissed:
+			_, e := DecodePoPMissed(data)
 			return e
 		}
 		return CheckRecordPayload(kind, data)
@@ -311,7 +316,12 @@ func genEncoding() ([]Vector, error) {
 		{"OutputRejected bitmap outside Expired", RecOutputRejected, OutputRejected{ResultID: rid, Reason: RejInvalid, ReadyBitmap: 1}.Encode()},
 		{"HolderRetirement holder 8", RecHolderRetirement, HolderRetirement{Holder: 8, ID: 1, Generation: 1}.Encode()},
 		{"HolderRetirement 96 bytes", RecHolderRetirement, recs[6].data[:96]},
-		{"kind 9", 9, make([]byte, 32)},
+		{"PoPMissed empty bitmap", RecPoPMissed, PoPMissed{ResultID: rid, Deadline: 1}.Encode()},
+		{"PoPMissed zero result", RecPoPMissed, PoPMissed{Deadline: 1, MissedBitmap: 1}.Encode()},
+		{"PoPMissed bitmap bit 16", RecPoPMissed, mutate(recs[8].data, 2*32+29, 1)},
+		{"PoPMissed deadline high byte", RecPoPMissed, mutate(recs[8].data, 32, 1)},
+		{"PoPMissed 128 bytes", RecPoPMissed, append(append([]byte{}, recs[8].data...), make([]byte, 32)...)},
+		{"kind 10", 10, make([]byte, 32)},
 		{"SessionClosed 64 bytes", RecSessionClosed, make([]byte, 64)},
 		{"Ack id high byte", RecAck, mutate(make([]byte, 128), 32, 1)},
 	} {
@@ -321,7 +331,7 @@ func genEncoding() ([]Vector, error) {
 		}
 		b.add(bad.name, "record.decode", map[string]any{"kind": bad.kind, "data": Hexb(bad.data)}, map[string]any{"ok": false, "error": err.Error()})
 	}
-	for k := uint8(1); k <= 8; k++ {
+	for k := uint8(1); k <= 9; k++ {
 		b.add(fmt.Sprintf("width kind %d", k), "record.width", map[string]any{"kind": k, "types": RecordWordTypes[k]}, map[string]any{"width": RecordWidths[k]})
 		if 32*len(RecordWordTypes[k]) != RecordWidths[k] {
 			b.fail("width %d", k)
@@ -456,6 +466,9 @@ func genEncoding() ([]Vector, error) {
 		{"HolderRetirement v2", OpHolderRetirement, ControlContext{EVMBlockHash: wb("block"), EVMStateRoot: wb("state")}, recs[6].data, w("witness")},
 		{"RejectResult v2", OpRejectResult, ControlContext{Predecessor: wb("pred"), Attempt: 2, EVMBlockHash: wb("block"), EVMStateRoot: wb("state")}, recs[3].data, w("witness")},
 		{"CloseLiability", OpCloseLiability, ControlContext{ClosedEpoch: 4, BundleSemanticID: wb("bundle")}, make([]byte, 192), w("witness")},
+		{"PoPRequest", OpPoPRequest, ControlContext{IntentDigest: wb("intent")}, nil, [32]byte{}},
+		{"RejectResult v2 with certified misses", OpRejectResult, ControlContext{Predecessor: wb("pred"), Attempt: 2, EVMBlockHash: wb("block"), EVMStateRoot: wb("state"),
+			Misses: fxMisses()}, recs[3].data, w("witness")},
 	}
 	for _, c := range ctlCases {
 		enc, err := EncodeVRControl(fxRootNetwork, chain, ValidatorRegistry, 5, 900, c.op, c.ctx, c.data, c.wh)
@@ -482,7 +495,11 @@ func genEncoding() ([]Vector, error) {
 		{"RuleSupport unsorted", OpRuleSupport, ControlContext{Commitments: []SupportCommitment{sc2, sc}}, nil, [32]byte{}},
 		{"RuleSupport empty", OpRuleSupport, ControlContext{}, nil, [32]byte{}},
 		{"RejectResult v1 width", OpRejectResult, ControlContext{Predecessor: wb("pred"), EVMBlockHash: wb("b"), EVMStateRoot: wb("s")}, rid[:], w("witness")},
-		{"op 6", 6, ControlContext{}, nil, [32]byte{}},
+		{"PoPRequest zero intent", OpPoPRequest, ControlContext{IntentDigest: make([]byte, 32)}, nil, [32]byte{}},
+		{"PoPRequest with witness", OpPoPRequest, ControlContext{IntentDigest: wb("intent")}, nil, w("witness")},
+		{"RejectResult misses unsorted", OpRejectResult, ControlContext{Predecessor: wb("pred"), Attempt: 2, EVMBlockHash: wb("block"), EVMStateRoot: wb("state"),
+			Misses: []MissCertificate{fxMisses()[1], fxMisses()[0]}}, recs[3].data, w("witness")},
+		{"op 7", 7, ControlContext{}, nil, [32]byte{}},
 	} {
 		_, err := EncodeVRControl(fxRootNetwork, chain, ValidatorRegistry, 5, 900, c.op, c.ctx, c.data, c.wh)
 		if err == nil {
@@ -493,6 +510,18 @@ func genEncoding() ([]Vector, error) {
 	pr, _ := ProjectRejectResult(recs[3].data)
 	b.add("RejectResult projection", "control.project", map[string]any{"data": Hexb(recs[3].data)},
 		map[string]any{"records": []any{map[string]any{"kind": pr[0][0], "data": Hexb(pr[0][1].([]byte))}, map[string]any{"kind": pr[1][0], "data": Hexb(pr[1][1].([]byte))}}})
+	pm, err := ProjectRejectResultMissed(recs[3].data, PoPMissed{Deadline: 14_096, MissedBitmap: 0b10000})
+	if err != nil || len(pm) != 3 {
+		b.fail("RejectResult projection with misses: %v", err)
+	} else {
+		var rs []any
+		for _, x := range pm {
+			rs = append(rs, map[string]any{"kind": x[0], "data": Hexb(x[1].([]byte))})
+		}
+		b.add("RejectResult projection with certified misses", "control.project", map[string]any{"data": Hexb(recs[3].data), "deadline": Dec(14_096),
+			"missedBitmap": 0b10000}, map[string]any{"records": rs})
+	}
+	genPoPMissEncodings(b, rid)
 
 	// --- candidate v6, handoff messages, Freeze v5 ---
 	genHandoffEncodings(b, rid)

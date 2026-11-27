@@ -4,6 +4,7 @@
 package vrschedule
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -152,6 +153,9 @@ func (p *Intents) derive(q storage.VRIntentQuery, fetch bool) (Derived, bool, er
 	}
 	v := Derived{VRIntent: storage.VRIntent{Digest: d, AnchorRound: in.AnchorRound, AnchorUCTime: AnchorUCTime(src, state)}, Intent: in, RootEpoch: q.Epoch,
 		Body: vrhandoff.BodyContext{PredecessorLink: facts.Link, Config: cfg}}
+	if v.VRIntent.Request, err = PoPRequestOf(in, d, q.Epoch); err != nil {
+		return none, false, nil
+	}
 	if q.Candidate == nil {
 		return v, true, nil
 	}
@@ -174,4 +178,24 @@ func AnchorUCTime(src SourceEntry, state vradmit.RootState) uint64 {
 		return src.CertUCTime
 	}
 	return state.AttemptOpenUCTime
+}
+
+// PoPRequestOf is the PoP request an intent makes (#1319), without its deadline: the network, predecessor, result and attempt the intent
+// binds, its candidate's identities (ascending staking id, the order Presence and the records use) as the roster, the intent digest and the
+// root epoch it is derived in.
+func PoPRequestOf(in vrhandoff.Intent, digest [32]byte, epoch uint64) (vrschema.PoPRequest, error) {
+	cand, err := vrhandoff.CandidateOf(in)
+	if err != nil {
+		return vrschema.PoPRequest{}, err
+	}
+	ids := make([][]byte, len(cand.Identities))
+	for i, m := range cand.Identities {
+		ids[i] = m.StakingID
+	}
+	roster, err := vrschema.RosterOf(ids)
+	if err != nil {
+		return vrschema.PoPRequest{}, err
+	}
+	return vrschema.PoPRequest{Epoch: epoch, Network: in.Network, Predecessor: bytes.Clone(in.PredecessorBodyID), ResultID: bytes.Clone(in.Source.ResultID),
+		Attempt: in.Attempt, Roster: roster, Intent: bytes.Clone(digest[:])}, nil
 }

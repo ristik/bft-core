@@ -160,6 +160,7 @@ const (
 	RecBoundary         uint8 = 6
 	RecOutputRejected   uint8 = 7
 	RecHolderRetirement uint8 = 8
+	RecPoPMissed        uint8 = 9
 )
 
 // VR-mode root control ops.
@@ -169,4 +170,5 @@ const (
 	OpRejectResult     uint64 = 3 // v2
 	OpRuleSupport      uint64 = 4
 	OpHandoffView      uint64 = 5
+	OpPoPRequest       uint64 = 6
 )

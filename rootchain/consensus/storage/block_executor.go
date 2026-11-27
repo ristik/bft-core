@@ -564,7 +564,8 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 		env.vr = &vrEnv{step: &vr, svc: services.Registry, committee: vrCommittee(nextShardState, shardConfs, orchestration),
 			query: VRIntentQuery{Control: nextShardState.Control, Epoch: newBlock.Epoch, Round: newBlock.Round, LatestEVMRoot: latestRoot,
 				LatestEVMBlock: latestBlock, LatestEVMOK: latestEVMOK,
-				Root: vrRootFacts(nextShardState, shardConfs, orchestration, services.Registry, nextShardState.Control.Network, newBlock.Epoch, authority)}}
+				Root: vrRootFacts(nextShardState, shardConfs, orchestration, services.Registry, nextShardState.Control.Network, newBlock.Epoch, authority)},
+			root: currentRootOf(authority)}
 	}
 	replaced, err := pos.controls(newBlock, services, env)
 	if err != nil {

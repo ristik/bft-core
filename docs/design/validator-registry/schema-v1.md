@@ -76,11 +76,12 @@ rule) and *measured*.
 | `MIN_EPOCH_GAP` | 100 | rule |
 | `FORCE_DEADLINE`, stall deadline | `maxElectionInterval + 2·LIFETIME` | rule |
 | `PARK_PERIOD` | `2·LIFETIME` = 32,768 (PoA §3.7.4; P85 PoS too, #1303) | rule |
+| `POP_WINDOW` | `LIFETIME / 4` = 4,096 root progress (the handoff-PoP request's cutoff, #1319, §10.7) | rule |
 | composer pool / trials | 6 / 64 | rule |
 | `MAX_HOLDERS` / P85 custody holder index | 8 / 0 | rule |
 | `MAX_ACTIVATIONS` | 64 | rule |
 | support table | 16 × 64 | rule |
-| record widths, kinds 1–8 | 32 / 128 / 288 / 192 / 96 / 224 / 128 / 128 | schema |
+| record widths, kinds 1–9 | 32 / 128 / 288 / 192 / 96 / 224 / 128 / 128 / 96 | schema |
 | records per root block | 32 | existing |
 | `MAX_RET` | elect 160, Ready output 5,408, Pending/NotMine 96, adoption 96, void 0 | rule |
 | metadata return | ≤ 32 × 8 = 256 bytes; exact per getter (§5.5) | rule |
@@ -420,6 +421,7 @@ performs it; ModuleAction never binds. Vectors: `change.binding`, `change.scope`
 | 6 **Boundary** | 224 | resultID, changesEpoch u64, installedRootEpoch u64, installedShardEpoch u64, activationRound u64, recovered bool, rejectedBitmap u16 |
 | 7 **OutputRejected** | 128 | resultID, reason u8, memberId u64, readyBitmap u16 |
 | 8 **HolderRetirement** | 128 | holder u8 (< 8), id u64, generation u64, refDigest |
+| 9 **PoPMissed** | 96 | resultID, deadline u64, missedBitmap u16 |
 
 - **Boundary:** `resultID ≠ 0`; `installedRootEpoch = changesEpoch` for a primary and `changesEpoch + 1` when `recovered`;
   bit i of `rejectedBitmap` (LSB = entry 0) is the i-th `RegistryChanges` entry; `installedShardEpoch` is K's on recovery, else J's.
@@ -435,8 +437,13 @@ performs it; ModuleAction never binds. Vectors: `change.binding`, `change.scope`
   Retirement and claims are untouched. Root consensus and this schema are unchanged; root logs carry the bitmap a root built
   (`election result due for rejection`), ordered (`a RejectResult is ordered in this proposal`) and committed
   (`election result rejection committed`).
+- **PoPMissed (#1319):** `resultID ≠ 0`, `missedBitmap ≠ 0` (bit i: the i-th roster member, ascending staking id, the frozen-member
+  order); `deadline` is the request's cutoff in root progress. It sits between the result's Expired `OutputRejected` and its
+  `SessionClosed`, at their anchor, and only when at least one member's miss is certified (§10.7). VR and custody ignore it; the P85
+  PoS adapter hands it to `ElectionPolicy.parkMissed`, which parks every certified member, **incumbents included**, once per result for
+  `PARK_PERIOD`. It removes no signing authority, stake, exit or claim right and is never slashing.
 - **Gas pricing inputs** (ureth `records.rs`): the admission charge stays `2000 + 16·bytes + 1000·entries`, the companion cap 16,384
-  bytes and 32 entries, and `IMPORT_EXECUTION_GAS` (measured on nine-word records) still bounds the SealRegistry part, because kinds 6–8
+  bytes and 32 entries, and `IMPORT_EXECUTION_GAS` (measured on nine-word records) still bounds the SealRegistry part, because kinds 6–9
   are at most seven words. VR's per-record work is `HookRecordGas` (design §3.3.4), measured by VT-02.
 
 Vectors: `record.decode`, `record.width`, `record.gas`.
@@ -458,8 +465,13 @@ A VR-mode control keeps the P85 control's ten-element shape under its own tag, s
 | 3 RejectResult v2 | `[predecessorBodyID, attempt uint, evmBlockHash, evmStateRoot]` | OutputRejected (128) | OutputRejected, then SessionClosed(resultID) |
 | 4 RuleSupport | `[commitments]`: 1–64 SupportCommitment (§10.4), strictly ascending by (stakingID, ruleId) | empty | none (root-only) |
 | 5 HandoffView | `[intentDigest bstr32 ≠ 0, view uint ≥ 1]` | empty | none (root-only) |
+| 6 PoPRequest | `[intentDigest bstr32 ≠ 0]` | empty | none (root-only, §10.7) |
 
-Ops 4 and 5 carry no witness: `witnessHash` is 32 zero bytes. The item must re-encode to exactly the bytes read. Vectors:
+A RejectResult v2 may carry a fifth context element `misses`: 1–16 `MissCertificate` strictly ascending by stakingID (§10.7); it then
+projects OutputRejected, PoPMissed and SessionClosed. Without it the context keeps its four elements, byte for byte. In a payload the
+PoPRequest comes after the RuleSupport controls and before the HandoffView, at most one per block.
+
+Ops 4, 5 and 6 carry no witness: `witnessHash` is 32 zero bytes. The item must re-encode to exactly the bytes read. Vectors:
 `control.encode`, `control.project`.
 
 ---
@@ -585,6 +597,33 @@ valid only from the next block. `PlannableAttempt`: idle → 0; aborted at k →
 k+1; otherwise undefined. A Freeze is in time iff its block round ≤ OrderedRound + 24.
 
 Vectors: `handoff.*`, `backoff.*`, `view.*`.
+
+### 10.7 Certified handoff-PoP miss (#1319)
+
+```
+PoPRequest     = [epoch, network, predecessorBodyID bstr32, resultID bstr32, attempt, roster [uint], deadline, intentDigest bstr32]
+requestDigest  = SHA-256(CBOR(["UNICITY_VR_POP_REQUEST", 1, network, predecessor, resultID, attempt, roster, deadline, intentDigest]))
+statement      = CBOR(["UNICITY_VR_POP_MISS", 1, requestDigest, stakingID])   signed by an old root's root key
+MissCertificate = [stakingID uint, [[nodeID text, sig bstr65]] strictly ascending by nodeID]
+```
+
+- **Request (op 6).** Valid iff the named intent is the derivable one over the block's state and the committed state holds no request of
+  that intent. The executor fills it from the intent: network, predecessor, result, attempt, the candidate's identities by ascending
+  staking id as the roster, and `deadline = progress(block) + POP_WINDOW` (`POP_WINDOW = LIFETIME / 4 = 4,096`). It is kept in the VR
+  root state (version 3 of its encoding, only while held): a newer intent's request replaces it, a RejectResult of its result consumes
+  it, and the block end drops it in another epoch.
+- **Response window.** Members send their PoP to any old root; a root relays a proof it retained from another sender once. Certificates
+  count only if `deadline ≤ expiresAtProgress`, so the full window lies inside the result's lifetime.
+- **Statements.** At its first committed block with progress ≥ deadline an old root signs the statement for each roster member whose
+  valid PoP it lacks, once, if it held the intent from before the cutoff (a root that learned it later states nothing).
+- **Certificates.** An Expired RejectResult v2 at progress ≥ deadline may carry certificates. Each names a roster member and is signed by
+  distinct members of the entire predecessor committee with weight ≥ `Threshold(total)`, the ordinary commit quorum. Each stands alone:
+  roots may disagree about other members without blocking expiry. A certificate that fails refuses the control; ordinary expiry still
+  closes without certificates.
+- They attest quorum non-receipt by a deadline. Network delay can still certify an honest member, so the only consequence is a fixed,
+  non-escalating election park. The leader bitmap, repeated expiries and a vote of the remaining incumbents carry no such authority.
+
+Vectors: `digest.popRequest`, `handoff.popMissStatement`, `handoff.missCertificates`.
 
 ---
 

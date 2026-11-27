@@ -187,7 +187,8 @@ func (x *ConsensusManager) EnableVRHandoff(ctx context.Context, cfg VRHandoffCon
 	v := &vrHandoff{cfg: cfg, obsWake: make(chan struct{}, 1), obsq: func() storage.ObservationQueue { return x.blockStore() }, prefetch: make(chan vrschedule.CertifiedEVM, 64),
 		observer: &vrschedule.Observer{Reader: cfg.Reader, Sources: cfg.Intents.Sources, Outputs: cfg.Intents.Outputs, Log: cfg.Log,
 			OnPending: func(a []vrschema.Activation) { x.notePending(a, x.InstalledRootEpoch()) }}}
-	v.svc = vrschedule.NewService(vrschedule.ServiceConfig{Self: x.id.String(), Signer: cfg.Signer, Log: cfg.Log, Send: func(m vrschedule.Message) { v.send(ctx, m) }})
+	v.svc = vrschedule.NewService(vrschedule.ServiceConfig{Self: x.id.String(), Signer: cfg.Signer, Log: cfg.Log, Send: func(m vrschedule.Message) { v.send(ctx, m) },
+		SendMiss: func(ms []vrschedule.MissMessage) { v.sendMisses(ctx, ms) }})
 	v.queue = vrschedule.NewQueue(v.svc, cfg.PiMax)
 	v.kick = make(chan struct{}, 1)
 	v.queue.Delivered = func(o vrschedule.Outcome, _ []vrschedule.Message, err error) {
@@ -386,6 +387,19 @@ func (v *vrHandoff) send(ctx context.Context, m vrschedule.Message) {
 	go func() {
 		if err := vrschedule.Push(ctx, v.cfg.Opener, peers, m); err != nil {
 			v.cfg.Log.Debug("VR handoff: a message did not reach every peer", "error", err)
+		}
+	}()
+}
+
+// sendMisses pushes this root's handoff-PoP miss statements to its peers (#1319), off the caller's goroutine.
+func (v *vrHandoff) sendMisses(ctx context.Context, ms []vrschedule.MissMessage) {
+	if v.cfg.Opener == nil {
+		return
+	}
+	peers := v.peers()
+	go func() {
+		if err := vrschedule.PushMisses(ctx, v.cfg.Opener, peers, ms); err != nil {
+			v.cfg.Log.Debug("VR handoff: a PoP miss statement did not reach every peer", "error", err)
 		}
 	}()
 }
@@ -609,6 +623,8 @@ func (x *ConsensusManager) vrCommitted() (vrschedule.Committed, error) {
 	c.K, c.Schedule = facts.Lifecycle.Incumbent, facts.Fold.Schedule
 	x.noteSchedule(c.Schedule, q.Epoch) // the warning and the gauge, from the moment the committed schedule holds an entry this binary lacks
 	c.Table = s.Support
+	c.Request = s.Request
+	c.Progress, c.ProgressOK = x.blockStore().CommittedRootProgress()
 	c.Derived, c.Derivable = d, ok
 	if !ok {
 		return c, nil
@@ -972,6 +988,89 @@ func (x *ConsensusManager) orderHandoffViewWith(ctx context.Context, block *rcty
 	}
 	block.Payload = trial.Payload
 	x.log.InfoContext(ctx, "VR handoff: proposing HandoffView", "intent", fmt.Sprintf("%x", intent[:8]), "view", view)
+}
+
+// orderPoPRequest adds the PoP request of the committed opening's intent to a proposal that orders no handoff record (#1319), once per
+// intent: when the committed state holds no request of that intent and the trial execution over the parent admits it. The executor sets the
+// request's cutoff from the block's root progress.
+func (x *ConsensusManager) orderPoPRequest(ctx context.Context, block *rctypes.BlockData) {
+	x.orderPoPRequestWith(ctx, block, func(b *rctypes.BlockData) error { return x.blockStore().TrialExecute(b, x.irReqVerifier) })
+}
+
+func (x *ConsensusManager) orderPoPRequestWith(ctx context.Context, block *rctypes.BlockData, trialExecute func(*rctypes.BlockData) error) {
+	if x.vr == nil || block == nil || block.Payload == nil || len(block.Payload.HandoffRecords) != 0 || len(block.Payload.PosControls) >= rctypes.MaxPosControls {
+		return
+	}
+	o, on, err := x.vr.opening()
+	if err != nil || !on || !o.IntentOK {
+		return
+	}
+	intent := o.Intent.Digest
+	if r := o.State.Request; r != nil && bytes.Equal(r.Intent, intent[:]) {
+		return
+	}
+	for _, c := range block.Payload.PosControls {
+		if c.Registry && (c.Op == rctypes.OpPoPRequest || c.Op == rctypes.OpHandoffView) {
+			return
+		}
+	}
+	d := x.vr.cfg.Intents.Deployment
+	c := rctypes.PosControl{Registry: true, Network: d.RootNetwork, ChainID: d.ChainID, Custody: d.Registry, OrderingEpoch: block.Epoch, OrderingRound: block.Round,
+		Op: rctypes.OpPoPRequest, Request: &rctypes.RequestContext{IntentDigest: intent}}
+	trial := *block
+	payload := *block.Payload
+	payload.PosControls = append(append([]rctypes.PosControl(nil), payload.PosControls...), c)
+	trial.Payload = &payload
+	if err := trialExecute(&trial); err != nil {
+		x.log.DebugContext(ctx, "VR handoff: the PoP request is not admitted at this parent", "intent", fmt.Sprintf("%x", intent[:8]), "error", err)
+		return
+	}
+	block.Payload = trial.Payload
+	x.log.InfoContext(ctx, "VR handoff: proposing the PoP request", "intent", fmt.Sprintf("%x", intent[:8]), "round", block.Round)
+}
+
+// vrMissCertificates are the certified handoff-PoP misses this leader can attach to an Expired rejection of resultID at attempt (#1319): the
+// committed request must be of that result and attempt, and each certificate the service holds is kept only if it alone reaches the
+// ordinary commit quorum by weight of the whole committee of the committed epoch. Nil when there are none.
+func (x *ConsensusManager) vrMissCertificates(resultID [32]byte, attempt uint64) []rctypes.MissCertificate {
+	if x.vr == nil {
+		return nil
+	}
+	o, on, err := x.vr.opening()
+	if err != nil || !on {
+		return nil
+	}
+	r := o.State.Request
+	if r == nil || !bytes.Equal(r.ResultID, resultID[:]) || r.Attempt != attempt {
+		return nil
+	}
+	tb := x.trustBase.Load()
+	if tb == nil || tb.Epoch != r.Epoch {
+		return nil
+	}
+	var root []evmassign.RootMember
+	for _, n := range tb.RootNodes {
+		if n == nil {
+			return nil
+		}
+		root = append(root, evmassign.RootMember{NodeID: n.NodeID, Key: n.SigKey, Weight: n.Stake})
+	}
+	committee, threshold, err := storage.MissCommittee(root)
+	if err != nil {
+		return nil
+	}
+	var out []rctypes.MissCertificate
+	for _, c := range x.vr.svc.MissCertificates(*r) {
+		if _, err := vrschema.VerifyMissCertificates(*r, []vrschema.MissCertificate{c}, committee, threshold); err != nil {
+			continue
+		}
+		mc := rctypes.MissCertificate{StakingID: c.StakingID}
+		for _, s := range c.Sigs {
+			mc.Sigs = append(mc.Sigs, rctypes.MissSig{NodeID: s.NodeID, Sig: bytes.Clone(s.Sig)})
+		}
+		out = append(out, mc)
+	}
+	return out
 }
 
 // stageVRCandidate stages the candidate of a verified assembly of the current intent on this node (VT-09): the successor body, its candidate

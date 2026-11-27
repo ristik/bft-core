@@ -38,6 +38,9 @@ const (
 	kindReadiness = 3
 	kindGetStage  = 4
 	kindGetSource = 5
+	// kindMiss is one handoff-PoP miss statement (#1319): Intent carries the request digest, FromView the member's staking id and Result the
+	// 65-byte signature; the signer is the stream's authenticated peer, so the frame keeps its seven elements.
+	kindMiss = 6
 )
 
 // ErrWire reports a malformed exchange.
@@ -51,7 +54,7 @@ type wireMessage struct {
 	Readiness *vrhandoff.Readiness
 	Intent    []byte
 	FromView  uint64
-	Result    []byte // kindGetSource: the result id whose committed source is asked for
+	Result    []byte // kindGetSource: the result id whose committed source is asked for; kindMiss: the statement's signature
 }
 
 // wireSource answers a GetSource: the committed source of the result when this root observed it.
@@ -228,6 +231,12 @@ func (s *Server) Serve(from peer.ID, st Stream) {
 			return
 		}
 		_ = writeFrame(st, b)
+	case kindMiss:
+		if len(w.Intent) != 32 || w.PoP != nil || w.Assembly != nil || w.Readiness != nil {
+			_ = st.Reset()
+			return
+		}
+		_, _ = s.svc.OfferMiss(from.String(), MissMessage{Request: [32]byte(w.Intent), StakingID: w.FromView, Sig: w.Result})
 	case kindGetSource:
 		if s.sources == nil || len(w.Result) != 32 || !s.stageDue(from) {
 			_ = st.Reset()
@@ -258,6 +267,23 @@ func Push(ctx context.Context, opener Opener, peers []peer.ID, m Message) error 
 	for _, p := range peers {
 		if err := pushOne(ctx, opener, p, b); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", p, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// PushMisses sends this root's miss statements to every peer, best effort (#1319).
+func PushMisses(ctx context.Context, opener Opener, peers []peer.ID, ms []MissMessage) error {
+	var errs []error
+	for _, m := range ms {
+		b, err := types.Cbor.Marshal(wireMessage{Kind: kindMiss, Intent: m.Request[:], FromView: m.StakingID, Result: m.Sig})
+		if err != nil {
+			return err
+		}
+		for _, p := range peers {
+			if err := pushOne(ctx, opener, p, b); err != nil {
+				errs = append(errs, fmt.Errorf("%s: %w", p, err))
+			}
 		}
 	}
 	return errors.Join(errs...)
