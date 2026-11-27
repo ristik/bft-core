@@ -689,7 +689,8 @@ class JoinInOneRun(unittest.TestCase):
     def test_apply_runs_once_with_the_pin_template(self):
         calls = []
 
-        def ubft(*args, **kw):
+        def command(binary, *args, **kw):
+            self.assertEqual(binary, 'handoff-ubft')
             calls.append(args)
             if args[:2] == ('validator', 'apply'):
                 template = json.loads(Path(args[args.index('--pin-pos-policy') + 1]).read_text())
@@ -700,7 +701,7 @@ class JoinInOneRun(unittest.TestCase):
 
         class Stop(Exception):
             pass
-        with patch.object(validator, 'ubft', ubft), patch.object(validator, 'authority_status', return_value={'enrollmentComplete': False}), \
+        with patch.object(validator, 'command', command), patch.object(validator, 'authority_status', return_value={'enrollmentComplete': False}), \
                 patch.object(validator, 'wait_for', side_effect=Stop):
             with self.assertRaises(Stop):
                 validator.join(SimpleNamespace(yes=True), {})
@@ -734,6 +735,7 @@ class JoinInOneRun(unittest.TestCase):
         def authority(*args, **kw):
             calls.append(args)
             if args[0] == 'advance-with-proof':
+                self.assertEqual(kw['binary'], 'handoff-ubft')
                 self.assertEqual(args[1:3], ('--scope-only', '--proof'))
                 self.assertEqual(args[3].read_bytes(), b'activation four')
                 state.update(rootEpoch=4, shardEpoch=5, lineageEpoch=4)

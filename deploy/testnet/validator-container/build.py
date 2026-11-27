@@ -29,7 +29,7 @@ def main():
     cli = argparse.ArgumentParser(description=__doc__)
     cli.add_argument('verified_release', type=Path)
     cli.add_argument('--foundry-archive', required=True, type=Path)
-    cli.add_argument('--handoff-ubft', required=True, type=Path, help='this checkout’s validator publication CLI, built for linux/amd64')
+    cli.add_argument('--handoff-ubft', required=True, type=Path, help='this checkout’s joiner, signing authority and validator publication CLI, built for linux/amd64')
     cli.add_argument('--tag', required=True)
     cli.add_argument('--rehearsal-lock', type=Path, help='independent pins for a private loopback release')
     cli.add_argument('--public-peers', type=Path, help='directory of the verified public peer lists for this release')

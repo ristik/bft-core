@@ -283,8 +283,10 @@ def init(a, pins):
         print(f"Payee {info['payee']}. Fund 100 UCT plus gas. One faucet claim pays 200 UCT.")
 
 
-def authority(*args, home=None, **options):
-    return ubft('signing-authority', *args, *auth_flags(home), **options)
+def authority(*args, home=None, binary='ubft', **options):
+    if binary == 'ubft':
+        return ubft('signing-authority', *args, *auth_flags(home), **options)
+    return command(binary, 'signing-authority', *args, *auth_flags(home), **options)
 
 
 def authority_status(home=None):
@@ -365,6 +367,8 @@ def authority_process(a, pins):
                 '--b1-profile', RELEASE/'b1-profile.json', '--activation-source-url', EXECUTION,
                 '--execution-genesis-hash', read(RELEASE/'manifest.json')['genesis_hash']]
         if rec is None:
+            # The verified release can predate the joiner authority and CLI in this image.
+            args[0] = 'handoff-ubft'
             args += ['--pending-join-scope']
         proc = subprocess.Popen([str(x) for x in args], cwd=HOME)
         signal.signal(signal.SIGTERM, lambda *_: proc.terminate())
@@ -771,7 +775,7 @@ def join(a, pins):
             # election's handoff moved the shard epoch this authority was started for. A resumed run pins the same policy again (a no-op).
             template = auth_dir()/'pos-policy-template.json'
             write(template, json.dumps(pos_policy()).encode())
-            ubft('validator', 'apply', '--pin-pos-policy', template, timeout=900)
+            command('handoff-ubft', 'validator', 'apply', '--pin-pos-policy', template, timeout=900)
             journal(progress, 'electing', id=read(CONFIG)['id'])
         ident = read(CONFIG)['id']
         info = read(auth_dir()/'node-info.json')
@@ -835,7 +839,8 @@ def refresh_join_scope(status, target):
     with tempfile.TemporaryDirectory(prefix='.join-scope-', dir=HOME) as temp:
         proof = Path(temp)/f'activation-{epoch}.cbor'
         ubft('q3', 'proof-envelope', '--root-rpc', ROOT, '--epoch', epoch, '--out', proof, timeout=30)
-        done = authority('advance-with-proof', '--scope-only', '--proof', proof, output=True, check=False, timeout=30)
+        done = authority('advance-with-proof', '--scope-only', '--proof', proof, binary='handoff-ubft',
+                         output=True, check=False, timeout=30)
         if done.returncode:
             text = (done.stdout + done.stderr).strip()
             if 'signing-enrollment-incomplete' in text:
