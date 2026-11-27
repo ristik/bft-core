@@ -615,9 +615,10 @@ MissCertificate = [stakingID uint, [[nodeID text, sig bstr65]] strictly ascendin
 - **Response window.** Members send their PoP to any old root; a root relays a proof it retained from another sender once. Certificates
   count only if `deadline ≤ expiresAtProgress`, so the full window lies inside the result's lifetime.
 - **Statements.** At its first committed block with progress ≥ deadline an old root signs the statement for each roster member whose
-  valid PoP it lacks, once, if it held the intent from before the cutoff (a root that learned it later states nothing).
+  valid PoP it lacks, once, only if it held the intent continuously from no later than the request's block (a root that (re)learned
+  it later, after a restart, states nothing) and never held a verified assembly of it (whose candidate proves every member).
 - **Certificates.** An Expired RejectResult v2 at progress ≥ deadline may carry certificates. Each names a roster member and is signed by
-  distinct members of the entire predecessor committee with weight ≥ `Threshold(total)`, the ordinary commit quorum. Each stands alone:
+  distinct members of the entire predecessor committee with weight ≥ max(`Threshold(total)`, the trust base's own threshold), the ordinary commit quorum. Each stands alone:
   roots may disagree about other members without blocking expiry. A certificate that fails refuses the control; ordinary expiry still
   closes without certificates.
 - **Known limits.** Voters do not require certificates: a faulty leader can order the expiry without them, which costs one more lifetime.

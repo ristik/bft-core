@@ -28,6 +28,9 @@ type vrEnv struct {
 	// root is the predecessor root committee (the epoch's authority), whose weight a handoff-PoP miss certificate must reach; nil where the
 	// block has no authority, which refuses every certificate.
 	root func() []evmassign.RootMember
+	// quorum is the predecessor trust base's own commit threshold (0 where the authority names none): a miss certificate needs the larger of
+	// it and Threshold(total), the ordinary commit quorum in any configuration (#1319 review P3-1)
+	quorum uint64
 }
 
 // vrControl executes one VR-mode control. It returns the control state a RejectResult replaced, or nil.
@@ -199,7 +202,7 @@ func (p *posStep) certifiedMisses(c rctypes.PosControl, data vrschema.OutputReje
 	if env.vr.root == nil {
 		return 0, 0, errors.New("no predecessor committee to judge the miss certificates against")
 	}
-	committee, threshold, err := MissCommittee(env.vr.root())
+	committee, threshold, err := MissCommittee(env.vr.root(), env.vr.quorum)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -210,8 +213,9 @@ func (p *posStep) certifiedMisses(c rctypes.PosControl, data vrschema.OutputReje
 	return r.Deadline, missed, nil
 }
 
-// MissCommittee is the predecessor root committee as miss signers, and its ordinary commit quorum by weight.
-func MissCommittee(root []evmassign.RootMember) ([]vrschema.CommitteeMember, uint64, error) {
+// MissCommittee is the predecessor root committee as miss signers, and its ordinary commit quorum by weight: the larger of the trust
+// base's own threshold (trustQuorum, 0 when unknown) and Threshold(total).
+func MissCommittee(root []evmassign.RootMember, trustQuorum uint64) ([]vrschema.CommitteeMember, uint64, error) {
 	if len(root) == 0 {
 		return nil, 0, errors.New("an empty predecessor committee")
 	}
@@ -225,7 +229,7 @@ func MissCommittee(root []evmassign.RootMember) ([]vrschema.CommitteeMember, uin
 		out[i] = vrschema.CommitteeMember{NodeID: m.NodeID, Key: m.Key, Weight: m.Weight}
 	}
 	threshold, err := quorumweight.Threshold(total)
-	return out, threshold, err
+	return out, max(threshold, trustQuorum), err
 }
 
 // MissCertificatesOf converts the control's certificates to the schema's.

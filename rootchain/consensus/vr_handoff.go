@@ -1055,17 +1055,40 @@ func (x *ConsensusManager) vrMissCertificates(resultID [32]byte, attempt uint64)
 		}
 		root = append(root, evmassign.RootMember{NodeID: n.NodeID, Key: n.SigKey, Weight: n.Stake})
 	}
-	committee, threshold, err := storage.MissCommittee(root)
+	committee, threshold, err := storage.MissCommittee(root, tb.QuorumThreshold)
 	if err != nil {
 		return nil
 	}
+	digest, err := r.Digest()
+	if err != nil {
+		return nil
+	}
+	keys := map[string][]byte{}
+	for _, m := range committee {
+		keys[m.NodeID] = m.Key
+	}
 	var out []rctypes.MissCertificate
 	for _, c := range x.vr.svc.MissCertificates(*r) {
-		if _, err := vrschema.VerifyMissCertificates(*r, []vrschema.MissCertificate{c}, committee, threshold); err != nil {
+		// keep only the signers this committee recognizes with a valid statement (one stale key must not cost the whole certificate), then
+		// require the quorum of what is left
+		msg, err := vrschema.MissStatementBytes(digest, c.StakingID)
+		if err != nil {
 			continue
 		}
-		mc := rctypes.MissCertificate{StakingID: c.StakingID}
+		trimmed := vrschema.MissCertificate{StakingID: c.StakingID}
 		for _, s := range c.Sigs {
+			if key, ok := keys[s.NodeID]; ok && vrschema.Verify(key, s.Sig, msg) == nil {
+				trimmed.Sigs = append(trimmed.Sigs, s)
+			}
+		}
+		if len(trimmed.Sigs) == 0 {
+			continue
+		}
+		if _, err := vrschema.VerifyMissCertificates(*r, []vrschema.MissCertificate{trimmed}, committee, threshold); err != nil {
+			continue
+		}
+		mc := rctypes.MissCertificate{StakingID: trimmed.StakingID}
+		for _, s := range trimmed.Sigs {
 			mc.Sigs = append(mc.Sigs, rctypes.MissSig{NodeID: s.NodeID, Sig: bytes.Clone(s.Sig)})
 		}
 		out = append(out, mc)

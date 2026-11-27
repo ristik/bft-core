@@ -153,9 +153,9 @@ func (p *Intents) derive(q storage.VRIntentQuery, fetch bool) (Derived, bool, er
 	}
 	v := Derived{VRIntent: storage.VRIntent{Digest: d, AnchorRound: in.AnchorRound, AnchorUCTime: AnchorUCTime(src, state)}, Intent: in, RootEpoch: q.Epoch,
 		Body: vrhandoff.BodyContext{PredecessorLink: facts.Link, Config: cfg}}
-	if v.VRIntent.Request, err = PoPRequestOf(in, d, q.Epoch); err != nil {
-		return none, false, nil
-	}
+	if req, err := PoPRequestOf(in, d, q.Epoch); err == nil {
+		v.VRIntent.Request = req
+	} // else the request stays zero: only control op 6 is refused (its shape check), never the handoff itself (#1319 review P3-2)
 	if q.Candidate == nil {
 		return v, true, nil
 	}

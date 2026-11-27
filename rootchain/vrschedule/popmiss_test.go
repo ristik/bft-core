@@ -14,6 +14,9 @@ import (
 
 // #1319: the root side of the certified handoff-PoP miss (the PoP relay, the statements at the cutoff, their collection).
 
+// testDeadline is the cutoff of a request committed at root progress 10.
+const testDeadline = 10 + vrschema.PoPWindow
+
 func (w *world) request(deadline uint64) *vrschema.PoPRequest {
 	r, err := PoPRequestOf(w.in, w.d, w.RC.RootEpoch)
 	require.NoError(w.T, err)
@@ -68,16 +71,16 @@ func TestMissesAreStatedAtTheCutoffForTheMissingMembersOnly(t *testing.T) {
 	var sent [][]MissMessage
 	m := w.Members[1]
 	s := NewService(ServiceConfig{Self: m.Root, Signer: m.RK.Signer, SendMiss: func(ms []MissMessage) { sent = append(sent, ms) }})
-	r := w.request(1_000)
+	r := w.request(testDeadline)
 	s.Update(w.committedAt(r, 10))
 	pops := w.PoPs(w.in)
 	for i := range pops[:3] { // members 1, 2, 3 prove; 5 does not
 		_, _, err := s.Offer("root-2", Message{PoP: &pops[i]})
 		require.NoError(t, err)
 	}
-	s.Update(w.committedAt(r, 999))
+	s.Update(w.committedAt(r, testDeadline-1))
 	require.Empty(t, sent, "nothing before the cutoff")
-	s.Update(w.committedAt(r, 1_000))
+	s.Update(w.committedAt(r, testDeadline))
 	require.Len(t, sent, 1)
 	require.Len(t, sent[0], 1)
 	digest, err := r.Digest()
@@ -92,7 +95,7 @@ func TestMissesAreStatedAtTheCutoffForTheMissingMembersOnly(t *testing.T) {
 	_, _, err = s.Offer("root-2", Message{PoP: &pops[3]})
 	require.NoError(t, err)
 	for i := 0; i < MissResendEvery; i++ {
-		s.Update(w.committedAt(r, 1_001+uint64(i)))
+		s.Update(w.committedAt(r, testDeadline+1+uint64(i)))
 	}
 	require.Len(t, sent, 2)
 	require.Equal(t, sent[0], sent[1])
@@ -109,9 +112,9 @@ func TestNoMissIsStatedForAnIntentLearnedAfterTheCutoff(t *testing.T) {
 	var sent [][]MissMessage
 	m := w.Members[1]
 	s := NewService(ServiceConfig{Self: m.Root, Signer: m.RK.Signer, SendMiss: func(ms []MissMessage) { sent = append(sent, ms) }})
-	r := w.request(1_000)
-	s.Update(w.committedAt(r, 1_000))
-	s.Update(w.committedAt(r, 1_001))
+	r := w.request(testDeadline)
+	s.Update(w.committedAt(r, testDeadline))
+	s.Update(w.committedAt(r, testDeadline+1))
 	require.Empty(t, sent)
 	require.Empty(t, s.MissCertificates(*r))
 }
@@ -121,7 +124,7 @@ func TestNoMissIsStatedForAnIntentLearnedAfterTheCutoff(t *testing.T) {
 func TestPeerMissStatementsAreVerifiedAndCertificatesArePerMember(t *testing.T) {
 	w := newWorld(t)
 	s := NewService(ServiceConfig{Self: "root-1"})
-	r := w.request(1_000)
+	r := w.request(testDeadline)
 	s.Update(w.committedAt(r, 10))
 	digest, err := r.Digest()
 	require.NoError(t, err)
@@ -179,7 +182,7 @@ func TestAMissStatementOverRealHosts(t *testing.T) {
 	receiver := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
 	sender.Network().Peerstore().AddAddrs(receiver.ID(), receiver.MultiAddresses(), peerstore.PermanentAddrTTL)
 	svc := w.service("x")
-	r := w.request(1_000)
+	r := w.request(testDeadline)
 	c := w.committedAt(r, 10)
 	c.Incumbents = map[string][]byte{sender.ID().String(): w.Members[1].RK.Pub}
 	svc.Update(c)
@@ -207,9 +210,106 @@ func TestOnlyThePredecessorCommitteeStatesMisses(t *testing.T) {
 	var sent [][]MissMessage
 	m := w.Members[5]
 	s := NewService(ServiceConfig{Self: m.Root, Signer: m.RK.Signer, SendMiss: func(ms []MissMessage) { sent = append(sent, ms) }})
-	r := w.request(1_000)
+	r := w.request(testDeadline)
 	s.Update(w.committedAt(r, 10))
-	s.Update(w.committedAt(r, 1_000))
+	s.Update(w.committedAt(r, testDeadline))
 	require.Empty(t, sent)
 	require.Empty(t, s.MissCertificates(*r))
+}
+
+// #1319 review P2-1: a root that restarted after the members stopped re-sending (they stop once an assembly is held) but before the cutoff
+// comes back without their proofs. It states nothing: it did not hold the intent from the request's block on.
+func TestARootRestartedAfterTheRequestStatesNoMiss(t *testing.T) {
+	w := newWorld(t)
+	var sent [][]MissMessage
+	m := w.Members[1]
+	s := NewService(ServiceConfig{Self: m.Root, Signer: m.RK.Signer, SendMiss: func(ms []MissMessage) { sent = append(sent, ms) }})
+	r := w.request(testDeadline)
+	s.Update(w.committedAt(r, 11)) // (re)staged one block after the request's block (progress 10)
+	s.Update(w.committedAt(r, testDeadline))
+	require.Empty(t, sent, "no statement: the root cannot know what the members sent before it restarted")
+}
+
+// #1319 review P2-1: a root that held a verified assembly of the intent knows every member proved (the candidate carries a verified proof
+// per successor), even when it never received a member's PoP directly; it states no miss.
+func TestARootHoldingTheAssemblyStatesNoMiss(t *testing.T) {
+	w := newWorld(t)
+	var sent [][]MissMessage
+	who := w.assembler(0)
+	var s *Service
+	for i := uint64(1); i <= 4 && s == nil; i++ { // an incumbent that is not view 0's assembler
+		if m := w.Members[i]; m.Root != who {
+			s = NewService(ServiceConfig{Self: m.Root, Signer: m.RK.Signer, SendMiss: func(ms []MissMessage) { sent = append(sent, ms) }})
+		}
+	}
+	require.NotNil(t, s)
+	r := w.request(testDeadline)
+	s.Update(w.committedAt(r, 10))
+	pops := w.PoPs(w.in)
+	a := w.Assembly(w.in, w.d, 0, pops)
+	o, _, err := s.Offer(who, Message{Assembly: &a})
+	require.NoError(t, err)
+	require.Equal(t, Retained, o, "the assembly is verified in full")
+	s.Update(w.committedAt(r, testDeadline))
+	require.Empty(t, sent, "the assembly proves every member: no miss")
+	require.Empty(t, s.MissCertificates(*r))
+}
+
+// #1319 review P2-1: when a quorum of the roots restarted after the request (say a rolling upgrade inside the window), only the roots that
+// held the intent throughout state misses, which is below the quorum: no member is certified.
+func TestRestartedRootsCannotFormAQuorumOfMisses(t *testing.T) {
+	w := newWorld(t)
+	r := w.request(testDeadline)
+	digest, err := r.Digest()
+	require.NoError(t, err)
+	var all []MissMessage
+	var by []string
+	var committee []vrschema.CommitteeMember
+	for i := uint64(1); i <= 4; i++ {
+		m := w.Members[i]
+		committee = append(committee, vrschema.CommitteeMember{NodeID: m.Root, Key: m.RK.Pub, Weight: 1})
+		var mine []MissMessage
+		s := NewService(ServiceConfig{Self: m.Root, Signer: m.RK.Signer, SendMiss: func(ms []MissMessage) { mine = append(mine, ms...) }})
+		since := uint64(10)
+		if i > 1 {
+			since = 200 // roots 2, 3, 4 restarted after the request; nobody proved to anyone
+		}
+		s.Update(w.committedAt(r, since))
+		s.Update(w.committedAt(r, testDeadline))
+		for _, x := range mine {
+			all = append(all, x)
+			by = append(by, m.Root)
+		}
+	}
+	require.NotEmpty(t, all, "the root that held the intent throughout states the misses")
+	collector := NewService(ServiceConfig{Self: w.Members[1].Root})
+	collector.Update(w.committedAt(r, 10))
+	for i, x := range all {
+		_, _ = collector.OfferMiss(by[i], x)
+	}
+	for _, c := range collector.MissCertificates(*r) {
+		_, err := vrschema.VerifyMissCertificates(*r, []vrschema.MissCertificate{c}, committee, 3)
+		require.ErrorIs(t, err, vrschema.ErrPoPMiss, "member %d is not certified by one root", c.StakingID)
+	}
+	_ = digest
+}
+
+// #1319 review P3-3: statements of any other request digest than the committed one are dropped before verification.
+func TestStatementsOfAnotherRequestAreDropped(t *testing.T) {
+	w := newWorld(t)
+	s := NewService(ServiceConfig{Self: "root-1"})
+	r := w.request(testDeadline)
+	other := *r
+	other.Attempt++
+	od, err := other.Digest()
+	require.NoError(t, err)
+	msg, err := vrschema.MissStatementBytes(od, 5)
+	require.NoError(t, err)
+	sig, err := w.Members[2].RK.Signer.SignBytes(msg)
+	require.NoError(t, err)
+	o, _ := s.OfferMiss(w.Members[2].Root, MissMessage{Request: od, StakingID: 5, Sig: sig})
+	require.Equal(t, Dropped, o, "no committed request yet")
+	s.Update(w.committedAt(r, 10))
+	o, _ = s.OfferMiss(w.Members[2].Root, MissMessage{Request: od, StakingID: 5, Sig: sig})
+	require.Equal(t, Dropped, o, "another request than the committed one")
 }

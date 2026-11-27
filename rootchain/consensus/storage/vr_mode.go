@@ -222,6 +222,14 @@ func (v *vrStep) store(c *evmroot.ControlState) error {
 	return nil
 }
 
+// currentQuorumOf is the authority's trust-base commit threshold, or 0 where the authority names none.
+func currentQuorumOf(authority handoffAuthority) uint64 {
+	if q, ok := authority.(interface{ CurrentQuorumThreshold() uint64 }); ok && authority != nil {
+		return q.CurrentQuorumThreshold()
+	}
+	return 0
+}
+
 // currentRootOf is the authority's current root committee, or nil without an authority.
 func currentRootOf(authority handoffAuthority) func() []evmassign.RootMember {
 	if authority == nil {

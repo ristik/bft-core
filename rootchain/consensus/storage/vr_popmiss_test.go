@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootrecords"
@@ -214,4 +215,60 @@ func TestMissCertificatesArePerMember(t *testing.T) {
 	m, err := vrschema.DecodePoPMissed(rej.ShardState.Records[1].Data)
 	require.NoError(t, err)
 	require.EqualValues(t, 0b1000, m.MissedBitmap, "member 5 only")
+}
+
+// #1319 review P3-7: a committed request of another attempt or result than the rejection's carries no certificate. (A request of another
+// epoch cannot be held: the executor stamps the block's epoch, and the block end drops the request once the epoch changes, which
+// vradmit's TestRootStateCarriesThePoPRequestOnlyWhileHeld covers; the executor's epoch check is the backstop.)
+func TestACertificateOfAnotherRequestIsRefused(t *testing.T) {
+	for name, edit := range map[string]func(*vrschema.PoPRequest){
+		"another attempt": func(r *vrschema.PoPRequest) { r.Attempt = 1 },
+		"another result":  func(r *vrschema.PoPRequest) { r.ResultID = bytes.Repeat([]byte{0x5a}, 32) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newVXFixture(t)
+			f.progress = 100 + vrschema.Lifetime
+			f.attempt = 1
+			f.build()
+			f.withRequest()
+			edit(&f.intents.in.Request)
+			g := f.genesis()
+			req := f.must(g, f.block(g, 11, 1_005, nil, f.popRequest(11)))
+			stored := *rootState(t, req).Request
+			c, ok := f.built(t, f.rejectBuilder(t, 0b0111), f.rejectionContext(0), missRejectRound)
+			require.True(t, ok)
+			_, err := f.exec(req, f.block(req, missRejectRound, 1_900, nil, withMisses(c, f.missCert(t, stored, 5, statement(t), 1, 2, 3))))
+			require.ErrorIs(t, err, storage.ErrVRControlRefused)
+			_, err = f.exec(req, f.block(req, missRejectRound, 1_900, nil, c))
+			require.NoError(t, err, "the ordinary expiry still closes")
+		})
+	}
+}
+
+// #1319 review P3-7 and P3-1: the quorum is of the whole committee, never of the live part, and never below the trust base's own threshold.
+// Here r1..r4 sign for a committee that also names the joiner's root (five unit weights, quorum 4): three signers are refused, four certify.
+// With the four-root committee and a trust-base threshold of 4, three signers are refused too.
+func TestTheMissQuorumIsOfTheWholeCommittee(t *testing.T) {
+	f, req, stored, c := missWorld(t)
+	exec := func(ms ...rctypes.MissCertificate) error {
+		_, err := f.exec(req, f.block(req, missRejectRound, 1_900, nil, withMisses(c, ms...)))
+		return err
+	}
+	require.NoError(t, exec(f.missCert(t, stored, 5, statement(t), 1, 2, 3)), "4 unit roots: quorum 3")
+	f.auth.Quorum = 4
+	require.ErrorIs(t, exec(f.missCert(t, stored, 5, statement(t), 1, 2, 3)), vrschema.ErrPoPMiss, "the trust base's threshold 4 binds")
+	require.NoError(t, exec(f.missCert(t, stored, 5, statement(t), 1, 2, 3, 4)))
+	f.auth.Quorum = 0
+	f.auth.Root = append(append([]evmassign.RootMember(nil), f.kRoot...), evmassign.RootMember{NodeID: f.members[5].root, Key: f.members[5].rk.pub, Weight: 1})
+	require.ErrorIs(t, exec(f.missCert(t, stored, 5, statement(t), 1, 2, 3)), vrschema.ErrPoPMiss, "five unit roots: quorum 4")
+	require.NoError(t, exec(f.missCert(t, stored, 5, statement(t), 1, 2, 3, 4)))
+}
+
+// #1319 review P3-7: one member's statements cannot certify another member: the statement binds the staking id.
+func TestStatementsOfOneMemberCannotCertifyAnother(t *testing.T) {
+	f, req, stored, c := missWorld(t)
+	of3 := f.missCert(t, stored, 3, statement(t), 1, 2, 3)
+	as5 := rctypes.MissCertificate{StakingID: 5, Sigs: of3.Sigs}
+	_, err := f.exec(req, f.block(req, missRejectRound, 1_900, nil, withMisses(c, as5)))
+	require.ErrorIs(t, err, vrschema.ErrPoPMiss)
 }

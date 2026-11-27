@@ -126,9 +126,9 @@ func (x *ConsensusManager) orderRejectionWith(ctx context.Context, block *drctyp
 
 // addRejection is orderRejectionWith once the candidates are known: the first one the whole block accepts in a trial execution is placed.
 func (x *ConsensusManager) addRejection(ctx context.Context, block *drctypes.BlockData, candidates []drctypes.PosControl, trialExecute func(*drctypes.BlockData) error) bool {
-	candidates = x.withMissCertificates(candidates)
+	candidates, extra := x.withMissCertificates(candidates)
 	for i, c := range candidates {
-		if i == maxPosTrials {
+		if i == maxPosTrials+extra { // the certificate-carrying copy is an extra trial: the plain candidates keep their budget
 			return false
 		}
 		c.OrderingEpoch, c.OrderingRound = block.Epoch, block.Round
@@ -189,18 +189,22 @@ func insertRejection(controls []drctypes.PosControl, c drctypes.PosControl) []dr
 	return slices.Insert(append([]drctypes.PosControl(nil), controls...), at, c)
 }
 
-// withMissCertificates puts, before each VR Expired rejection the leader holds certified handoff-PoP misses for (#1319), the same rejection
+// withMissCertificates puts, before the first VR Expired rejection the leader holds certified handoff-PoP misses for (#1319), the same rejection
 // carrying them: the trial then prefers it, and the ordinary rejection without certificates still follows it. The builder (posreject) is
 // unchanged; certificates are attached only here, at ordering.
-func (x *ConsensusManager) withMissCertificates(candidates []drctypes.PosControl) []drctypes.PosControl {
+func (x *ConsensusManager) withMissCertificates(candidates []drctypes.PosControl) ([]drctypes.PosControl, int) {
 	if x.vr == nil {
-		return candidates
+		return candidates, 0
 	}
 	var out []drctypes.PosControl
+	attached := false
 	for _, c := range candidates {
-		if c.Registry && c.Op == drctypes.OpRejectResult && c.Reject != nil && c.Reject.Misses == nil {
+		// only the first VR Expired candidate gets the extra trial, so the plain candidates keep their places within maxPosTrials (#1319 review
+		// P3-4): a request names one result, so no other candidate could carry its certificates anyway
+		if !attached && c.Registry && c.Op == drctypes.OpRejectResult && c.Reject != nil && c.Reject.Misses == nil {
 			if o, err := vrschema.DecodeOutputRejected(c.Data); err == nil && o.Reason == vrschema.RejExpired {
 				if ms := x.vrMissCertificates(o.ResultID, c.Reject.Attempt); len(ms) > 0 {
+					attached = true
 					with := c
 					r := *c.Reject
 					r.Misses = ms
@@ -211,5 +215,8 @@ func (x *ConsensusManager) withMissCertificates(candidates []drctypes.PosControl
 		}
 		out = append(out, c)
 	}
-	return out
+	if attached {
+		return out, 1
+	}
+	return out, 0
 }

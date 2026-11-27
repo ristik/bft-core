@@ -190,6 +190,9 @@ type intentState struct {
 	since   uint64
 	sinceOK bool
 	relayed map[string]bool // EVM nodes whose proof this root relayed
+	// provedAll is set once this root held a fully verified assembly of the intent: its candidate carries a verified proof of every
+	// successor (vrhandoff.VerifyAssembly), so no member of the roster can be missing (#1319 review P2-1)
+	provedAll bool
 }
 
 type bufItem struct {
@@ -224,6 +227,8 @@ type Service struct {
 	misses  map[[32]byte]*missBook
 	decided [32]byte
 	own     []MissMessage
+	// request is the digest of the committed request (zero when none): only its statements are kept (#1319 review P3-3)
+	request [32]byte
 }
 
 // MissBooks bounds the request digests whose miss statements a root keeps; MissResendEvery is how many committed updates pass between two
@@ -738,6 +743,7 @@ func (s *Service) applyLocked(j Job, verr error) (Outcome, error) {
 			return Dropped, nil // judged as a conflict of an assembly no longer held
 		}
 		vs.assembly, vs.assemblyAt, vs.body = &a, enc, *j.body
+		st.provedAll = true
 		vs.candidate, vs.bodyID = sha256.Sum256(a.Candidate), j.body.Identity()
 		return Retained, nil
 	case m.Readiness != nil:
@@ -1348,19 +1354,28 @@ func (s *Service) sendMisses(ms []MissMessage) {
 }
 
 // missesLocked is this root's part in the certified handoff-PoP miss (#1319, astra option (a)). At the first committed update at or past the
-// committed request's cutoff it decides once: if it held the request's intent from before the cutoff, it signs, for every roster member
-// whose valid proof it lacks, the statement CBOR(["UNICITY_VR_POP_MISS", 1, requestDigest, stakingID]) by its root key, keeps it and sends
-// it to its peers; a root that learned the intent only at or after the cutoff (a restart) states nothing. Its own statements are re-sent
+// committed request's cutoff it decides once: if it held the request's intent continuously from no later than the request's own block, it
+// signs, for every roster member whose valid proof it lacks, the statement CBOR(["UNICITY_VR_POP_MISS", 1, requestDigest, stakingID]) by its
+// root key, keeps it and sends it to its peers. A root that (re)learned the intent after the request was committed (a restart, or an intent
+// that was underivable for a while) states nothing: it cannot know what the members sent before. A root that held a fully verified assembly
+// of the intent states nothing either: the assembly's candidate carries a verified proof of every member. Its own statements are re-sent
 // every MissResendEvery updates while the request is the committed one.
 func (s *Service) missesLocked(c Committed) []MissMessage {
 	r := c.Request
 	if r == nil {
-		s.own = nil
+		s.own, s.request = nil, [32]byte{}
 		return nil
 	}
 	digest, err := r.Digest()
 	if err != nil {
+		s.request = [32]byte{}
 		return nil
+	}
+	s.request = digest
+	for d := range s.misses {
+		if d != digest {
+			delete(s.misses, d) // statements of a request that is no longer the committed one
+		}
 	}
 	if s.decided == digest {
 		if len(s.own) > 0 && s.updates%MissResendEvery == 0 {
@@ -1376,8 +1391,18 @@ func (s *Service) missesLocked(c Committed) []MissMessage {
 		return nil // only the predecessor committee states misses (a successor or K-only root's statements would be dropped)
 	}
 	st := s.cur
-	if st == nil || !bytes.Equal(st.digest[:], r.Intent) || !st.sinceOK || st.since >= r.Deadline || s.cfg.Signer == nil {
-		s.log().Info("VR handoff: no PoP miss is stated: this root did not hold the request's intent from before its cutoff",
+	// the request's own block is at root progress deadline - POP_WINDOW (control op 6)
+	requestedAt := uint64(0)
+	if r.Deadline >= vrschema.PoPWindow {
+		requestedAt = r.Deadline - vrschema.PoPWindow
+	}
+	if st == nil || !bytes.Equal(st.digest[:], r.Intent) || !st.sinceOK || st.since > requestedAt || s.cfg.Signer == nil {
+		s.log().Info("VR handoff: no PoP miss is stated: this root did not hold the request's intent from the request's block on",
+			"request", fmt.Sprintf("%x", digest[:8]), "deadline", r.Deadline, "progress", c.Progress)
+		return nil
+	}
+	if st.provedAll {
+		s.log().Info("VR handoff: no PoP miss is stated: this root held a verified assembly, which proves every member",
 			"request", fmt.Sprintf("%x", digest[:8]), "deadline", r.Deadline, "progress", c.Progress)
 		return nil
 	}
@@ -1449,10 +1474,15 @@ func (s *Service) keepMissLocked(signer string, digest [32]byte, id uint64, sig 
 	return true
 }
 
-// OfferMiss judges one miss statement a peer sent (#1319): the signer must be an incumbent of the last committed update and its signature
-// over the statement must verify by its root key (checked outside the lock). A verified statement is kept for its request digest.
+// OfferMiss judges one miss statement a peer sent (#1319): it must name the committed request, the signer must be an incumbent of the last
+// committed update, and its signature over the statement must verify by its root key (checked outside the lock). A statement of any other
+// request digest is dropped, so a faulty incumbent cannot crowd the committed request's statements out.
 func (s *Service) OfferMiss(signer string, m MissMessage) (Outcome, error) {
 	s.mu.Lock()
+	if s.request == ([32]byte{}) || m.Request != s.request {
+		s.mu.Unlock()
+		return Dropped, errors.New("vrschedule: a PoP miss statement of another request than the committed one")
+	}
 	key, ok := s.incumbents[signer]
 	if b := s.misses[m.Request]; ok && b != nil && b.sigs[m.StakingID] != nil {
 		if _, have := b.sigs[m.StakingID][signer]; have {
