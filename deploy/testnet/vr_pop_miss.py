@@ -114,6 +114,9 @@ def vr_pop_miss(r):
     services = override['services']
     services[f'authority{j}']['entrypoint'] = vr_recover.authority_entrypoint(services[f'authority{j}']['entrypoint'], info['evm'], epoch,
         certified['shardEpoch'] + 1, trust, r.manifest['genesis_hash'])
+    root_entry = services[f'root{j}']['entrypoint']
+    if epoch > 1 and '--install-handoff-epoch' not in root_entry:
+        root_entry.extend(('--install-handoff-epoch', str(epoch)))
     override_path.write_text(json.dumps(override, indent=1, sort_keys=True) + '\n')
     home = val / 'operator-home'
     home.mkdir(mode=0o700)
@@ -132,6 +135,11 @@ def vr_pop_miss(r):
     r.wait('the joiner\'s authority answers', lambda: rec.auth_status(j), 120)
     if not (auth / 'node-info.json').exists():
         rec.exec(f'authority{j}', 'ubft', 'signing-authority', 'node-info', *vr_recover.OPERATOR, '--out', '/authority/node-info.json')
+    # The authority verifies its P85 policy against the joiner's execution client. Its shard must follow certified blocks before apply,
+    # so the authority can see the registration that apply submits through an incumbent.
+    rec.dc('up', '-d', '--no-deps', f'shard{j}', f'root{j}')
+    r.wait("the joiner's execution client has caught up to the certified shard round",
+           lambda: (uc := rec.newest_uc(j, epoch)) is not None and uc['shardRound'] >= certified['shardRound'], 600, every=10)
     mounts = [(auth, '/home/authority')]
 
     def cli(*args, check=True):
@@ -149,8 +157,6 @@ def vr_pop_miss(r):
     r.expect(applied.returncode == 0 and bool(ident) and f'pinned the signing authority\'s P85 scope to identity {ident}' in text,
              'one validator apply registered, delegated and bonded the joiner, pinning its authority to the identity it registered',
              f'{ident}: ' + r.scrub(text.strip()[-300:]))
-    # its shard node feeds its execution client, whose certified blocks its root observes: without it the root derives no intent and sends no proof
-    rec.dc('up', '-d', '--no-deps', f'shard{j}', f'root{j}')
     times['joined'] = vr_recover.utc()
     r.say(f'  joiner {j} is identity {ident}; its shard and root nodes run')
 
