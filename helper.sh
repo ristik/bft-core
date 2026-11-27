@@ -106,8 +106,7 @@ function start_root_nodes() {
   local bootNode=""
   local p2pPort=$rootPortStart
   local rpcPort=$((25866+LANE_PORT_OFFSET))
-  local rpcHost=localhost
-  if [ "${M2_PROFILE2:-0}" = 1 ]; then rpcHost=127.0.0.1; fi
+  local rpcHost=127.0.0.1
 
   bootNode=$(boot_node test-nodes/root1 "$rootPortStart")
 
