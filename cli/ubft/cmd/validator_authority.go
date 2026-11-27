@@ -188,3 +188,14 @@ func readRegistrationPolicy(path string) (signingauthority.RegistrationPolicy, e
 	}
 	return p, nil
 }
+
+// PinPosPolicy pins the authority's P85 possession scope (the same pin again is a no-op; another is refused for the authority's lifetime).
+func (a *evmAuthority) PinPosPolicy(ctx context.Context, p signingauthority.PosPolicy) error {
+	err := a.withOperator(ctx, func(ctx context.Context, op *service.OperatorClient) error {
+		return op.SetPosPolicy(ctx, p)
+	})
+	if err != nil {
+		return fmt.Errorf("pinning the signing authority's P85 scope to identities %v: %w", p.IDs, err)
+	}
+	return nil
+}

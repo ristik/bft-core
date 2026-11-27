@@ -135,9 +135,17 @@ def directory(path):
 
 
 @contextlib.contextmanager
-def lock(name, wait=False):
+def lock(name, wait=False, waiting=None):
+    """An exclusive lock on HOME/name: refused at once (BlockingIOError) unless `wait`; `waiting` is printed when the wait begins."""
     with (HOME/name).open('a') as file:
-        fcntl.flock(file, fcntl.LOCK_EX if wait else fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            if not wait:
+                raise
+            if waiting:
+                print(waiting, flush=True)
+            fcntl.flock(file, fcntl.LOCK_EX)
         yield
 
 
@@ -670,17 +678,24 @@ def participate(halted, *, execution=RPC, root=ROOT, member=None):
                                            {'blockHash':block['hash'], 'requireCanonical':True}])
             if re.fullmatch(r'0x[0-9a-f]{64}', result) and int(result, 16):
                 local = ['--proof-member', member] if member is not None else []
-                with lock('.tx.lock'):
-                    # #1316: pos-publish sends nothing for an identity that requested retirement or was excluded ("no election transactions")
-                    done = command('handoff-ubft', 'validator', 'pos-publish', '--participate', '--result', result, *local,
-                                   output=True, check=False)
-                text = (done.stdout + done.stderr).strip()
-                if done.returncode:
-                    raise RuntimeError(text or f'pos-publish exited with status {done.returncode}')
-                if 'no election transactions' in text:
+                try:
+                    with lock('.tx.lock'):
+                        # #1316: pos-publish sends nothing for an identity that requested retirement or was excluded ("no election
+                        # transactions"); #1323: it finalizes and publishes a ready result in the finalizer order (the lowest frozen
+                        # identity at once, the others only after a delay that grows with their rank)
+                        done = command('handoff-ubft', 'validator', 'pos-publish', '--participate', '--result', result, *local,
+                                       output=True, check=False)
+                except BlockingIOError:
+                    # #1323: `exit --claim` (or `exit`, `recover`) holds the lock; its own transaction goes first
+                    done = None
+                    once('publish', 'authority handoff: a claim, exit or recover run holds the transaction lock; '
+                         'the election transactions wait for it')
+                if done is not None:
+                    text = (done.stdout + done.stderr).strip()
+                    if done.returncode:
+                        raise RuntimeError(text or f'pos-publish exited with status {done.returncode}')
+                    # a state that does not change (the gate, a finalizer turn not yet due) is reported once
                     once('publish', text)
-                elif text:
-                    print(text, flush=True)
             view = rpc(root + '/api/v1/q3/status', '', {}, evm=False)
             if view.get('switch') and view['switch']['phase'] not in ('running', 'following'):
                 continue
@@ -748,26 +763,33 @@ def join(a, pins):
             wait_for('funding', funded)
             journal(progress, 'applying')
         if read(progress)['phase'] == 'applying':
-            first = ubft('validator', 'apply', output=True, check=False)
-            if first.returncode and 'signing-pos-policy-refused' not in first.stdout + first.stderr:
-                raise RuntimeError(first.stderr or first.stdout)
-            ident = read(CONFIG)['id']
-            if first.returncode:
-                policy = {'network':read(RELEASE/'vr-deployment.json')['networkWord'],
-                          'chainId':read(RELEASE/'manifest.json')['chain_id'], 'election':read(RELEASE/'deployment.json')['election'],
-                          'ids':[ident]}
-                provision_pos_policy(auth_dir(), ident)
-                ubft('validator', 'apply')
-            journal(progress, 'electing', id=ident)
+            # #1323: one run. VR assigns the identity id at registration; apply pins the authority's PoS policy to it right before the
+            # delegation possession, so registration, bond and delegation land together. A bonded identity without its delegation is
+            # passed over by an election reserved in the gap, and that election's handoff moves the shard epoch this authority was
+            # started for. A resumed run pins the same policy again, which is a no-op.
+            template = auth_dir()/'pos-policy-template.json'
+            write(template, json.dumps(pos_policy()).encode())
+            ubft('validator', 'apply', '--pin-pos-policy', template, timeout=900)
+            journal(progress, 'electing', id=read(CONFIG)['id'])
         ident = read(CONFIG)['id']
         status = authority_status()
         scope = HOME/'authority-scope.json'
         base = read(scope if scope.exists() else HOME/'network.json')
-        target = wait_for('activated root epoch', lambda: active_member_epoch(root_status(), base['rootEpoch']))
-        journal(progress, 'activation', id=ident, rootEpoch=target)
         shard = base['shardEpoch']
+        info = read(auth_dir()/'node-info.json')
+        checked = [0.0]
+
+        def elected():
+            if time.monotonic() - checked[0] >= 30:
+                checked[0] = time.monotonic()
+                missed_scope(shard, info)
+            return active_member_epoch(root_status(), base['rootEpoch'])
+        target = wait_for('activated root epoch', elected)
+        journal(progress, 'activation', id=ident, rootEpoch=target)
         conf = auth_dir()/'activated-shard.json'
         ubft('q3', 'shard-conf', '--root-rpc', ROOT, '--epoch', shard, '--out', conf)
+        if not names_node(read(conf), info):
+            raise RuntimeError(missed_scope_text(shard))
         if not status['enrollmentComplete']:
             authority('complete-enrollment', '--shard-conf', conf)
         advance(target)
@@ -777,13 +799,40 @@ def join(a, pins):
         return 0
 
 
+def pos_policy(*ids):
+    """The release's P85 election pin (network word, chain id, election) and the identity ids; without ids it is `validator apply
+    --pin-pos-policy`'s template, to which apply adds the identity it registers."""
+    policy = {'network':read(RELEASE/'vr-deployment.json')['networkWord'],
+              'chainId':read(RELEASE/'manifest.json')['chain_id'], 'election':read(RELEASE/'deployment.json')['election']}
+    return {**policy, 'ids':list(ids)} if ids else policy
+
+
 def provision_pos_policy(d, ident):
     """The authority's PoS policy for this identity: it signs the election's delegation possession (admitDelegation) only for it."""
-    policy = {'network':read(RELEASE/'vr-deployment.json')['networkWord'],
-              'chainId':read(RELEASE/'manifest.json')['chain_id'], 'election':read(RELEASE/'deployment.json')['election'],
-              'ids':[ident]}
-    write(d/'pos-policy.json', json.dumps(policy).encode())
+    write(d/'pos-policy.json', json.dumps(pos_policy(ident)).encode())
     authority('pos-policy', '--policy', d/'pos-policy.json', home=d)
+
+
+def names_node(conf, info):
+    """Whether a shard configuration names this EVM node with this authority's key."""
+    named = [v for v in conf.get('validators') or [] if v.get('nodeId') == info['nodeId']]
+    return bool(named) and str(named[0].get('sigKey', '')).lower() == str(info['sigKey']).lower()
+
+
+def missed_scope_text(shard):
+    return (f'shard epoch {shard}, the epoch this authority was started for, activated without this node: an election was held '
+            'before the delegation was admitted, and the authority cannot sign for a later epoch. The identity is registered, bonded '
+            'and delegated. Stop the authority container (keep the volume), then run `ubft-validator recover --yes` and follow the '
+            'steps it prints (Authority loss in the validator handbook): the fresh authority joins at the next election.')
+
+
+def missed_scope(shard, info):
+    """#1323: raise (RuntimeError, which wait_for passes on) once the authority's shard epoch has activated without this node."""
+    with tempfile.TemporaryDirectory(prefix='.scope-', dir=HOME) as temp:
+        path = Path(temp)/'shard.json'
+        done = ubft('q3', 'shard-conf', '--root-rpc', ROOT, '--epoch', shard, '--out', path, output=True, check=False, timeout=30)
+        if done.returncode == 0 and not names_node(read(path), info):
+            raise RuntimeError(missed_scope_text(shard))
 
 
 def next_slot():
@@ -881,8 +930,7 @@ def recover(a, pins):
 def check_activated_conf(conf, info):
     """The activated shard configuration must name the fresh EVM node with the fresh authority's key; otherwise the boundary was another
     election's (the scope is fixed for an authority's lifetime) and a further fresh authority is needed."""
-    named = [v for v in conf.get('validators') or [] if v.get('nodeId') == info['nodeId']]
-    if not named or str(named[0].get('sigKey', '')).lower() != str(info['sigKey']).lower():
+    if not names_node(conf, info):
         raise ValueError(f'shard epoch {conf.get("epoch")} does not name the fresh EVM node {info["nodeId"]} with the fresh key: '
                          'another election activated first. Stop the fresh authority container (keep its volume), then run '
                          '`ubft-validator recover --yes` again to prepare another slot.')
@@ -896,20 +944,56 @@ def leave(a, _pins):
     if not a.yes:
         raise ValueError('confirm retirement with exit --yes, or claim after maturity with exit --claim --yes')
     action = 'claim' if a.claim else 'exit'
-    # #1316: wait for the node's election participation to finish a transaction instead of failing on its lock (the first claim attempt
-    # after maturity on the public testnet met the exited node's own election transactions); each attempt keeps its own log
-    with lock('.join.lock'), lock('.tx.lock', wait=True):
-        done = ubft('validator', action, output=True, check=False, timeout=1800)
     logs = HOME/'exit-logs'
     logs.mkdir(mode=0o700, exist_ok=True)
     stamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
-    write(logs/f'{action}-{stamp}-{os.getpid()}.log', (done.stdout + done.stderr + f'rc={done.returncode}\n').encode())
-    print(done.stdout, end='', flush=True)
-    print(done.stderr, end='', file=sys.stderr, flush=True)
-    if done.returncode:
-        raise subprocess.CalledProcessError(done.returncode, ['ubft', 'validator', action])
+    path = logs/f'{action}-{stamp}-{os.getpid()}.log'
+    # #1316: wait for the node's election participation to finish a transaction instead of failing on its lock (the first claim attempt
+    # after maturity on the public testnet met the exited node's own election transactions); each attempt keeps its own log
+    with lock('.join.lock'), lock('.tx.lock', wait=True,
+                                  waiting=f'validator: waiting for the node\'s election transaction to finish before the {action}'):
+        rc = stream(['ubft', 'validator', action], path, timeout=LEAVE_TIMEOUT)
+    if rc != 0:
+        raise RuntimeError(f'ubft validator {action} ' + ('timed out' if rc == 'timeout' else f'exited with status {rc}') +
+                           f'; its output is in {path}')
     if a.claim:
         print(STOP_CONTAINERS, flush=True)
+
+
+LEAVE_TIMEOUT = 1800
+
+
+def stream(args, path, timeout):
+    """Run args, printing each output line as it comes and appending it to the log at path (#1323: a claim can wait for maturity
+    steps for many minutes); the log ends with rc=<status>, rc=timeout or rc=interrupted. Returns the status, or 'timeout'."""
+    with open(path, 'w', encoding='utf-8') as log:
+        proc = subprocess.Popen([str(x) for x in args], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                stdin=subprocess.DEVNULL, cwd=HOME, bufsize=1)
+        expired = threading.Event()
+
+        def kill():
+            expired.set()
+            proc.kill()
+        timer = threading.Timer(timeout, kill)
+        timer.start()
+        rc = 'interrupted'
+        try:
+            for line in proc.stdout:
+                print(line, end='', flush=True)
+                log.write(line)
+                log.flush()
+            status = proc.wait()
+            rc = 'timeout' if expired.is_set() else status
+            return rc
+        finally:
+            timer.cancel()
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+            proc.stdout.close()
+            log.write(f'rc={rc}\n')
+            log.flush()
+            os.fsync(log.fileno())
 
 
 def main():
