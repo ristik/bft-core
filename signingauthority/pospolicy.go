@@ -188,21 +188,14 @@ func WithPosPolicy(p PosPolicy) Option {
 // cannot be read now, the pin is kept pending (ErrPosPending) and verified on the next P85 signing request or VerifyPosPolicy; nothing
 // is signed meanwhile. A later late pin replaces a pending one: an unverified pin restricts nothing, so it must not lock the authority.
 func (a *Authority) SetPosPolicy(ctx context.Context, p PosPolicy) error {
-	return a.installPos(ctx, p.clone())
+	q := p.clone()
+	_, err := a.installPos(ctx, &q)
+	return err
 }
 
 // VerifyPosPolicy verifies the pending pin, if there is one. It reports whether this call installed it.
 func (a *Authority) VerifyPosPolicy(ctx context.Context) (bool, error) {
-	a.mu.Lock()
-	want, done := a.posWant, a.pos != nil
-	a.mu.Unlock()
-	if done || want == nil {
-		return false, nil
-	}
-	if err := a.installPos(ctx, want.clone()); err != nil {
-		return false, err
-	}
-	return true, nil
+	return a.installPos(ctx, nil)
 }
 
 // posChainLocked is the chain id a pin is verified against: the enrolled shard configuration's, or before the enrollment is complete the
@@ -219,27 +212,40 @@ func (a *Authority) posChainLocked() (uint64, error) {
 	return 0, fmt.Errorf("%w: no chain id to verify against before the enrollment is complete (give the b1 profile)", ErrPosPending)
 }
 
-// installPos is the one check of a pin, startup or late: derive the deployment, compare, and install it if no other pin was.
-func (a *Authority) installPos(ctx context.Context, p PosPolicy) error {
-	if err := p.validIDs(); err != nil {
-		return err
+// installPos is the one check of a pin, startup or late: derive the deployment, compare, and install it if no other pin was. A nil pin
+// is the pending one (taken under the locks, so a late pin that replaced it meanwhile is the one verified); with none it does nothing.
+// It reports whether it installed a pin.
+func (a *Authority) installPos(ctx context.Context, in *PosPolicy) (bool, error) {
+	if in != nil {
+		if err := in.validIDs(); err != nil {
+			return false, err
+		}
 	}
 	a.posInstall.Lock()
 	defer a.posInstall.Unlock()
 
 	a.mu.Lock()
+	if in == nil {
+		if a.pos != nil || a.posWant == nil {
+			a.mu.Unlock()
+			return false, nil
+		}
+		q := a.posWant.clone()
+		in = &q
+	}
+	p := *in
 	if a.pos != nil {
 		ok := a.pos.compatible(p)
 		a.mu.Unlock()
 		if !ok {
-			return fmt.Errorf("%w: this authority is pinned to another election or identity set", ErrPosPolicyConflict)
+			return false, fmt.Errorf("%w: this authority is pinned to another election or identity set", ErrPosPolicyConflict)
 		}
-		return nil
+		return false, nil
 	}
 	if a.posWantStartup {
 		if !a.posWant.compatible(p) {
 			a.mu.Unlock()
-			return fmt.Errorf("%w: this authority's startup pin names another election or identity set", ErrPosPolicyConflict)
+			return false, fmt.Errorf("%w: this authority's startup pin names another election or identity set", ErrPosPolicyConflict)
 		}
 		p = a.posWant.clone() // the startup pin is what is verified
 	}
@@ -259,9 +265,9 @@ func (a *Authority) installPos(ctx context.Context, p PosPolicy) error {
 	a.mu.Unlock()
 	switch {
 	case err != nil:
-		return err
+		return false, err
 	case src == nil && !waiting:
-		return fmt.Errorf("%w: this authority has no execution source to verify a P85 pin against (--activation-source-url on a VR generation)", ErrPosPolicy)
+		return false, fmt.Errorf("%w: this authority has no execution source to verify a P85 pin against (--activation-source-url on a VR generation)", ErrPosPolicy)
 	}
 
 	verified, err := a.verifyPos(ctx, src, chain, chainErr, node, pub, p)
@@ -278,7 +284,7 @@ func (a *Authority) installPos(ctx context.Context, p PosPolicy) error {
 	switch {
 	case err == nil:
 		a.pos, a.posWant, a.posWantStartup = &verified, nil, false
-		return nil
+		return true, nil
 	case a.posWantStartup:
 		// the startup pin stays as it is: pending, or refused for the authority's lifetime
 	case errors.Is(err, ErrPosPending):
@@ -286,7 +292,7 @@ func (a *Authority) installPos(ctx context.Context, p PosPolicy) error {
 	default:
 		a.posWant = nil // a refused late pin installs nothing and holds nothing
 	}
-	return err
+	return false, err
 }
 
 // verifyPos reads the deployment and checks the pin against it, outside the lock.
