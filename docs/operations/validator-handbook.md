@@ -257,14 +257,14 @@ ubft signing-authority run --home "$UBFT_HOME/authority" --authority-id "$SHARD_
   --client-socket "$UBFT_HOME/authority/client.sock" \
   --operator-socket "$UBFT_HOME/authority/operator.sock" --operator-credential "$UBFT_HOME/authority/operator.cred" \
   --pop-socket "$UBFT_HOME/authority/pop.sock" --pop-credential "$UBFT_HOME/authority/pop.cred" \
-  --registration-policy "$UBFT_HOME/authority/registration.json" --dev-allow-late-pos-policy \
+  --registration-policy "$UBFT_HOME/authority/registration.json" --require-pos-policy \
   --metrics-address 127.0.0.1:29352 >logs/authority.log 2>&1 &
 AUTHORITY_PID=$!
 ```
 
 A pending authority is scoped to the shard epoch that will first name it. Save the confirmed cutoff, successor shard epoch and current root epoch with your service configuration.
 
-The late P85 pin is for this prototype rehearsal when VR assigns the identity at application. For a deployment with a provisioned identity, use an approved startup `--pos-policy` and `--require-pos-policy`. Wait for `signing authority running` in `logs/authority.log`, then select the authority in the validator config.
+VR assigns the identity id at application, so the authority's P85 pin (the ids its key may sign possession proofs for) is installed then, on the operator channel. The authority verifies it before it signs anything P85: it derives the network word and the election from its execution client (VR's network word and active PoS module, under the execution genesis hash and the b1 profile's VR code hash), requires the client's chain id to be the b1 profile's (the enrolled shard configuration's once enrollment is complete), and requires every id to be a VR identity bound to this node and key. A wrong field in the pin file is refused. With a provisioned identity, give the pin at startup with `--pos-policy`; it is verified the same way. Wait for `signing authority running` in `logs/authority.log`, then select the authority in the validator config.
 
 ```bash
 AUTH=(--operator-socket "$UBFT_HOME/authority/operator.sock" --operator-credential "$UBFT_HOME/authority/operator.cred")

@@ -1,6 +1,9 @@
 package signingauthority
 
 import (
+	"context"
+	"fmt"
+	"math/big"
 	"testing"
 
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
@@ -8,30 +11,75 @@ import (
 	"github.com/unicitynetwork/bft-core/evmassign"
 )
 
+const posChain = 7
+
 func posPin() PosPolicy {
-	return PosPolicy{Network: [32]byte{1}, ChainID: [32]byte{31: 7}, Election: [20]byte{0xE1}, IDs: []uint64{5}}
+	return PosPolicy{Network: [32]byte{1}, ChainID: [32]byte{31: posChain}, Election: [20]byte{0xE1}, IDs: []uint64{5}}
 }
 
 func posRequest() PosPoPRequest {
 	return PosPoPRequest{ResultID: [32]byte{1}, AssignmentID: [32]byte{2}, Snapshot: [32]byte{3}, Attempt: 2, ID: 5, Generation: 1}
 }
 
-func newPosAuthority(t *testing.T, pin *PosPolicy) *Authority {
+// fakePos is the execution client's view of the deployment: the derived fields, the ids VR binds to the queried node and key, and an
+// error to answer with instead (a pending one models an endpoint that is down).
+type fakePos struct {
+	view  PosDeploymentView
+	bound map[uint64]bool
+	err   error
+	calls int
+	last  PosQuery
+}
+
+func newFakePos() *fakePos {
+	p := posPin()
+	return &fakePos{view: PosDeploymentView{Network: p.Network, ChainID: p.ChainID, Election: p.Election}, bound: map[uint64]bool{5: true, 6: true}}
+}
+
+func (f *fakePos) ReadPosDeployment(_ context.Context, q PosQuery) (PosDeploymentView, error) {
+	f.calls++
+	f.last = q
+	if f.err != nil {
+		return PosDeploymentView{}, f.err
+	}
+	for _, id := range q.IDs {
+		if !f.bound[id] {
+			return PosDeploymentView{}, fmt.Errorf("VR identity %d does not bind this node with this key", id)
+		}
+	}
+	return f.view, nil
+}
+
+// enrolledOn stands for the completed enrollment of a shard configuration whose chain_id is chain (the fixture enrolls with a hash only).
+func enrolledOn(a *Authority, chain uint64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.confChain, a.confChainKnown, a.confSeen = chain, true, true
+}
+
+func newPosAuthority(t *testing.T, src *fakePos, opts ...Option) *Authority {
 	t.Helper()
 	f := newFixture(t, 1)
-	opts := []Option{WithLatePosPolicy()}
-	if pin != nil {
-		opts = append(opts, WithPosPolicy(*pin))
+	if src != nil {
+		opts = append([]Option{WithPosSource(src, 0)}, opts...)
 	}
 	a, err := New(f.enroll, trustStub{tb: f.tb}, opts...)
 	require.NoError(t, err)
+	enrolledOn(a, posChain)
+	return a
+}
+
+func pinned(t *testing.T) *Authority {
+	t.Helper()
+	a := newPosAuthority(t, newFakePos())
+	require.NoError(t, a.SetPosPolicy(context.Background(), posPin()))
 	return a
 }
 
 // The proof is the digest of the contracts' Election.popDigest (evmassign.PoPDigest) for the pinned election, signed by the authority's key.
 func TestPosPoPIsThePinnedElectionsDigest(t *testing.T) {
 	pin := posPin()
-	a := newPosAuthority(t, &pin)
+	a := pinned(t)
 	pub, err := a.SigningPublicKey()
 	require.NoError(t, err)
 	r := posRequest()
@@ -55,8 +103,7 @@ func TestPosPoPScope(t *testing.T) {
 		_, err := newPosAuthority(t, nil).SignPosPoP(posRequest())
 		require.ErrorIs(t, err, ErrPosPolicy)
 	})
-	pin := posPin()
-	a := newPosAuthority(t, &pin)
+	a := pinned(t)
 	t.Run("another identity", func(t *testing.T) {
 		r := posRequest()
 		r.ID = 4
@@ -69,7 +116,7 @@ func TestPosPoPScope(t *testing.T) {
 		_, err := a.SignPosPoP(r)
 		require.ErrorIs(t, err, ErrContextMismatch)
 	})
-	t.Run("an incomplete pin is refused at start", func(t *testing.T) {
+	t.Run("a pin without ids is refused at start", func(t *testing.T) {
 		f := newFixture(t, 1)
 		bad := posPin()
 		bad.IDs = nil
@@ -78,18 +125,66 @@ func TestPosPoPScope(t *testing.T) {
 	})
 }
 
-// A pin set on a running authority is final: the same pin again is a no-op, another election is refused, and a delegation outside it too.
-func TestPosPolicyIsPinnedOnce(t *testing.T) {
-	a := newPosAuthority(t, nil)
+// #1222: the pin's deployment is derived, so a pin of ids alone is complete, and the source is asked about this node and key.
+func TestPosPolicyIsDerived(t *testing.T) {
+	src := newFakePos()
+	a := newPosAuthority(t, src)
+	require.NoError(t, a.SetPosPolicy(context.Background(), PosPolicy{IDs: []uint64{5}}))
+	require.Equal(t, testNodeID, src.last.NodeID)
+	require.Equal(t, mustPub(t, a), src.last.EVMKey)
+	require.Equal(t, []uint64{5}, src.last.IDs)
 	pin := posPin()
-	require.NoError(t, a.SetPosPolicy(pin))
-	require.NoError(t, a.SetPosPolicy(pin))
+	require.Equal(t, pin.Network, a.pos.Network)
+	require.Equal(t, pin.ChainID, a.pos.ChainID)
+	require.Equal(t, pin.Election, a.pos.Election)
+	_, err := a.SignPosPoP(posRequest())
+	require.NoError(t, err)
+}
+
+// #1222: each field the operator states wrongly is refused, and so is a source whose chain is not the authority's or an id VR does not
+// bind to this node and key. A refused pin installs nothing: the right one is accepted afterwards.
+func TestPosPolicyWrongFieldIsRefused(t *testing.T) {
+	for name, mutate := range map[string]func(p *PosPolicy, src *fakePos){
+		"network word":        func(p *PosPolicy, _ *fakePos) { p.Network = [32]byte{2} },
+		"chain id":            func(p *PosPolicy, _ *fakePos) { p.ChainID = [32]byte{31: 8} },
+		"election":            func(p *PosPolicy, _ *fakePos) { p.Election = [20]byte{0xE2} },
+		"execution chain":     func(_ *PosPolicy, src *fakePos) { src.view.ChainID = [32]byte{31: 8} },
+		"unbound identity":    func(p *PosPolicy, _ *fakePos) { p.IDs = []uint64{5, 9} },
+		"deployment refused":  func(_ *PosPolicy, src *fakePos) { src.err = fmt.Errorf("VR's active module is not the PoS adapter") },
+		"no derived election": func(_ *PosPolicy, src *fakePos) { src.view.Election = [20]byte{} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			src := newFakePos()
+			a := newPosAuthority(t, src)
+			pin := posPin()
+			mutate(&pin, src)
+			err := a.SetPosPolicy(context.Background(), pin)
+			require.ErrorIs(t, err, ErrPosPolicy)
+			require.NotErrorIs(t, err, ErrPosPending)
+			_, err = a.SignPosPoP(posRequest())
+			require.ErrorIs(t, err, ErrPosPolicy, "nothing is signed under a refused pin")
+
+			fixed := newFakePos()
+			*src = *fixed
+			require.NoError(t, a.SetPosPolicy(context.Background(), posPin()), "a refused pin does not lock the authority")
+		})
+	}
+}
+
+// A pin set on a running authority is final: the same pin again is a no-op (also with the derived fields omitted), another election or
+// identity set is refused, and a delegation outside it too.
+func TestPosPolicyIsPinnedOnce(t *testing.T) {
+	a := pinned(t)
+	pin := posPin()
+	ctx := context.Background()
+	require.NoError(t, a.SetPosPolicy(ctx, pin))
+	require.NoError(t, a.SetPosPolicy(ctx, PosPolicy{IDs: []uint64{5}}))
 	other := posPin()
 	other.Election = [20]byte{0xE2}
-	require.ErrorIs(t, a.SetPosPolicy(other), ErrPosPolicyConflict)
+	require.ErrorIs(t, a.SetPosPolicy(ctx, other), ErrPosPolicyConflict)
 	other = posPin()
 	other.IDs = []uint64{5, 6}
-	require.ErrorIs(t, a.SetPosPolicy(other), ErrPosPolicyConflict)
+	require.ErrorIs(t, a.SetPosPolicy(ctx, other), ErrPosPolicyConflict)
 	_, err := a.SignPosPoP(posRequest())
 	require.NoError(t, err)
 
@@ -97,6 +192,151 @@ func TestPosPolicyIsPinnedOnce(t *testing.T) {
 	req.Request.Id = 5
 	_, err = a.SignDelegationPossession(req)
 	require.ErrorIs(t, err, ErrPosPolicy, "a pinned authority signs delegations for its election only")
+}
+
+// A source that cannot be read leaves the pin pending: nothing is installed or signed, the error says retry, and the same pin succeeds once
+// the source answers. An authority without a source refuses a pin outright; one whose fence (and so its source) is still pending says pending.
+func TestPosPolicyPendingSource(t *testing.T) {
+	src := newFakePos()
+	src.err = fmt.Errorf("%w: the endpoint is down", ErrPosPending)
+	a := newPosAuthority(t, src)
+	require.ErrorIs(t, a.SetPosPolicy(context.Background(), posPin()), ErrPosPending)
+	_, err := a.SignPosPoP(posRequest())
+	require.ErrorIs(t, err, ErrPosPolicy)
+	src.err = nil
+	_, err = a.SignPosPoP(posRequest())
+	require.NoError(t, err, "the pending pin is verified by the next signing request once the source answers")
+	require.NoError(t, a.SetPosPolicy(context.Background(), posPin()), "and is then final")
+
+	t.Run("a pending late pin is replaced, not locked in", func(t *testing.T) {
+		src := newFakePos()
+		src.err = fmt.Errorf("%w: down", ErrPosPending)
+		a := newPosAuthority(t, src)
+		wrong := posPin()
+		wrong.IDs = []uint64{9}
+		require.ErrorIs(t, a.SetPosPolicy(context.Background(), wrong), ErrPosPending)
+		require.ErrorIs(t, a.SetPosPolicy(context.Background(), posPin()), ErrPosPending, "another pending pin replaces it")
+		src.err = nil
+		installed, err := a.VerifyPosPolicy(context.Background())
+		require.NoError(t, err)
+		require.True(t, installed)
+		require.Equal(t, []uint64{5}, a.pos.IDs)
+	})
+	t.Run("a pending late pin that the source refuses is dropped", func(t *testing.T) {
+		src := newFakePos()
+		src.err = fmt.Errorf("%w: down", ErrPosPending)
+		a := newPosAuthority(t, src)
+		wrong := posPin()
+		wrong.IDs = []uint64{9}
+		require.ErrorIs(t, a.SetPosPolicy(context.Background(), wrong), ErrPosPending)
+		src.err = nil
+		_, err := a.VerifyPosPolicy(context.Background())
+		require.ErrorIs(t, err, ErrPosPolicy)
+		require.Nil(t, a.posWant)
+		require.NoError(t, a.SetPosPolicy(context.Background(), posPin()))
+	})
+
+	err = newPosAuthority(t, nil).SetPosPolicy(context.Background(), posPin())
+	require.ErrorIs(t, err, ErrPosPolicy)
+	require.NotErrorIs(t, err, ErrPosPending)
+
+	b := newPosAuthority(t, nil, WithFencePending())
+	require.ErrorIs(t, b.SetPosPolicy(context.Background(), posPin()), ErrPosPending)
+	require.NoError(t, b.ProvisionPosSource(newFakePos(), 0))
+	require.Error(t, b.ProvisionPosSource(newFakePos(), 0), "once")
+	require.NoError(t, b.SetPosPolicy(context.Background(), posPin()))
+}
+
+// The chain a pin is verified against: the b1 profile's before the enrollment is complete, the enrolled configuration's after; a later
+// configuration with another chain id latches the authority faulted.
+func TestPosPolicyChainReference(t *testing.T) {
+	t.Run("before enrollment: the b1 profile's chain", func(t *testing.T) {
+		f := newFixture(t, 1)
+		enroll := f.enroll
+		enroll.ShardConfHash = nil
+		a, err := New(enroll, trustStub{tb: f.tb}, WithPosSource(newFakePos(), posChain))
+		require.NoError(t, err)
+		require.NoError(t, a.SetPosPolicy(context.Background(), posPin()), "a joiner pins and signs its delegation before enrollment")
+
+		conf := ownConf(t, a)
+		conf.PartitionParams = map[string]string{"chain_id": "8"}
+		require.ErrorIs(t, a.CompleteEnrollment(conf), ErrStateUntrusted)
+		require.True(t, a.Status().Faulted, "a configuration on another chain than the pin's latches the authority")
+		_, err = a.SignPosPoP(posRequest())
+		require.Error(t, err)
+	})
+	t.Run("the enrolled chain agrees", func(t *testing.T) {
+		f := newFixture(t, 1)
+		enroll := f.enroll
+		enroll.ShardConfHash = nil
+		a, err := New(enroll, trustStub{tb: f.tb}, WithPosSource(newFakePos(), posChain))
+		require.NoError(t, err)
+		require.NoError(t, a.SetPosPolicy(context.Background(), posPin()))
+		conf := ownConf(t, a)
+		conf.PartitionParams = map[string]string{"chain_id": "7"}
+		require.NoError(t, a.CompleteEnrollment(conf))
+		_, err = a.SignPosPoP(posRequest())
+		require.NoError(t, err)
+	})
+	t.Run("after enrollment the configuration's chain wins over the b1 profile's", func(t *testing.T) {
+		f := newFixture(t, 1)
+		enroll := f.enroll
+		enroll.ShardConfHash = nil
+		a, err := New(enroll, trustStub{tb: f.tb}, WithPosSource(newFakePos(), posChain))
+		require.NoError(t, err)
+		conf := ownConf(t, a)
+		conf.PartitionParams = map[string]string{"chain_id": "9"}
+		require.NoError(t, a.CompleteEnrollment(conf), "no pin yet: nothing to disagree with")
+		require.ErrorIs(t, a.SetPosPolicy(context.Background(), PosPolicy{IDs: []uint64{5}}), ErrPosPolicy, "the execution client is on 7")
+	})
+	t.Run("an enrolled configuration without chain_id", func(t *testing.T) {
+		f := newFixture(t, 1)
+		enroll := f.enroll
+		enroll.ShardConfHash = nil
+		a, err := New(enroll, trustStub{tb: f.tb}, WithPosSource(newFakePos(), posChain))
+		require.NoError(t, err)
+		require.NoError(t, a.CompleteEnrollment(ownConf(t, a)))
+		require.ErrorIs(t, a.SetPosPolicy(context.Background(), posPin()), ErrPosPolicy)
+	})
+	t.Run("no chain reference before enrollment", func(t *testing.T) {
+		f := newFixture(t, 1)
+		enroll := f.enroll
+		enroll.ShardConfHash = nil
+		a, err := New(enroll, trustStub{tb: f.tb}, WithPosSource(newFakePos(), 0))
+		require.NoError(t, err)
+		require.ErrorIs(t, a.SetPosPolicy(context.Background(), posPin()), ErrPosPending)
+	})
+}
+
+// A startup pin goes through the same check: nothing is signed until it is verified, the first signing request (or VerifyPosPolicy)
+// verifies it, a source that is down leaves it pending, and a late pin must agree with it.
+func TestStartupPosPolicyIsVerified(t *testing.T) {
+	src := newFakePos()
+	src.err = fmt.Errorf("%w: down", ErrPosPending)
+	a := newPosAuthority(t, src, WithPosPolicy(PosPolicy{IDs: []uint64{5}}))
+	_, err := a.SignPosPoP(posRequest())
+	require.ErrorIs(t, err, ErrPosPolicy, "pending: not signed")
+	_, err = a.VerifyPosPolicy(context.Background())
+	require.ErrorIs(t, err, ErrPosPending)
+	other := posPin()
+	other.IDs = []uint64{6}
+	require.ErrorIs(t, a.SetPosPolicy(context.Background(), other), ErrPosPolicyConflict, "the startup pin stands while it is pending")
+	src.err = nil
+	_, err = a.SignPosPoP(posRequest())
+	require.NoError(t, err, "the signing request verified the startup pin")
+	require.NoError(t, a.SetPosPolicy(context.Background(), posPin()), "an equivalent late pin is a no-op")
+
+	t.Run("a wrong startup field is refused", func(t *testing.T) {
+		bad := posPin()
+		bad.Election = [20]byte{0xEE}
+		b := newPosAuthority(t, newFakePos(), WithPosPolicy(bad))
+		_, err := b.VerifyPosPolicy(context.Background())
+		require.ErrorIs(t, err, ErrPosPolicy)
+		require.NotNil(t, b.posWant, "a refused startup pin stays: the operator channel cannot replace it")
+		require.ErrorIs(t, b.SetPosPolicy(context.Background(), posPin()), ErrPosPolicyConflict)
+		_, err = b.SignPosPoP(posRequest())
+		require.ErrorIs(t, err, ErrPosPolicy)
+	})
 }
 
 func ethSigToPub(digest [32]byte, sig []byte) ([]byte, error) {
@@ -107,14 +347,26 @@ func ethSigToPub(digest [32]byte, sig []byte) ([]byte, error) {
 	return ethcrypto.CompressPubkey(pub), nil
 }
 
+// electionPoPForPin is the election possession fixture with a P85 source deriving its deployment, on its chain.
+func electionPoPForPin(t *testing.T) (*Authority, ElectionPoPRequest, *fakePos) {
+	t.Helper()
+	a, req, _ := electionPoPFixture(t)
+	d := req.Deployment
+	src := &fakePos{view: PosDeploymentView{Network: d.NetworkWord, ChainID: d.ChainID, Election: d.Election}, bound: map[uint64]bool{}}
+	require.NoError(t, a.ProvisionPosSource(src, 0))
+	enrolledOn(a, new(big.Int).SetBytes(d.ChainID[:]).Uint64())
+	return a, req, src
+}
+
 // The pin binds the older election possession (SignElectionPoP) as well: the same PoPDigest must not be obtainable outside it.
 func TestPosPolicyBindsTheElectionPoPToo(t *testing.T) {
-	a, req, _ := electionPoFixtureForPin(t)
+	a, req, src := electionPoPForPin(t)
 	_, id, err := evmassign.ElectionPoPDigest(req.Candidate, req.Deployment, req.Attempt, mustPub(t, a), testNodeID)
 	require.NoError(t, err)
+	src.bound[id] = true
 	d := req.Deployment
 	pin := PosPolicy{Network: d.NetworkWord, ChainID: d.ChainID, Election: d.Election, IDs: []uint64{id}}
-	require.NoError(t, a.SetPosPolicy(pin))
+	require.NoError(t, a.SetPosPolicy(context.Background(), pin))
 	_, err = a.SignElectionPoP(req)
 	require.NoError(t, err, "inside the pin")
 
@@ -128,48 +380,37 @@ func TestPosPolicyBindsTheElectionPoPToo(t *testing.T) {
 	require.ErrorIs(t, err, ErrPosPolicy, "another chain")
 }
 
-func TestRequirePosPolicyRefusesAllThreeUntilPinned(t *testing.T) {
-	f := newFixture(t, 1)
-	a, err := New(f.enroll, trustStub{tb: f.tb}, WithRequirePosPolicy(), WithLatePosPolicy())
-	require.NoError(t, err)
-	_, err = a.SignPosPoP(posRequest())
-	require.ErrorIs(t, err, ErrPosPolicy)
-	_, err = a.SignDelegationPossession(DelegationPossessionRequest{})
-	require.ErrorIs(t, err, ErrPosPolicy)
-	// a valid candidate: the refusal is the pin's, not the candidate validation's
-	ea, ereq, _ := electionPoPFixture(t)
-	ea.requirePos = true
-	_, err = ea.SignElectionPoP(ereq)
-	require.ErrorIs(t, err, ErrPosPolicy)
-	require.NoError(t, a.SetPosPolicy(posPin()))
-	_, err = a.SignPosPoP(posRequest())
-	require.NoError(t, err)
-}
-
-func electionPoFixtureForPin(t *testing.T) (*Authority, ElectionPoPRequest, []byte) {
-	a, req, pub := electionPoPFixture(t)
-	a.latePos = true
-	return a, req, pub
+// All three P85 operations are refused until a pin is verified: with --require-pos-policy, and on any authority with a P85 source.
+func TestPosOperationsRefusedUntilVerified(t *testing.T) {
+	for name, opts := range map[string][]Option{
+		"required":    {WithRequirePosPolicy()},
+		"with source": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			src := newFakePos()
+			a := newPosAuthority(t, src, opts...)
+			_, err := a.SignPosPoP(posRequest())
+			require.ErrorIs(t, err, ErrPosPolicy)
+			_, err = a.SignDelegationPossession(DelegationPossessionRequest{})
+			require.ErrorIs(t, err, ErrPosPolicy)
+			// a valid candidate: the refusal is the pin's, not the candidate validation's
+			ea, ereq, _ := electionPoPForPin(t)
+			if len(opts) > 0 {
+				ea.requirePos = true
+			}
+			_, err = ea.SignElectionPoP(ereq)
+			require.ErrorIs(t, err, ErrPosPolicy)
+			require.NoError(t, a.SetPosPolicy(context.Background(), posPin()))
+			_, err = a.SignPosPoP(posRequest())
+			require.NoError(t, err)
+		})
+	}
 }
 
 func mustPub(t *testing.T, a *Authority) []byte {
 	pub, err := a.SigningPublicKey()
 	require.NoError(t, err)
 	return pub
-}
-
-// Without the development opt-in the operator channel cannot install the pin: it comes from startup.
-func TestPosPolicyNotInstallableAtRunTimeInProduction(t *testing.T) {
-	f := newFixture(t, 1)
-	a, err := New(f.enroll, trustStub{tb: f.tb}, WithRequirePosPolicy())
-	require.NoError(t, err)
-	require.ErrorIs(t, a.SetPosPolicy(posPin()), ErrPosPolicy)
-	b, err := New(f.enroll, trustStub{tb: f.tb}, WithPosPolicy(posPin()))
-	require.NoError(t, err)
-	require.NoError(t, b.SetPosPolicy(posPin()), "the same pin as at startup is a no-op")
-	other := posPin()
-	other.Election = [20]byte{0xEE}
-	require.ErrorIs(t, b.SetPosPolicy(other), ErrPosPolicyConflict)
 }
 
 // Startup installation: two different pins conflict, and a reused option does not share state between authorities.
@@ -182,12 +423,12 @@ func TestStartupPosPolicyConflictAndReuse(t *testing.T) {
 
 	pin := posPin()
 	opt := WithPosPolicy(pin)
-	a, err := New(f.enroll, trustStub{tb: f.tb}, opt)
-	require.NoError(t, err)
-	b, err := New(f.enroll, trustStub{tb: f.tb}, opt)
-	require.NoError(t, err)
+	a := newPosAuthority(t, newFakePos(), opt)
+	b := newPosAuthority(t, newFakePos(), opt)
 	pin.IDs[0] = 9 // the caller's slice is not the authority's
 	_, err = a.SignPosPoP(posRequest())
+	require.NoError(t, err)
+	_, err = b.SignPosPoP(posRequest())
 	require.NoError(t, err)
 	require.NotSame(t, a.pos, b.pos)
 	require.NotSame(t, &a.pos.IDs[0], &b.pos.IDs[0])

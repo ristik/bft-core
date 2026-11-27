@@ -98,7 +98,7 @@ func newConfiguredFixture(t *testing.T, log *slog.Logger, options func(*types.Ro
 		AuthorityID: "authority-1", NodeID: "node-1", NetworkID: 5, PartitionID: testPartitionID,
 		ShardID: types.ShardID{}, ShardEpoch: 0, RootEpoch: signingauthority.PinRootEpoch(1),
 		ShardConfHash: confHash, Profile: signingauthority.ProfileLegacyBCRv1,
-	}, staticTrust{tb: tb}, append(fixtureOptions(options, tb), signingauthority.WithLatePosPolicy())...)
+	}, staticTrust{tb: tb}, fixtureOptions(options, tb)...)
 	require.NoError(t, err)
 	t.Cleanup(authority.Close)
 

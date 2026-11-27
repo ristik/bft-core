@@ -600,11 +600,11 @@ func (s *Server) operatorOp(ctx context.Context, operation op, payload []byte) (
 		copy(pin.Network[:], wire.Network)
 		copy(pin.ChainID[:], wire.ChainID)
 		copy(pin.Election[:], wire.Election)
-		if err := s.authority.SetPosPolicy(pin); err != nil {
+		if err := s.authority.SetPosPolicy(ctx, pin); err != nil {
 			s.log.Warn("refusing a P85 pin", slog.String("err", err.Error()))
 			return nil, err
 		}
-		s.log.Info("P85 election pinned", slog.String("election", fmt.Sprintf("%x", wire.Election)), slog.Any("ids", wire.IDs))
+		s.log.Info("P85 election pinned and verified against the execution client", slog.Any("ids", wire.IDs))
 		return nil, nil
 	case opSignRegistration:
 		var wire registrationPayload

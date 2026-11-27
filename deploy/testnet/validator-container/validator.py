@@ -360,7 +360,7 @@ def authority_process(a, pins):
                 '--shard-epoch', n['shardEpoch'], '--root-epoch', n['rootEpoch'], '--trust-base', trust,
                 '--client-socket', d/'client.sock', *auth_flags(d),
                 '--pop-socket', d/'pop.sock', '--pop-credential', d/'pop.cred',
-                '--registration-policy', d/'registration.json', '--dev-allow-late-pos-policy', '--require-pos-policy',
+                '--registration-policy', d/'registration.json', '--require-pos-policy',
                 '--lineage-genesis-trust-base', RELEASE/'trust-base.json', '--lineage-utb-genesis',
                 '--b1-profile', RELEASE/'b1-profile.json', '--activation-source-url', EXECUTION,
                 '--execution-genesis-hash', read(RELEASE/'manifest.json')['genesis_hash']]

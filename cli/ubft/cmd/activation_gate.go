@@ -38,6 +38,43 @@ type vrFence struct {
 	GenesisHash, NetworkWord *[32]byte
 	// Anchor names the node's own certified EVM block for the read (nil: the endpoint's head).
 	Anchor func(ctx context.Context) ([32]byte, uint64, error)
+	// B1Chain is the trusted b1 profile's ExecutionChainID (zero: no profile): a signing authority's P85 chain reference before its
+	// enrollment is complete (#1222).
+	B1Chain uint64
+}
+
+// posDeploymentSource is a signing authority's P85 deployment source (#1222): the PoS deployment read from the same execution client and
+// under the same pins as the activation fence.
+type posDeploymentSource struct{ r vrclient.PosDeploymentReader }
+
+func (s posDeploymentSource) ReadPosDeployment(ctx context.Context, q signingauthority.PosQuery) (signingauthority.PosDeploymentView, error) {
+	var v signingauthority.PosDeploymentView
+	d, err := s.r.Read(ctx, q.NodeID, q.EVMKey, q.IDs)
+	if err != nil {
+		if errors.Is(err, vrclient.ErrPosUnavailable) {
+			return v, fmt.Errorf("%w: %w", signingauthority.ErrPosPending, err)
+		}
+		return v, err
+	}
+	if d.ChainID == nil || d.ChainID.Sign() <= 0 || d.ChainID.BitLen() > 256 {
+		return v, fmt.Errorf("the execution client reports no chain id")
+	}
+	d.ChainID.FillBytes(v.ChainID[:])
+	v.Network, v.Election = d.Network, [20]byte(d.Election)
+	return v, nil
+}
+
+// newPosSource is the P85 deployment source of a VR generation's authority over the activation source url, or nil without one. The
+// returned close releases its RPC connection.
+func newPosSource(ctx context.Context, url string, g vrFence) (signingauthority.PosSource, func(), error) {
+	if url == "" || !g.VR || g.CodeHash == nil || g.GenesisHash == nil {
+		return nil, func() {}, nil
+	}
+	c, err := rpc.DialContext(ctx, url)
+	if err != nil {
+		return nil, nil, fmt.Errorf("P85 deployment source %q: %w", url, err)
+	}
+	return posDeploymentSource{vrclient.PosDeploymentReader{RPC: c, GenesisHash: g.GenesisHash, RegistryCode: g.CodeHash, NetworkWord: g.NetworkWord}}, c.Close, nil
 }
 
 // newActivationGate is the fence of a non-root role over VR's activation schedule read at url. On a VR generation an empty url is an
@@ -118,8 +155,9 @@ func provisionFence(ctx context.Context, log *slog.Logger, raw []byte, start vrF
 	// a field the startup already supplied need not be in the file: the b1 profile (the registry code hash) is read only when it is there or
 	// the startup has no code hash, and the genesis hash below only when the file has one
 	var fileCode *[32]byte
+	b1Chain := start.B1Chain
 	if p.B1Profile != "" || start.CodeHash == nil {
-		_, pf, err := readB1ProfileFile(p.B1Profile)
+		prof, pf, err := readB1ProfileFile(p.B1Profile)
 		if err != nil {
 			return fmt.Errorf("the b1 profile: %w", err)
 		}
@@ -127,6 +165,10 @@ func provisionFence(ctx context.Context, log *slog.Logger, raw []byte, start vrF
 			return errors.New("the b1 profile is not a VR generation's")
 		}
 		fileCode = &pf.VRHookMeasurement.RegistryCodeHash
+		if b1Chain != 0 && b1Chain != prof.ExecutionChainID {
+			return fmt.Errorf("the b1 profile given at startup is for chain %d, the provisioned one for %d", b1Chain, prof.ExecutionChainID)
+		}
+		b1Chain = prof.ExecutionChainID
 	}
 	var genesis *[32]byte // omitted in the file: the startup pin (if any) stands
 	if p.ExecutionGenesisHash != "" {
@@ -149,6 +191,16 @@ func provisionFence(ctx context.Context, log *slog.Logger, raw []byte, start vrF
 	}
 	if err := gate.RegisterMetric(meter); err != nil {
 		return err
+	}
+	// the P85 deployment source before the fence: an operator that pins as soon as signing is enabled finds it in place
+	pos, _, err := newPosSource(ctx, url, pins)
+	if err != nil {
+		return err
+	}
+	if pos != nil {
+		if err := a.ProvisionPosSource(pos, b1Chain); err != nil {
+			return err
+		}
 	}
 	if err := a.ProvisionFence(gate); err != nil {
 		return err
