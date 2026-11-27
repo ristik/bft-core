@@ -72,7 +72,7 @@ func newFixtureWith(t *testing.T, log *slog.Logger, options func(tb *types.RootT
 	return newConfiguredFixture(t, log, options, ManagedSession{})
 }
 
-func newConfiguredFixture(t *testing.T, log *slog.Logger, options func(*types.RootTrustBaseV1) []signingauthority.Option, managed ManagedSession) *fixture {
+func newConfiguredFixture(t *testing.T, log *slog.Logger, options func(*types.RootTrustBaseV1) []signingauthority.Option, managed ManagedSession, bounds ...Config) *fixture {
 	t.Helper()
 	rootSigner, err := abcrypto.NewInMemorySecp256K1Signer()
 	require.NoError(t, err)
@@ -104,7 +104,11 @@ func newConfiguredFixture(t *testing.T, log *slog.Logger, options func(*types.Ro
 
 	operatorCredential, err := NewCredential()
 	require.NoError(t, err)
-	server, err := NewServer(authority, Config{OperatorCredential: operatorCredential, Log: log, ManagedSession: managed})
+	cfg := Config{OperatorCredential: operatorCredential, Log: log, ManagedSession: managed}
+	if len(bounds) > 0 {
+		cfg.PinTimeout = bounds[0].PinTimeout
+	}
+	server, err := NewServer(authority, cfg)
 	require.NoError(t, err)
 	t.Cleanup(server.Close)
 

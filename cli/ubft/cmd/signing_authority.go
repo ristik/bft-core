@@ -1033,6 +1033,8 @@ func watchPosPolicy(ctx context.Context, log *slog.Logger, a *signingauthority.A
 		case installed:
 			log.Info("the P85 pin is verified against the execution client")
 			last = ""
+		case errors.Is(err, signingauthority.ErrPosBusy):
+			// another verification (a late pin) is running: try again next round
 		case err != nil && err.Error() != last:
 			last = err.Error()
 			if errors.Is(err, signingauthority.ErrPosPending) {
@@ -1118,7 +1120,8 @@ pin replaces a pending one). Until a pin is verified, the authority signs no P85
 				ctx, cancel := context.WithTimeout(cmd.Context(), flags.Timeout)
 				err = operator.SetPosPolicy(ctx, pin)
 				cancel()
-				if err == nil || !errors.Is(err, signingauthority.ErrPosPending) || time.Now().Add(posPolicyRetry).After(deadline) {
+				retry := errors.Is(err, signingauthority.ErrPosPending) || errors.Is(err, signingauthority.ErrPosBusy)
+				if err == nil || !retry || time.Now().Add(posPolicyRetry).After(deadline) {
 					break
 				}
 				fmt.Fprintf(cmd.ErrOrStderr(), "the pin is not verified yet, retrying: %v\n", err)
@@ -1129,6 +1132,9 @@ pin replaces a pending one). Until a pin is verified, the authority signs no P85
 				}
 			}
 			switch {
+			case errors.Is(err, signingauthority.ErrPosBusy):
+				// nothing was kept: the authority was verifying another pin for the whole wait
+				return fmt.Errorf("the authority is busy verifying another P85 pin and did not keep this one: send it again (or give a longer --wait): %w", err)
 			case errors.Is(err, signingauthority.ErrPosPending) && !requireVerified:
 				fmt.Fprintf(cmd.OutOrStdout(), "P85 pin for identities %v kept pending: the authority verifies it once its execution source answers, "+
 					"and signs no P85 possession before (%v)\n", pin.IDs, err)

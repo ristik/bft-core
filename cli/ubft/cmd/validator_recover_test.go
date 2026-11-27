@@ -424,7 +424,7 @@ func TestValidatorRecoverRereadsAfterThePin(t *testing.T) {
 	out, err := runValidator(t, f.home, f.args...)
 	require.NoError(t, err, out)
 	require.Equal(t, 1, f.chain.Sends(), "only VR's binding: %s", out)
-	require.Contains(t, out, "already done: identity")
+	require.Contains(t, out, "already done: VR's binding and identity")
 	f.chain.With(func(c *vrfake.Chain) { require.Zero(t, c.Pos.Admitted) })
 }
 
@@ -456,4 +456,86 @@ func TestValidatorRecoverDecidesFromTheLatestState(t *testing.T) {
 	g.chain.With(func(c *vrfake.Chain) {
 		require.Equal(t, selector(vrclient.VRABI.Methods["proposeBinding"].ID), c.Sent[0][:4], "the latest delegation is the new words: only VR's binding")
 	})
+}
+
+// otherWords is a registration of the identity's root binding with another fresh EVM node and key.
+func otherWords(t *testing.T, base vrclient.Registration, node string) vrclient.Registration {
+	k, err := ethcrypto.GenerateKey()
+	require.NoError(t, err)
+	o := base
+	o.EvmNodeID, o.EvmKey = node, ethcrypto.CompressPubkey(&k.PublicKey)
+	return o
+}
+
+// sol's round 2 on #1328, probe 1: while the pin is verified, VR's staged binding is replaced and a delegation of the new words is
+// installed. The delegation alone is no success: VR's binding is not the new words, so recover stops instead of advising a relink.
+func TestValidatorRecoverStopsWhenVRChangesDuringThePin(t *testing.T) {
+	f := newFreshAuthorityRecover(t)
+	once := false
+	f.src.onBound = func() {
+		if once {
+			return
+		}
+		once = true
+		f.chain.With(func(c *vrfake.Chain) {
+			want := *c.Identities[f.id].Staged
+			c.Pos.Delegations[[2]uint64{f.id, 1}] = &vrfake.Delegated{Binding: delegationOf(want), NextNonce: 2}
+			other := otherWords(t, want, "replaced-evm")
+			c.Identities[f.id].Staged = &other
+		})
+	}
+	out, err := runValidator(t, f.home, f.args...)
+	require.ErrorContains(t, err, "are not the new words: stop and re-run", out)
+	require.NotContains(t, out, "run the nodes on the new EVM key", "no relink advice")
+	require.Equal(t, 1, f.chain.Sends(), "only VR's binding was sent")
+}
+
+// sol's round 2 on #1328, probe 2: the delegation already held the new words when the run planned (so the plan had no delegation), and
+// it is replaced in the block that confirms proposeBinding. The receipt handler decides from that fresh read and sends the delegation.
+func TestValidatorRecoverDecidesAfterTheBindingFromAFreshRead(t *testing.T) {
+	f := newRecoverFixture(t)
+	f.chain.With(func(c *vrfake.Chain) {
+		c.Pos.Delegations[[2]uint64{f.id, 1}] = &vrfake.Delegated{Binding: delegationOf(f.want), NextNonce: 2}
+		c.AfterSend = func(c *vrfake.Chain, data []byte) {
+			if bytes.Equal(data[:4], selector(vrclient.VRABI.Methods["proposeBinding"].ID)) {
+				c.Pos.Delegations[[2]uint64{f.id, 1}] = &vrfake.Delegated{Binding: delegationOf(f.old), NextNonce: 3}
+			}
+		}
+	})
+	out, err := runValidator(t, f.home, "recover", "--id", fmt.Sprint(f.id), "--new-evm-keys", f.newEVM, "--old-authority-home", f.marker)
+	require.NoError(t, err, out)
+	require.Equal(t, 2, f.chain.Sends(), out)
+	f.chain.With(func(c *vrfake.Chain) {
+		require.Equal(t, selector(vrclient.VRABI.Methods["proposeBinding"].ID), c.Sent[0][:4])
+		require.Equal(t, selector(vrclient.PosElectionABI.Methods["admitDelegation"].ID), c.Sent[1][:4], "the replaced delegation is sent again")
+	})
+	require.True(t, sameDelegation(f.delegation(), delegationOf(f.want)))
+}
+
+// After the delegation confirms, success needs VR's binding too: a binding replaced in the delegation's block stops the run.
+func TestValidatorRecoverChecksVRAfterTheDelegation(t *testing.T) {
+	f := newRecoverFixture(t)
+	f.chain.With(func(c *vrfake.Chain) {
+		c.AfterSend = func(c *vrfake.Chain, data []byte) {
+			if bytes.Equal(data[:4], selector(vrclient.PosElectionABI.Methods["admitDelegation"].ID)) {
+				other := otherWords(t, f.want, "replaced-evm")
+				c.Identities[f.id].Staged = &other
+			}
+		}
+	})
+	out, err := runValidator(t, f.home, "recover", "--id", fmt.Sprint(f.id), "--new-evm-keys", f.newEVM, "--old-authority-home", f.marker)
+	require.ErrorContains(t, err, "after the confirmed delegation VR's bindings", out)
+}
+
+// A confirmed matching pair (VR's staged binding and the delegation are the new words) skips every signature and transaction, the pin too.
+func TestValidatorRecoverAConfirmedPairSendsAndSignsNothing(t *testing.T) {
+	f := newFreshAuthorityRecover(t)
+	out, err := runValidator(t, f.home, f.args...)
+	require.NoError(t, err, out)
+	sends, reads := f.chain.Sends(), len(f.src.seen)
+	out, err = runValidator(t, f.home, f.args...)
+	require.NoError(t, err, out)
+	require.Equal(t, sends, f.chain.Sends())
+	require.Equal(t, reads, len(f.src.seen), "the authority was not asked to pin or sign")
+	require.Contains(t, out, "nothing to do")
 }

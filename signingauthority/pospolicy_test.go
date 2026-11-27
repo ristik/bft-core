@@ -517,9 +517,14 @@ func TestAHungSourceDoesNotBlockOtherRequests(t *testing.T) {
 	short, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	require.ErrorIs(t, a.SetPosPolicy(short, posPin()), ErrPosPending, "the competing install gives up with its own deadline")
+	err := a.SetPosPolicy(short, posPin())
+	require.ErrorIs(t, err, ErrPosBusy, "the competing install gives up with its own deadline")
+	require.NotErrorIs(t, err, ErrPosPending, "and is not reported as kept: nothing of it is")
 	require.Less(t, time.Since(start), 5*time.Second)
-	_, err := a.SignPosPoP(posRequest())
+	a.mu.Lock()
+	require.Nil(t, a.posWant, "the busy request left nothing pending")
+	a.mu.Unlock()
+	_, err = a.SignPosPoP(posRequest())
 	require.ErrorIs(t, err, ErrPosPolicy, "nothing is signed while no pin is verified")
 
 	stop() // the hung read ends with its own context
@@ -529,4 +534,27 @@ func TestAHungSourceDoesNotBlockOtherRequests(t *testing.T) {
 	require.Equal(t, []uint64{5}, a.pos.IDs)
 	_, err = a.SignPosPoP(posRequest())
 	require.NoError(t, err)
+}
+
+// sol's round 2 on #1328: a pin that times out waiting for another verification is busy, not kept. The pending pin stays as it was (here
+// identity 6, kept after its own read failed), and the busy request (identity 5) is not queued behind it.
+func TestABusyPinIsNotKept(t *testing.T) {
+	src := &blockingPos{fakePos: *newFakePos(), release: make(chan struct{}), entered: make(chan struct{}, 4)}
+	a := newPosAuthority(t, nil)
+	require.NoError(t, a.ProvisionPosSource(src, 0))
+	enrolledOn(a, posChain)
+
+	first, stop := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- a.SetPosPolicy(first, PosPolicy{IDs: []uint64{6}}) }()
+	<-src.entered
+	short, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, a.SetPosPolicy(short, PosPolicy{IDs: []uint64{5}}), ErrPosBusy)
+	stop()
+	require.ErrorIs(t, <-done, ErrPosPending, "identity 6's own read failed: it is kept")
+	a.mu.Lock()
+	require.NotNil(t, a.posWant)
+	require.Equal(t, []uint64{6}, a.posWant.IDs, "the busy request did not replace or join it")
+	a.mu.Unlock()
 }

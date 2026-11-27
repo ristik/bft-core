@@ -267,7 +267,32 @@ func (r *posKeyChangeRun) run(ctx context.Context, w io.Writer) error {
 	// admit pins the new key's authority (when asked; the pin may wait for the authority's verification), then re-reads both contracts and
 	// builds the delegation from that read: skipped when the latest state already holds it, refused unless VR's binding is the new words,
 	// and signed (op 108) for custody's current generation and nonces only
+	vrHolds := func(st posBindingState) bool {
+		return vrclient.BindingMatches(st.Identity.Current, r.want) || (st.Identity.StagedRef != ([32]byte{}) && vrclient.BindingMatches(st.Identity.Staged, r.want))
+	}
+	delegated := func(st posBindingState) bool { return sameDelegation(st.Delegation, delegationOf(r.want)) }
+	// pair checks a fresh read for success: VR's binding must be the new words (else stop), and it reports whether the delegation at
+	// custody's current generation is them too (a confirmed pair: nothing more to sign or send)
+	pair := func(st posBindingState) (bool, error) {
+		if !vrHolds(st) {
+			return false, fmt.Errorf("%w: VR's bindings of identity %d are not the new words: stop and re-run", ErrValidator, r.id)
+		}
+		return delegated(st), nil
+	}
+	// admit runs once VR's binding is in place: a fresh read that already holds the pair skips everything; otherwise it pins the new key's
+	// authority (when asked; the pin may wait for the authority's verification), reads both contracts again, skips a pair that landed
+	// meanwhile, and builds the delegation from that read: signed (op 108) for custody's current generation and nonces only
 	admit := func() ([]step, error) {
+		now, err := readPosBindingState(ctx, r.ch.vr, r.custody, r.election, r.id)
+		if err != nil {
+			return nil, err
+		}
+		if done, err := pair(now); err != nil || done {
+			if done {
+				fmt.Fprintf(w, "already done: VR's binding and identity %d's delegation at generation %d are the new words\n", r.id, now.Position.Generation)
+			}
+			return nil, err
+		}
 		if r.pin != nil && !r.dry {
 			p := *r.pin
 			p.IDs = []uint64{r.id}
@@ -276,20 +301,17 @@ func (r *posKeyChangeRun) run(ctx context.Context, w io.Writer) error {
 			}
 			fmt.Fprintf(w, "  pinned the new signing authority's P85 scope to identity %d (verified against VR's binding)\n", r.id)
 		}
-		now, err := readPosBindingState(ctx, r.ch.vr, r.custody, r.election, r.id)
-		if err != nil {
+		if now, err = readPosBindingState(ctx, r.ch.vr, r.custody, r.election, r.id); err != nil {
 			return nil, err
 		}
-		p, err := planPosKeyChange(now, operator, r.want, r.evmOnly)
-		if err != nil {
+		if _, err := planPosKeyChange(now, operator, r.want, r.evmOnly); err != nil {
 			return nil, err
 		}
-		if !p.Admit {
-			fmt.Fprintf(w, "already done: identity %d's delegation at generation %d is the new words\n", r.id, now.Position.Generation)
-			return nil, nil
-		}
-		if !(vrclient.BindingMatches(now.Identity.Current, r.want) || (now.Identity.StagedRef != ([32]byte{}) && vrclient.BindingMatches(now.Identity.Staged, r.want))) {
-			return nil, fmt.Errorf("%w: VR's bindings of identity %d are no longer the new words: stop and re-run", ErrValidator, r.id)
+		if done, err := pair(now); err != nil || done {
+			if done {
+				fmt.Fprintf(w, "already done: VR's binding and identity %d's delegation at generation %d are the new words\n", r.id, now.Position.Generation)
+			}
+			return nil, err
 		}
 		s, err := r.admitStep(ctx, now)
 		if err != nil {
@@ -332,13 +354,14 @@ func (r *posKeyChangeRun) run(ctx context.Context, w io.Writer) error {
 				return nil, fmt.Errorf("%w: after the confirmed proposeBinding VR's bindings of identity %d are not the new words: stop and re-run", ErrValidator, r.id)
 			}
 			fmt.Fprintf(w, "  confirmed: VR stages identity %d's new binding\n", r.id)
-			if !plan.Admit {
-				return nil, nil
-			}
+			// decided from the state read now, never from the plan made before the binding was sent
 			return admit()
 		}
-		if !sameDelegation(now.Delegation, delegationOf(r.want)) {
+		if !delegated(now) {
 			return nil, fmt.Errorf("%w: after the confirmed delegation the election stages other words for identity %d: stop and re-run", ErrValidator, r.id)
+		}
+		if !vrHolds(now) {
+			return nil, fmt.Errorf("%w: after the confirmed delegation VR's bindings of identity %d are not the new words: stop and re-run", ErrValidator, r.id)
 		}
 		fmt.Fprintf(w, "  confirmed: identity %d's delegation at generation %d is the new words, equal to VR's binding (the old key is fenced from later snapshots)\n",
 			r.id, now.Position.Generation)

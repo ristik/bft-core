@@ -44,8 +44,13 @@ var ErrPosPolicy = errors.New("signing-pos-policy-refused")
 var ErrPosPolicyConflict = errors.New("signing-pos-policy-conflict")
 
 // ErrPosPending is a pin that could not be verified yet: the execution source is not provisioned or did not answer, or an id is not
-// registered at the block read. Nothing was found wrong; retry. Signing stays refused meanwhile.
+// registered at the block read. Nothing was found wrong. A late pin answered with it is kept (unless a later pin replaces it) and verified
+// on the next P85 signing request or by the watcher; signing stays refused meanwhile.
 var ErrPosPending = errors.New("signing-pos-policy-pending")
+
+// ErrPosBusy is a pin request that gave up waiting for another pin verification (its own deadline passed first). Unlike ErrPosPending
+// nothing of the request is kept: send it again.
+var ErrPosBusy = errors.New("signing-pos-policy-busy")
 
 // posVerifyTimeout bounds the verification a signing request triggers for a pending pin, and each attempt of the CLI's watcher.
 const PosVerifyTimeout = 10 * time.Second
@@ -236,7 +241,7 @@ func (a *Authority) installPos(ctx context.Context, in *PosPolicy) (bool, error)
 	select {
 	case a.posInstall <- struct{}{}:
 	case <-ctx.Done():
-		return false, fmt.Errorf("%w: another pin verification is still running: %w", ErrPosPending, ctx.Err())
+		return false, fmt.Errorf("%w: another pin verification is still running and this request was not kept: %w", ErrPosBusy, ctx.Err())
 	}
 	defer func() { <-a.posInstall }()
 

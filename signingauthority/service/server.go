@@ -83,6 +83,9 @@ type Config struct {
 	// lookup behind a reserve. It is separate from the socket deadlines because those bound reading
 	// and writing, and cannot reach work that is waiting on something other than the connection.
 	OperationTimeout time.Duration
+	// PinTimeout bounds one P85 pin install (its wait for another verification and its own read of the execution client), below the
+	// operator client's default deadline, so the caller gets the authority's answer (verified, pending or busy) rather than its own timeout.
+	PinTimeout time.Duration
 
 	Log *slog.Logger
 }
@@ -95,6 +98,7 @@ func DefaultConfig() Config {
 		IdleTimeout:      5 * time.Minute,
 		WriteTimeout:     30 * time.Second,
 		OperationTimeout: 30 * time.Second,
+		PinTimeout:       8 * time.Second,
 	}
 }
 
@@ -170,6 +174,9 @@ func NewServer(authority *signingauthority.Authority, cfg Config) (*Server, erro
 	}
 	if cfg.OperationTimeout <= 0 {
 		cfg.OperationTimeout = defaults.OperationTimeout
+	}
+	if cfg.PinTimeout <= 0 {
+		cfg.PinTimeout = defaults.PinTimeout
 	}
 	log := cfg.Log
 	if log == nil {
@@ -600,7 +607,9 @@ func (s *Server) operatorOp(ctx context.Context, operation op, payload []byte) (
 		copy(pin.Network[:], wire.Network)
 		copy(pin.ChainID[:], wire.ChainID)
 		copy(pin.Election[:], wire.Election)
-		if err := s.authority.SetPosPolicy(ctx, pin); err != nil {
+		pctx, cancel := context.WithTimeout(ctx, s.cfg.PinTimeout)
+		defer cancel()
+		if err := s.authority.SetPosPolicy(pctx, pin); err != nil {
 			s.log.Warn("refusing a P85 pin", slog.String("err", err.Error()))
 			return nil, err
 		}

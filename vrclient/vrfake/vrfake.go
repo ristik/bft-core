@@ -97,6 +97,8 @@ type Chain struct {
 	// them: a certified view that lags the latest one. Reads at any other block see Pos.Delegations.
 	FinalizedDelegations map[[2]uint64]*Delegated
 	atFinalized          bool
+	// AfterSend, when set, runs under Mu after each accepted transaction with its calldata: a concurrent change landing in the same block.
+	AfterSend func(c *Chain, data []byte)
 }
 
 // finalizedHash is the finalized block's hash while FinalizedDelegations is set.
@@ -314,6 +316,9 @@ func (c *Chain) dispatch(req request) (any, *rpcError) {
 			c.Logs = c.Logs[:start]
 		} else {
 			c.Sent = append(c.Sent, tx.Data())
+			if c.AfterSend != nil {
+				c.AfterSend(c, tx.Data())
+			}
 		}
 		c.Receipts[tx.Hash()] = map[string]any{"status": status, "blockNumber": hexutil.Uint64(c.Head), "gasUsed": hexutil.Uint64(150_000),
 			"logs": append([]map[string]any(nil), c.Logs[start:]...)}
