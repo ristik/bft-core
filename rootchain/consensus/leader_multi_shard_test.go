@@ -381,6 +381,8 @@ func gate9RescueTrace(t *testing.T, members int) {
 	var lastEdge uint64
 	var unknownRound, firstKnownRound, commitRound, commitAtUnknown uint64
 	var rescueMiss bool
+	var rescueWindow rescueTimingWindow
+	var end time.Time
 	var committedAfterUnknown atomic.Bool
 	committed := func() uint64 { return c.committedRound(watch) }
 	if larger {
@@ -392,15 +394,26 @@ func gate9RescueTrace(t *testing.T, members int) {
 		t.Logf("T=%s, block rate %s, topology %s, shards %v, start round %d, committed %d, stopped %v, returned %v", T, blockRate, topology, shards, startRound, committed(), dead, returning)
 	}
 	observe := func(now time.Time, round uint64) {
+		roundKnown := lastKnown
+		if round != lastRound {
+			roundKnown = known(round)
+		}
+		beforeKnown := !roundKnown && round != lastEdge && !unknownFrom.IsZero() && known(round+1)
+		if larger {
+			now = rescueWindow.sampleTime()
+			if now.IsZero() {
+				return
+			}
+		}
 		at := now.Sub(t0).Round(time.Millisecond)
 		if round != lastRound {
 			gap := now.Sub(roundAt) / time.Duration(round-lastRound)
 			for r := lastRound; r < round; r++ {
 				samples = append(samples, sample{r, gap, lastKnown})
 			}
-			lastRound, roundAt, lastKnown = round, now, known(round)
+			lastRound, roundAt, lastKnown = round, now, roundKnown
 		}
-		if !lastKnown && round != lastEdge && known(round+1) && !unknownFrom.IsZero() {
+		if beforeKnown {
 			lastEdge = round
 			t.Logf("round %d at %s: its leader unknown, the next known", round, at)
 			counters("that round's start")
@@ -415,13 +428,30 @@ func gate9RescueTrace(t *testing.T, members int) {
 			t.Logf("first known round after that %d at %s: unknown window total %s over %d rounds", firstKnownRound, at, now.Sub(unknownFrom).Round(time.Millisecond), firstKnownRound-unknownRound)
 			counters("the first known round")
 		}
-		if !unknownFrom.IsZero() && now.After(unknownFrom) && commitAt.IsZero() && committed() != commitAtUnknown {
-			commitAt, commitRound = now, round
-			committedAfterUnknown.Store(true)
-			t.Logf("first commit after that at round %d, %s: unknown-to-commit %s over %d rounds", commitRound, at, now.Sub(unknownFrom).Round(time.Millisecond), commitRound-unknownRound)
-			counters("the first commit")
+		if unknownFrom.IsZero() || !now.After(unknownFrom) || !commitAt.IsZero() {
+			return
 		}
-		if larger && !rescueMiss && !unknownFrom.IsZero() && commitAt.IsZero() && now.Sub(unknownFrom) >= 75*time.Second {
+		var head uint64
+		commitObservedAt := now
+		if larger {
+			head, commitObservedAt = rescueWindow.readCommit(committed)
+			if commitObservedAt.IsZero() {
+				return
+			}
+		} else {
+			head = committed()
+		}
+		elapsed := commitObservedAt.Sub(unknownFrom)
+		if head != commitAtUnknown {
+			commitAt, commitRound = commitObservedAt, round
+			committedAfterUnknown.Store(true)
+			t.Logf("first commit after that at round %d, %s: unknown-to-commit %s over %d rounds", commitRound, commitAt.Sub(t0).Round(time.Millisecond), elapsed.Round(time.Millisecond), commitRound-unknownRound)
+			counters("the first commit")
+			if larger && !rescueMiss && elapsed > 75*time.Second {
+				rescueMiss = true
+				t.Logf("75 s rescue target missed: first commit after unknown round %d observed after %s", unknownRound, elapsed)
+			}
+		} else if larger && !rescueMiss && elapsed >= 75*time.Second {
 			rescueMiss = true
 			t.Logf("75 s elapsed since the first unknown leader at round %d; no commit by round %d", unknownRound, round)
 		}
@@ -444,15 +474,19 @@ func gate9RescueTrace(t *testing.T, members int) {
 				case <-stop:
 					return
 				case <-ticker.C:
-					observe(time.Now(), m(watch).pacemaker.GetCurrentRound())
+					observe(time.Time{}, m(watch).pacemaker.GetCurrentRound())
 				}
 			}
 		}()
 		<-ready
 		stopObserving = sync.OnceFunc(func() {
 			close(stop)
+			rounds := clock.halt()
 			<-done
-			reportTimingUnknown(t, clock.halt())
+			if !end.IsZero() {
+				rounds = slices.DeleteFunc(rounds, func(r clockRound) bool { return r.end.After(end) })
+			}
+			reportTimingUnknown(t, rounds)
 		})
 		defer stopObserving()
 	}
@@ -511,6 +545,7 @@ func gate9RescueTrace(t *testing.T, members int) {
 	deadline := t0.Add(40 * time.Minute)
 	progressAt := t0
 	var certificateMiss bool
+certify:
 	for len(certAt) < len(shards) {
 		require.True(t, time.Now().Before(deadline), "%d of %d certified in 40 minutes", len(certAt), len(shards))
 		now := time.Now()
@@ -523,6 +558,12 @@ func gate9RescueTrace(t *testing.T, members int) {
 				continue
 			}
 			if !bytes.Equal(shardHash(m(watch), p), established[p.String()]) {
+				if larger && len(certAt)+1 == len(shards) {
+					end = rescueWindow.finish()
+					certAt[p.String()] = end.Sub(t0)
+					stopObserving()
+					break certify
+				}
 				certAt[p.String()] = time.Since(t0)
 				continue
 			}
@@ -543,8 +584,9 @@ func gate9RescueTrace(t *testing.T, members int) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	end := time.Now()
-	stopObserving()
+	if end.IsZero() {
+		end = time.Now()
+	}
 	counters("the last certificate")
 	if transport != nil {
 		transport.reportDelivery(t0, "the stop", shards, func(s liveShard) []byte { return shardHash(m(watch), s) })
@@ -645,6 +687,36 @@ func gate9RescueTrace(t *testing.T, members int) {
 		t.Logf("steady phase: %d rounds from %d with %s down, certificates per shard %v", steady, from, d, certs)
 		reportRho(t, rounds, selector.RecoveryRunStart, c.id(d))
 	}
+}
+
+// rescueTimingWindow associates each sample with the time its read completed.
+// The cutoff and the sample check share a lock so a sample racing with the final
+// certificate can be included only if its read completed within the window.
+type rescueTimingWindow struct {
+	mu  sync.Mutex
+	end time.Time
+}
+
+func (w *rescueTimingWindow) finish() time.Time {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.end = time.Now()
+	return w.end
+}
+
+func (w *rescueTimingWindow) sampleTime() time.Time {
+	at := time.Now()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.end.IsZero() && at.After(w.end) {
+		return time.Time{}
+	}
+	return at
+}
+
+func (w *rescueTimingWindow) readCommit(read func() uint64) (uint64, time.Time) {
+	head := read()
+	return head, w.sampleTime()
 }
 
 // steadyDeadline allows every steady round a timer and a second.

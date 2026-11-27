@@ -24,6 +24,38 @@ func TestLargerCommitteeRescueTiming(t *testing.T) {
 	gate9RescueTrace(t, members)
 }
 
+func TestRescueTimingWindow(t *testing.T) {
+	t.Run("commit timestamp follows the read", func(t *testing.T) {
+		var window rescueTimingWindow
+		var published time.Time
+		head, observedAt := window.readCommit(func() uint64 {
+			published = time.Now()
+			return 42
+		})
+		require.EqualValues(t, 42, head)
+		require.False(t, observedAt.Before(published))
+	})
+
+	t.Run("last certificate excludes a read still in flight", func(t *testing.T) {
+		var window rescueTimingWindow
+		reading, release := make(chan struct{}), make(chan struct{})
+		observed := make(chan time.Time, 1)
+		go func() {
+			_, at := window.readCommit(func() uint64 {
+				close(reading)
+				<-release
+				return 42
+			})
+			observed <- at
+		}()
+		<-reading
+		window.finish()
+		close(release)
+		require.True(t, (<-observed).IsZero(), "late commit observation")
+		require.True(t, window.sampleTime().IsZero(), "late unknown-leader observation")
+	})
+}
+
 // TestWeightedTwoStageTiming reuses the gate 7 stale-proof scenario at two
 // weighted placements. The libp2p row uses real root-to-root traffic. The
 // scripted shard submits directly to a manager on both paths, as in gate 7.

@@ -42,8 +42,11 @@ stops, returns and proof diagnostics, and the rescue poll ran in the proof
 submission loop. The recorded rescue observations cover that post-setup
 window through fresh certification. The current fixture starts both
 observers before the first stop and polls for rescue independently of proof
-submission. The selector is checked for every recovery-run owner through
-one cycle and at its repeat.
+submission. The committed head is timestamped after its read returns. The
+rescue window closes when the submission loop records the last watched-root
+certificate, and samples whose reads finish after that cutoff are discarded.
+The selector is checked for every recovery-run owner through one cycle and
+at its repeat.
 
 ## Weighted five-root results
 
