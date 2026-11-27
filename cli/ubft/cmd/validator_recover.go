@@ -2,13 +2,16 @@ package cmd
 
 // #1286: an in-place EVM-key change of a bonded PoS identity (`validator recover` after an authority loss, and `validator rotate` on the PoS
 // adapter). In PoS the generation is custody's frozen bond cycle and the binding words are VR's exact current binding or its nonzero staged
-// one (astra's ruling). The change is two transactions, delegation first:
+// one (astra's ruling). The change is two transactions, VR's binding first (#1222, astra's REORDER):
 //
-//  1. ElectionPolicy.admitDelegation of the new words at custody's current generation, confirmed. It fences the old key: the old delegation
-//     no longer equals a VR binding, so no later snapshot selects the identity with the old key (an incumbent keeps its binding until the
-//     boundary, and an already-frozen result keeps the binding it captured).
-//  2. VR.proposeBinding of the identical words. The next snapshot freezes the new key, its authority proves possession, and the
-//     acknowledgement installs the binding at the unchanged custody generation; the bond stays in its lots.
+//  1. VR.proposeBinding of the new words, with the root key's and the new EVM key's proofs over VR's binding digest (the new key's
+//     authority gives its proof with op 110 while its P85 signing is still gated). VR needs no delegation for it.
+//  2. After it confirms, the new key's authority verifies its P85 pin against VR (the confirmed binding names its node and key), signs the
+//     delegation possession, and ElectionPolicy.admitDelegation of the identical words lands at custody's current generation and nonces. It
+//     fences the old key: the old delegation no longer equals a VR binding, so no later snapshot selects the identity with the old key.
+//     Until it confirms an election can still freeze the old key against the current binding: the old authority stays stopped, and a
+//     result frozen with the dead key follows the normal expiry or recovery. The acknowledgement then installs the binding at the unchanged
+//     custody generation; the bond stays in its lots.
 //
 // A new EVM key is a new EVM node identity: a fresh shard node key (new EVM node id), a fresh authority volume and an empty shard data
 // directory, which join through the joiner path and activate at the boundary; the old node and authority stay stopped, their volumes and
@@ -164,8 +167,26 @@ func (ch *validatorChain) certifiedClient(ctx context.Context) (*vrclient.Client
 		return nil, 0, fmt.Errorf("%w: the RPC serves no finalized (certified) block", ErrValidator)
 	}
 	c := *ch.vr
-	c.Block, c.BlockHash = "", b.Hash.Hex()
+	c.Block, c.BlockHash, c.Canonical = "", b.Hash.Hex(), true
 	return &c, uint64(b.Number), nil
+}
+
+// latestSnapshot reads the state a key change decides from at one fresh block: the head's hash, named (EIP-1898, requireCanonical) in
+// every read of custody, the election and VR, so the custody generation, the delegation and VR's bindings are one block's and never a
+// pair that did not coexist (sol's round 3 on #1328).
+func (r *posKeyChangeRun) latestSnapshot(ctx context.Context) (posBindingState, error) {
+	var b struct {
+		Hash common.Hash `json:"hash"`
+	}
+	if err := r.ch.rpc.CallContext(ctx, &b, "eth_getBlockByNumber", "latest", false); err != nil {
+		return posBindingState{}, fmt.Errorf("%w: reading the head block: %w", ErrValidator, err)
+	}
+	if b.Hash == (common.Hash{}) {
+		return posBindingState{}, fmt.Errorf("%w: the RPC's head block has no hash", ErrValidator)
+	}
+	c := *r.ch.vr
+	c.Block, c.BlockHash, c.Canonical = "", b.Hash.Hex(), true
+	return readPosBindingState(ctx, &c, r.custody, r.election, r.id)
 }
 
 // readPosBindingState reads the state a key change decides from, through c (certified, or latest after a confirmed transaction).
@@ -219,9 +240,13 @@ type posKeyChangeRun struct {
 	want              vrclient.Registration
 	evmOnly           bool
 	dry               bool
+	// pin, when set, is the P85 pin template (no ids) the new key's authority is pinned with for this identity, after VR's binding confirms
+	pin *signingauthority.PosPolicy
 }
 
-// run plans from the certified state, then sends the delegation (confirmed and re-read) before the binding (confirmed and re-read).
+// run plans from the certified state, then sends VR's binding (confirmed and re-read) before the delegation (confirmed and re-read). In
+// between, the new key's authority is pinned to the identity (#1222): it verifies the pin against its own execution client, where VR's
+// confirmed binding now names its node and key, and signs the delegation possession only then.
 func (r *posKeyChangeRun) run(ctx context.Context, w io.Writer) error {
 	cert, height, err := r.ch.certifiedClient(ctx)
 	if err != nil {
@@ -238,91 +263,126 @@ func (r *posKeyChangeRun) run(ctx context.Context, w io.Writer) error {
 	}
 	fmt.Fprintf(w, "identity %d: custody generation %d, %d open lot(s), certified at block %d; new EVM node %s\n", r.id, st.Position.Generation,
 		st.Position.OpenLots, height, r.want.EvmNodeID)
-	// the latest state decides each transaction's nonces; it must agree with the certified plan (a step done since is skipped)
-	latest, err := readPosBindingState(ctx, r.ch.vr, r.custody, r.election, r.id)
+	// the certified state is the preflight (its refusals stand); the steps are decided from a fresh read of the latest state only: a step is
+	// skipped only when the latest state holds its words at custody's current generation, never because the certified view says so
+	latest, err := r.latestSnapshot(ctx)
 	if err != nil {
 		return err
 	}
-	if lp, err := planPosKeyChange(latest, operator, r.want, r.evmOnly); err != nil {
+	if plan, err = planPosKeyChange(latest, operator, r.want, r.evmOnly); err != nil {
 		return err
-	} else {
-		plan.Admit, plan.Stage = plan.Admit && lp.Admit, plan.Stage && lp.Stage
-	}
-	if !plan.Admit {
-		fmt.Fprintf(w, "already done: identity %d's delegation at generation %d is the new words\n", r.id, latest.Position.Generation)
 	}
 	if !plan.Stage {
 		fmt.Fprintf(w, "already done: VR's binding of identity %d is the new words\n", r.id)
 	}
+	if !plan.Admit {
+		fmt.Fprintf(w, "already done: identity %d's delegation at generation %d is the new words\n", r.id, latest.Position.Generation)
+	}
 	if !plan.Admit && !plan.Stage {
-		fmt.Fprintln(w, "nothing to do: the delegation and VR's binding are the new words")
+		fmt.Fprintln(w, "nothing to do: VR's binding and the delegation are the new words")
 		return nil
 	}
-	var steps []step
-	if plan.Admit {
-		s, err := r.admitStep(ctx, latest)
-		if err != nil {
-			return err
-		}
-		steps = append(steps, s)
+	// admit pins the new key's authority (when asked; the pin may wait for the authority's verification), then re-reads both contracts and
+	// builds the delegation from that read: skipped when the latest state already holds it, refused unless VR's binding is the new words,
+	// and signed (op 108) for custody's current generation and nonces only
+	vrHolds := func(st posBindingState) bool {
+		return vrclient.BindingMatches(st.Identity.Current, r.want) || (st.Identity.StagedRef != ([32]byte{}) && vrclient.BindingMatches(st.Identity.Staged, r.want))
 	}
-	stageStep := func() ([]step, error) {
-		s, err := r.stageStep(ctx)
+	delegated := func(st posBindingState) bool { return sameDelegation(st.Delegation, delegationOf(r.want)) }
+	// pair checks a fresh read for success: VR's binding must be the new words (else stop), and it reports whether the delegation at
+	// custody's current generation is them too (a confirmed pair: nothing more to sign or send)
+	pair := func(st posBindingState) (bool, error) {
+		if !vrHolds(st) {
+			return false, fmt.Errorf("%w: VR's bindings of identity %d are not the new words: stop and re-run", ErrValidator, r.id)
+		}
+		return delegated(st), nil
+	}
+	// admit runs once VR's binding is in place: a fresh read that already holds the pair skips everything; otherwise it pins the new key's
+	// authority (when asked; the pin may wait for the authority's verification), reads both contracts again, skips a pair that landed
+	// meanwhile, and builds the delegation from that read: signed (op 108) for custody's current generation and nonces only
+	admit := func() ([]step, error) {
+		now, err := r.latestSnapshot(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if done, err := pair(now); err != nil || done {
+			if done {
+				fmt.Fprintf(w, "already done: VR's binding and identity %d's delegation at generation %d are the new words\n", r.id, now.Position.Generation)
+			}
+			return nil, err
+		}
+		if r.pin != nil && !r.dry {
+			p := *r.pin
+			p.IDs = []uint64{r.id}
+			if err := r.next.EVMAuth.PinPosPolicy(ctx, p); err != nil {
+				return nil, err
+			}
+			fmt.Fprintf(w, "  pinned the new signing authority's P85 scope to identity %d (verified against VR's binding)\n", r.id)
+		}
+		if now, err = r.latestSnapshot(ctx); err != nil {
+			return nil, err
+		}
+		if _, err := planPosKeyChange(now, operator, r.want, r.evmOnly); err != nil {
+			return nil, err
+		}
+		if done, err := pair(now); err != nil || done {
+			if done {
+				fmt.Fprintf(w, "already done: VR's binding and identity %d's delegation at generation %d are the new words\n", r.id, now.Position.Generation)
+			}
+			return nil, err
+		}
+		s, err := r.admitStep(ctx, now)
 		if err != nil {
 			return nil, err
 		}
 		return []step{s}, nil
 	}
-	if plan.Stage {
-		if plan.Admit && r.dry {
-			s, err := r.stageStep(ctx)
-			if err != nil {
-				return err
-			}
-			s.note = "it is sent after the delegation confirms"
-			steps = append(steps, s)
-		} else if !plan.Admit {
-			more, err := stageStep()
-			if err != nil {
-				return err
-			}
-			steps = append(steps, more...)
+	var steps []step
+	switch {
+	case plan.Stage:
+		s, err := r.stageStep(ctx)
+		if err != nil {
+			return err
 		}
+		steps = append(steps, s)
+		if plan.Admit && r.dry {
+			defer fmt.Fprintf(w, "then: admit identity %d's delegation to the new EVM key at custody's current generation, after VR's binding confirms "+
+				"(the new key's authority signs its possession only once it verifies that binding): not simulated\n", r.id)
+		}
+	default:
+		more, err := admit()
+		if err != nil {
+			return err
+		}
+		if len(more) == 0 {
+			return nil
+		}
+		steps = append(steps, more...)
 	}
-	// the receipts arrive in order: the delegation's (when planned) first, then the binding's
-	admitPending := plan.Admit
+	// the receipts arrive in order: the binding's (when planned) first, then the delegation's
+	stagePending := plan.Stage
 	after := func(_ int, _ *vrclient.Receipt) ([]step, error) {
-		now, err := readPosBindingState(ctx, r.ch.vr, r.custody, r.election, r.id)
+		now, err := r.latestSnapshot(ctx)
 		if err != nil {
 			return nil, err
 		}
-		want := delegationOf(r.want)
-		if admitPending {
-			admitPending = false
-			if !sameDelegation(now.Delegation, want) {
-				return nil, fmt.Errorf("%w: after the confirmed delegation the election stages other words for identity %d: stop and re-run", ErrValidator, r.id)
+		if stagePending {
+			stagePending = false
+			if !(vrclient.BindingMatches(now.Identity.Current, r.want) || (now.Identity.StagedRef != ([32]byte{}) && vrclient.BindingMatches(now.Identity.Staged, r.want))) {
+				return nil, fmt.Errorf("%w: after the confirmed proposeBinding VR's bindings of identity %d are not the new words: stop and re-run", ErrValidator, r.id)
 			}
-			fmt.Fprintf(w, "  confirmed: identity %d's delegation at generation %d is the new words (the old key is fenced from later snapshots)\n", r.id, now.Position.Generation)
-			if !plan.Stage {
-				return nil, nil
-			}
-			// re-plan from the confirmed state: the staged-binding guard is checked again before replacing anything
-			p, err := planPosKeyChange(now, operator, r.want, r.evmOnly)
-			if err != nil {
-				return nil, err
-			}
-			if !p.Stage {
-				return nil, nil
-			}
-			return stageStep()
+			fmt.Fprintf(w, "  confirmed: VR stages identity %d's new binding\n", r.id)
+			// decided from the state read now, never from the plan made before the binding was sent
+			return admit()
 		}
-		if !(vrclient.BindingMatches(now.Identity.Current, r.want) || (now.Identity.StagedRef != ([32]byte{}) && vrclient.BindingMatches(now.Identity.Staged, r.want))) {
-			return nil, fmt.Errorf("%w: after the confirmed proposeBinding VR's bindings of identity %d are not the new words", ErrValidator, r.id)
+		if !delegated(now) {
+			return nil, fmt.Errorf("%w: after the confirmed delegation the election stages other words for identity %d: stop and re-run", ErrValidator, r.id)
 		}
-		if !sameDelegation(now.Delegation, want) {
-			return nil, fmt.Errorf("%w: VR stages the new words but the delegation is not them: re-run to admit it", ErrValidator)
+		if !vrHolds(now) {
+			return nil, fmt.Errorf("%w: after the confirmed delegation VR's bindings of identity %d are not the new words: stop and re-run", ErrValidator, r.id)
 		}
-		fmt.Fprintf(w, "  confirmed: VR stages identity %d's new binding, the delegation equals it\n", r.id)
+		fmt.Fprintf(w, "  confirmed: identity %d's delegation at generation %d is the new words, equal to VR's binding (the old key is fenced from later snapshots)\n",
+			r.id, now.Position.Generation)
 		return nil, nil
 	}
 	if r.dry {
@@ -351,7 +411,7 @@ func (r *posKeyChangeRun) admitStep(ctx context.Context, st posBindingState) (st
 	if err != nil {
 		return step{}, err
 	}
-	return step{what: fmt.Sprintf("admit identity %d's delegation to the new EVM key at custody generation %d (first: it fences the old key)", r.id, req.Generation),
+	return step{what: fmt.Sprintf("admit identity %d's delegation to the new EVM key at custody generation %d (it fences the old key)", r.id, req.Generation),
 		tx: vrclient.Tx{To: r.election, Data: data}}, nil
 }
 
@@ -379,7 +439,7 @@ func signDelegation(ctx context.Context, ch *validatorChain, election common.Add
 	return ownerSig, evmSig, err
 }
 
-// stageStep is VR.proposeBinding of the same words at VR's current binding nonce (read when the step is built: after the delegation).
+// stageStep is VR.proposeBinding of the new words at VR's current binding nonce (read when the step is built).
 func (r *posKeyChangeRun) stageStep(ctx context.Context) (step, error) {
 	idn, err := r.ch.vr.Identity(ctx, r.id)
 	if err != nil {
@@ -391,7 +451,7 @@ func (r *posKeyChangeRun) stageStep(ctx context.Context) (step, error) {
 	}
 	reg.Payee = r.want.Payee
 	if !vrclient.BindingMatches(vrclient.Binding{RootNodeID: reg.RootNodeID, RootKey: reg.RootKey, EvmNodeID: reg.EvmNodeID, EvmKey: reg.EvmKey, Payee: reg.Payee}, r.want) {
-		return step{}, fmt.Errorf("%w: the binding to stage is not the delegated words", ErrValidator)
+		return step{}, fmt.Errorf("%w: the binding to stage is not the words to delegate", ErrValidator)
 	}
 	signed, err := vrclient.SignWith(ctx, r.ch.domain(), r.sender.From(), true, r.id, reg, root, evm)
 	if err != nil {
@@ -414,13 +474,14 @@ type recoverFlags struct {
 	EVMAuthorityCredential string
 	EVMNodeInfo            string
 	OldAuthorityHome       string
+	PinPosPolicy           string
 }
 
 func validatorRecoverCmd(base *baseFlags) *cobra.Command {
 	f := &recoverFlags{txFlags: txFlags{validatorFlags: validatorFlags{baseFlags: base}, enrollsRootKey: true}}
 	cmd := &cobra.Command{
 		Use:   "recover",
-		Short: "PoS: move a bonded identity whose EVM signing authority is lost to a fresh EVM key (delegation first, then VR)",
+		Short: "PoS: move a bonded identity whose EVM signing authority is lost to a fresh EVM key (VR's binding first, then the delegation)",
 		Long: `For a bonded PoS identity whose EVM key is gone with its signing authority (#1286). The root key, root node and payee stay; only
 the EVM node and key change: a new EVM key is a new EVM node identity (a fresh shard node key, a fresh authority volume, an empty
 shard data directory) that joins through the joiner path, at custody's current generation, so the bond stays in its lots. Preflight from the certified (finalized)
@@ -428,8 +489,10 @@ state: the custody owner is the operator, the identity has open lots, no retirem
 names the old authority's preserved volume: it must carry the fail-stop marker (written before that authority first started, so the
 volume never runs an authority again), and the new authority may not live inside it. A configured authority that still answers and
 holds its key is refused. These checks do not prove the key is lost: confirm the old authority process is gone before recovering.
-Then ElectionPolicy.admitDelegation of the new EVM key, confirmed, fences the old key from later snapshots, and VR.proposeBinding stages
-the identical words for the next election. A re-run skips what is done. A staged binding that an open result froze is not replaced.
+Then VR.proposeBinding stages the new words for the next election; after it confirms, --pin-pos-policy pins the fresh authority to the
+identity (the authority verifies that VR's binding names its node and key), and ElectionPolicy.admitDelegation of the identical words,
+confirmed, fences the old key from later snapshots. Until then an election can still freeze the old key: keep the old authority stopped.
+A re-run re-reads both contracts and skips what is confirmed. A staged binding that an open result froze is not replaced.
 Root-key loss is refused: take the exit path. Start the node on the new authority, then follow the election and the boundary.`,
 		RunE: func(cmd *cobra.Command, _ []string) error { return validatorRecover(cmd, f) },
 	}
@@ -439,6 +502,7 @@ Root-key loss is refused: take the exit path. Start the node on the new authorit
 	cmd.Flags().StringVar(&f.EVMAuthorityCredential, "new-evm-authority-credential", "", "the operator credential of the fresh authority")
 	cmd.Flags().StringVar(&f.EVMNodeInfo, "new-evm-node-info", "", "the node info of the fresh authority (`signing-authority node-info`)")
 	cmd.Flags().StringVar(&f.OldAuthorityHome, "old-authority-home", "", "the old authority's preserved volume, holding its fail-stop marker (required; relative to the validator home); it is never reused")
+	cmd.Flags().StringVar(&f.PinPosPolicy, "pin-pos-policy", "", pinPosPolicyKeyChangeUsage)
 	return cmd
 }
 
@@ -523,14 +587,34 @@ func validatorRecover(cmd *cobra.Command, f *recoverFlags) error {
 	if err := next.distinct(); err != nil {
 		return err
 	}
-	return runPosKeyChange(ctx, w, v, &next, ch, s, f.DryRun, true)
+	return runPosKeyChange(ctx, w, v, &next, ch, s, f.DryRun, true, f.PinPosPolicy)
 }
 
 // runPosKeyChange finds the operator's identity and runs the two-transaction key change to the words of next.
-func runPosKeyChange(ctx context.Context, w io.Writer, v *loadedValidator, next *validatorKeys, ch *validatorChain, s vrclient.Sender, dry, evmOnly bool) error {
+func runPosKeyChange(ctx context.Context, w io.Writer, v *loadedValidator, next *validatorKeys, ch *validatorChain, s vrclient.Sender, dry, evmOnly bool,
+	pinFile string) error {
 	custody, election, err := ch.posAddrs(ctx)
 	if err != nil {
 		return err
+	}
+	var pin *signingauthority.PosPolicy
+	if pinFile != "" {
+		if next.EVMAuth == nil {
+			return fmt.Errorf("%w: --pin-pos-policy pins the new key's signing authority; the new EVM key is a key file", ErrValidator)
+		}
+		p, err := readPosPolicyTemplate(pinFile)
+		if err != nil {
+			return err
+		}
+		var network [32]byte
+		if err := ch.vr.CallPos(ctx, custody, vrclient.CustodyABI, "network", &network); err != nil {
+			return err
+		}
+		// before anything is sent: the pin is fixed for the authority's lifetime
+		if err := checkPosPolicyTemplate(p, network, ch.chainID, election); err != nil {
+			return err
+		}
+		pin = &p
 	}
 	id, have, err := findID(ctx, v, ch, s.From())
 	if err != nil {
@@ -543,12 +627,12 @@ func runPosKeyChange(ctx context.Context, w io.Writer, v *loadedValidator, next 
 	if err != nil {
 		return err
 	}
-	r := &posKeyChangeRun{ch: ch, v: v, next: next, sender: s, custody: custody, election: election, id: id, want: want, evmOnly: evmOnly, dry: dry}
+	r := &posKeyChangeRun{ch: ch, v: v, next: next, sender: s, custody: custody, election: election, id: id, want: want, evmOnly: evmOnly, dry: dry, pin: pin}
 	if err := r.run(ctx, w); err != nil {
 		return err
 	}
 	if !dry {
-		fmt.Fprintln(w, "the delegation and VR's staged binding are the new words: run the nodes on the new EVM key (validator init --force with the new key or authority);"+
+		fmt.Fprintln(w, "VR's staged binding and the delegation are the new words: run the nodes on the new EVM key (validator init --force with the new key or authority);"+
 			" the next election selects it and the boundary installs it (`validator status`)")
 	}
 	return nil
@@ -562,3 +646,7 @@ func refuseBondedMismatch(idn vrclient.IdentityView, id uint64, want vrclient.Re
 	}
 	return fmt.Errorf("%w: identity %d is bonded and the configured keys or payee are not its VR binding: changing them is `ubft validator rotate` (or `validator recover` after an authority loss), which moves the delegation and VR's binding together", ErrValidator, id)
 }
+
+const pinPosPolicyKeyChangeUsage = "the new EVM key's signing authority accepts a late P85 pin: a pin file without ids ({\"network\":\"0x..\",\"chainId\":N,\"election\":\"0x..\"}); " +
+	"after VR's binding confirms, the authority is pinned to this identity (it verifies the binding names its node and key) and then signs the delegation possession (#1222). " +
+	"It must name the chain's election; the same pin again is a no-op"

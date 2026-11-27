@@ -6,7 +6,9 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
@@ -50,15 +52,23 @@ func TestPinPosPolicyOnALateAuthority(t *testing.T) {
 	require.NoError(t, err)
 	reg := signingauthority.RegistrationPolicy{Deployment: signingauthority.RegistrationDeployment{Network: [32]byte{1}, ChainID: vrschema.U64(3), Registry: common.Address{0x03}},
 		Authorized: []signingauthority.RegistrationAuthorization{{Domain: vrschema.RegisterDomainText, Owner: common.Address{0x0a}, RootNodeID: "root", RootKey: ethcrypto.CompressPubkey(&key.PublicKey), Payee: common.Address{0x0b}}}}
-	socket, cred, info := startAuthority(t, reg, signingauthority.WithLatePosPolicy(), signingauthority.WithRequirePosPolicy())
-	a, err := loadEVMAuthority(evmAuthorityConfig{Socket: socket, Credential: cred, NodeInfo: info})
-	require.NoError(t, err)
 	var network [32]byte
 	network[31] = 0xaa
+	// #1222: the authority verifies the pin against its execution client; the first read finds the id not registered yet
+	src := &pinSource{view: signingauthority.PosDeploymentView{Network: network, ChainID: vrschema.U64(3), Election: common.Address{0xe1}}, pending: 1}
+	socket, cred, info := startAuthority(t, reg, signingauthority.WithPosSource(src, 3), signingauthority.WithRequirePosPolicy())
+	a, err := loadEVMAuthority(evmAuthorityConfig{Socket: socket, Credential: cred, NodeInfo: info})
+	require.NoError(t, err)
+	defer func(w time.Duration) { posPinWait = w }(posPinWait)
+	posPinWait = 10 * time.Second
 	pin := signingauthority.PosPolicy{Network: network, ChainID: vrschema.U64(3), Election: common.Address{0xe1}, IDs: []uint64{5}}
 	ctx := context.Background()
-	require.NoError(t, a.PinPosPolicy(ctx, pin))
+	require.NoError(t, a.PinPosPolicy(ctx, pin), "a pin the authority cannot verify yet is sent again")
+	require.Equal(t, 2, src.calls)
 	require.NoError(t, a.PinPosPolicy(ctx, pin), "a resumed apply pins the same scope again")
+	wrong := pin
+	wrong.Election = common.Address{0xe2}
+	require.ErrorContains(t, a.PinPosPolicy(ctx, wrong), "signing-pos-policy-conflict")
 	other := pin
 	other.IDs = []uint64{6}
 	err = a.PinPosPolicy(ctx, other)
@@ -97,4 +107,22 @@ func TestValidatorApplyPoSAdmitsTheDelegationBeforeTheFirstBond(t *testing.T) {
 			})
 		})
 	}
+}
+
+// pinSource is an authority's execution client view of the P85 deployment: the first `pending` reads find nothing yet.
+type pinSource struct {
+	mu      sync.Mutex
+	view    signingauthority.PosDeploymentView
+	pending int
+	calls   int
+}
+
+func (p *pinSource) ReadPosDeployment(context.Context, signingauthority.PosQuery) (signingauthority.PosDeploymentView, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls++
+	if p.calls <= p.pending {
+		return signingauthority.PosDeploymentView{}, fmt.Errorf("%w: the id is not registered at the block read", signingauthority.ErrPosPending)
+	}
+	return p.view, nil
 }

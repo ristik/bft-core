@@ -504,6 +504,7 @@ type rotateFlags struct {
 	Payee    string
 	// the new EVM key held by a signing authority (instead of --new-evm-keys)
 	EVMAuthoritySocket, EVMAuthorityCredential, EVMNodeInfo string
+	PinPosPolicy                                            string
 }
 
 // viaAuthority notes that the EVM proof came from a signing authority.
@@ -535,6 +536,7 @@ froze is not replaced, and a root-key change is refused (exit path). After an au
 	cmd.Flags().StringVar(&f.EVMAuthorityCredential, "new-evm-authority-credential", "", "the operator credential of the new EVM key's authority")
 	cmd.Flags().StringVar(&f.EVMNodeInfo, "new-evm-node-info", "", "the node info of the new EVM key's authority (`signing-authority node-info`)")
 	cmd.Flags().StringVar(&f.Payee, "new-payee", "", "the new payee address")
+	cmd.Flags().StringVar(&f.PinPosPolicy, "pin-pos-policy", "", "PoS: "+pinPosPolicyKeyChangeUsage)
 	return cmd
 }
 
@@ -603,8 +605,11 @@ func validatorRotate(cmd *cobra.Command, f *rotateFlags) error {
 		nv.cfg.Payee = f.Payee
 	}
 	if ch.isPoS() {
-		// #1286: on PoS the delegation and VR's binding move together, delegation first, at custody's generation
-		return runPosKeyChange(ctx, w, &nv, &next, ch, s, f.DryRun, false)
+		// #1286, #1222: on PoS VR's binding and the delegation move together, VR's binding first, at custody's generation
+		return runPosKeyChange(ctx, w, &nv, &next, ch, s, f.DryRun, false, f.PinPosPolicy)
+	}
+	if f.PinPosPolicy != "" {
+		return fmt.Errorf("%w: --pin-pos-policy is for the PoS adapter", ErrValidator)
 	}
 	r, root, evm, err := registration(&nv, &next, idn.BindingNonce)
 	if err != nil {

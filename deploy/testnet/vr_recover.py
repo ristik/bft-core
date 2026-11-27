@@ -34,6 +34,8 @@ import operator_rpc
 
 # cast sig 'finalizeCandidate(bytes32)', cast sig 'publish(bytes32)' (vrclient/pos_selectors_test.go)
 FINALIZE, VR_PUBLISH = '0xce48313e', '0x8b2e6dcf'
+# the fresh authority's P85 pin template, as the recover CLI container sees it
+PIN_TEMPLATE = '/home/authority-new/pos-policy-template.json'
 OPERATOR = ['--operator-socket', '/authority/operator.sock', '--operator-credential', '/authority/operator.cred']
 NODE_PARTS = ('auth', 'evm', 'archive', 'ureth')
 REFUSAL = ('VR Freeze refused', 'EVM-only validator change', 'registry output refused')
@@ -331,8 +333,9 @@ class Recovery:
         (auth / 'registration.json').write_text(json.dumps({'network': vr['networkWord'], 'chainId': self.manifest['chain_id'],
             'registry': self.deployment['registry'], 'authorized': [{'action': 'binding', 'owner': payee, 'id': ident, 'payee': payee,
                                                                        'rootNodeId': root_info['nodeId'], 'rootKey': root_info['sigKey']}]}) + '\n')
-        (auth / 'pos-policy.json').write_text(json.dumps({'network': vr['networkWord'], 'chainId': self.manifest['chain_id'],
-                                                         'election': self.deployment['election'], 'ids': [ident]}) + '\n')
+        # the P85 pin template (no ids): recover pins the fresh authority to the identity once VR's binding names its key (#1222)
+        (auth / 'pos-policy-template.json').write_text(json.dumps({'network': vr['networkWord'], 'chainId': self.manifest['chain_id'],
+                                                                  'election': self.deployment['election']}) + '\n')
         (auth / 'lifetime').write_text('fail-stop\n')
         services = recover_services(self.compose, i, k, new_evm, epoch, shard_epoch, trust, self.manifest['genesis_hash'])
         (gen / handoff_ops.RECOVER_OVERRIDE).write_text(json.dumps({'services': services}, indent=1, sort_keys=True) + '\n')
@@ -340,11 +343,11 @@ class Recovery:
         r.rescan()
         r.say(f'  slot recover-{k}: EVM node {new_evm}, scope root epoch {epoch} / shard epoch {shard_epoch}')
 
-        # 3. the fresh authority, then the two transactions (delegation first), from the owner's wallet
+        # 3. the fresh authority, then the two transactions from the owner's wallet: VR's binding first, then (the authority pinned and
+        # verified against it) the delegation (#1222, astra's REORDER)
         self.dc('up', '-d', '--no-deps', f'authority{i}')
         r.wait('the fresh authority answers', lambda: self.auth_status(i), 60)
         self.exec(f'authority{i}', 'ubft', 'signing-authority', 'node-info', *OPERATOR, '--out', '/authority/node-info.json')
-        self.exec(f'authority{i}', 'ubft', 'signing-authority', 'pos-policy', *OPERATOR, '--policy', '/authority/pos-policy.json')
         info = json.loads((auth / 'node-info.json').read_text())
         r.expect(info['nodeId'] == new_evm, 'the fresh authority is enrolled for the new EVM node', info['sigKey'])
         new_status = self.auth_status(i)
@@ -363,14 +366,16 @@ class Recovery:
                  r.scrub(refused.stderr.strip()[-200:]))
         done = self.cli(live, home, 'validator', 'recover', '--old-authority-home', 'authority', '--new-evm-authority-socket',
                         'authority-new/operator.sock', '--new-evm-authority-credential', 'authority-new/operator.cred',
-                        '--new-evm-node-info', 'authority-new/node-info.json', '--wait', '10m', mounts=mounts)
+                        '--new-evm-node-info', 'authority-new/node-info.json', '--pin-pos-policy', PIN_TEMPLATE, '--wait', '10m', mounts=mounts)
         r.keep_redacted(self.ev / 'recover.log', done.stdout + done.stderr)
         r.say(f'  recover confirmed {time.monotonic() - lost:.0f} s after the loss')
         times['recoverConfirmed'] = utc()
-        r.expect('confirmed: VR stages identity' in done.stdout, 'recover: the delegation, then the identical VR binding, confirmed', r.scrub(done.stdout.strip()[-400:]))
+        order = [done.stdout.find(x) for x in ('confirmed: VR stages identity', 'pinned the new signing authority', 'confirmed: identity')]
+        r.expect(min(order) >= 0 and order == sorted(order), 'recover: VR binding confirmed, then the fresh authority pinned, then the delegation confirmed',
+                 r.scrub(done.stdout.strip()[-400:]))
         again = self.cli(live, home, 'validator', 'recover', '--old-authority-home', 'authority', '--new-evm-authority-socket',
                          'authority-new/operator.sock', '--new-evm-authority-credential', 'authority-new/operator.cred',
-                         '--new-evm-node-info', 'authority-new/node-info.json', mounts=mounts)
+                         '--new-evm-node-info', 'authority-new/node-info.json', '--pin-pos-policy', PIN_TEMPLATE, mounts=mounts)
         r.expect('nothing to do' in again.stdout, 'a re-run of recover sends nothing', r.scrub(again.stdout.strip()[-200:]))
 
         # 4. the entity's execution client, root and shard node on the slot: an empty execution data directory, the root's possession-proof

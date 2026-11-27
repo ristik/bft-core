@@ -49,6 +49,9 @@ type Client struct {
 	Block string
 	// BlockHash, when set, pins every eth_call to that one block (EIP-1898): it wins over Block.
 	BlockHash string
+	// Canonical adds EIP-1898's requireCanonical to a pinned BlockHash: a read of a block that is no longer on the endpoint's canonical
+	// chain is refused instead of answered from a side branch.
+	Canonical bool
 }
 
 // New returns a client of VR at registry (DefaultRegistry when zero).
@@ -74,6 +77,9 @@ func (c *Client) Pin(ctx context.Context) (*Client, uint64, error) {
 // object, so the read is of that exact block and never of whatever block carries its number; anything else is a number or tag.
 func (c *Client) blockParam() any {
 	if c.BlockHash != "" {
+		if c.Canonical {
+			return map[string]any{"blockHash": c.BlockHash, "requireCanonical": true}
+		}
 		return map[string]string{"blockHash": c.BlockHash}
 	}
 	if len(c.Block) == 66 {
