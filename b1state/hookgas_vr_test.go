@@ -148,7 +148,7 @@ func TestTheFreshVRMeasurementIsHeldToTheSameRule(t *testing.T) {
 	fresh.RegistryCodeHash = [32]byte{0x77}
 	require.ErrorIs(t, CheckVRHookGasFresh(p, testVRCode, testPoACode, rec, fresh), ErrVRHookMeasurement, "a fresh measurement of an unreviewed core is refused")
 	fresh.RegistryCodeHash = posRegistryCode
-	fresh.Caps = VRCapsPos
+	fresh.Caps = VRCapsPos16
 	require.ErrorIs(t, CheckVRHookGasFresh(p, testVRCode, testPoACode, rec, fresh), ErrVRHookGas, "a fresh measurement of the other reviewed build proves nothing")
 }
 
@@ -171,26 +171,17 @@ func TestTheVRMeasurementJSONIsStrict(t *testing.T) {
 	require.ErrorIs(t, json.Unmarshal(b2, &back), ErrVRHookMeasurement)
 }
 
-// ---- the PoS-capable VR build (VT-04b, astra's caps ruling; #1217 r1 item 2: measured at legal occupancy) ------------------------------------
-//
-// Caps 5.0 / 1.5 / 2.5 M. H = 16 (at H = 32 the record callbacks alone reach 80 M and the margin takes the batch to 100 M before VR's own
-// work). The figures are ureth's complete-path measurement on the PoS-capable build (tests/vr_hook.rs, VR_HOOK_BUILD=pos) over the fixture
-// test/vr/fixtures/vr-hook-pos.json, whose maximum scenarios run at the frozen ceilings: 32 pending changes, 60 activations (all 60 due together at the
-// Boundary, after an intervening ordinary Boundary) plus the 4 the output binds, HolderRetirement fillers. R_16 = 43,605,367 (the batch of 16 HolderRetirements at the 2.5 M record
-// cap; the closure batch is 43,320,364), B = 19,926,554 (the worst switching Boundary at that occupancy, all 60 entries due together), E = 9,596,639, so
-//
-//	M_16 = R_16 + B = 63,531,921, allowance ceil(5 M_16 / 4) = 79,414,902, HookRecordGas ceil(allowance / 16) = 4,963,432 (16 x = 79,414,912),
-//	ElectGas ceil(5 E / 4) = 11,995,799, envelope 150,000 + 79,414,912 + 11,995,799 = 91,560,711.
+// The sixteen-seat PoS measurement exercises the frozen occupancy ceilings and the reviewed callback caps.
 var (
-	posRegistryCode = VRBuildPos.RegistryCodeHash
+	posRegistryCode = VRBuildPos16.RegistryCodeHash
 	posModuleCode   = [32]byte{0x61}
 )
 
 func reviewedPos() VRHookMeasurement {
-	m := VRHookMeasurement{Invariant: VRSingleLiveOutput, H: 16, Registry: testVR, RegistryCodeHash: posRegistryCode, ModuleCodeHash: posModuleCode, Caps: VRCapsPos, Ceilings: VRLimits,
-		Records: 43_605_367, Boundary: 19_926_554, Elect: 9_596_639, Source: "test"}
+	m := VRHookMeasurement{Invariant: VRSingleLiveOutput, H: 16, Registry: testVR, RegistryCodeHash: posRegistryCode, ModuleCodeHash: posModuleCode, Caps: VRCapsPos16, Ceilings: VRLimits,
+		Records: 43_607_048, Boundary: 19_926_739, Elect: 11_660_689, Source: "test"}
 	// the three combined fixtures at their measured reservations (all within R_16 + B)
-	m.Combined = []VRCombined{{"mixed-first", 16, 59_902_074}, {"mixed-middle", 16, 59_333_230}, {"mixed-last", 16, 58_815_000}}
+	m.Combined = []VRCombined{{"mixed-first", 16, 59_903_778}, {"mixed-middle", 16, 59_334_934}, {"mixed-last", 16, 58_816_704}}
 	return m
 }
 
@@ -198,21 +189,21 @@ func TestThePoSBuildGivesTheDerivedPins(t *testing.T) {
 	m := reviewedPos()
 	mh, err := m.BatchRequirement()
 	require.NoError(t, err)
-	require.EqualValues(t, 63_531_921, mh, "R_16 + B; no combined fixture exceeds it")
+	require.EqualValues(t, 63_533_787, mh, "R_16 + B; no combined fixture exceeds it")
 	allowance, per, err := VRRecordsAllowance(m)
 	require.NoError(t, err)
-	require.EqualValues(t, 79_414_902, allowance)
-	require.EqualValues(t, 4_963_432, per)
+	require.EqualValues(t, 79_417_234, allowance)
+	require.EqualValues(t, 4_963_578, per)
 	elect, err := PinElectGas(m.Elect)
 	require.NoError(t, err)
-	require.EqualValues(t, 11_995_799, elect)
+	require.EqualValues(t, 14_575_862, elect)
 	p := vrProfile(16, per, elect)
 	require.NoError(t, CheckVRHookGas(p, posRegistryCode, posModuleCode, m))
 	env, err := p.HookEnvelopeGas()
 	require.NoError(t, err)
-	require.EqualValues(t, 91_560_711, env, "below the PoA build's 97,927,220")
+	require.EqualValues(t, 94_143_110, env, "below the PoA envelope")
 
-	require.ErrorIs(t, CheckVRHookGas(vrProfile(16, per-1, elect), posRegistryCode, posModuleCode, m), ErrVRHookGas, "16 x 4,963,431 = 79,414,896 < 79,414,902")
+	require.ErrorIs(t, CheckVRHookGas(vrProfile(16, per-1, elect), posRegistryCode, posModuleCode, m), ErrVRHookGas, "one unit below the required per-record allowance")
 	require.ErrorIs(t, CheckVRHookGas(vrProfile(16, per, elect-1), posRegistryCode, posModuleCode, m), ErrVRHookGas)
 	require.ErrorIs(t, CheckVRHookGas(vrProfile(32, per, elect), posRegistryCode, posModuleCode, m), ErrVRHookGas, "never raise H while keeping the rate")
 	require.ErrorIs(t, CheckVRHookGas(vrProfile(8, per, elect), posRegistryCode, posModuleCode, m), ErrVRHookGas, "never lower H while keeping the rate")
@@ -234,26 +225,28 @@ func TestThePoSEnvelopeIsWhatTheSystemGasAdds(t *testing.T) {
 	p.RecordsCustody, p.HRecords, p.HookRecordGas, p.ElectionContract, p.ElectGas = [20]byte{}, 0, 0, [20]byte{}, 0
 	without, err := p.RequiredSystemGas()
 	require.NoError(t, err)
-	require.EqualValues(t, 91_560_711, with-without, "SystemGas = non-hook requirement + the hook envelope")
+	require.EqualValues(t, 94_143_110, with-without, "SystemGas = non-hook requirement + the hook envelope")
 }
 
 // The cap tuple is bound to the build whose code enforces it: the PoS-capable runtime carries the PoS caps and only them, any other runtime
 // keeps the PoA mapping (the PoA build and its pins are unchanged).
 func TestTheCapTupleIsBoundToTheVRBuild(t *testing.T) {
-	require.Len(t, VRBuilds, 3)
+	require.Len(t, VRBuilds, 2)
 	pos, ok := VRBuildFor(posRegistryCode)
 	require.True(t, ok)
-	require.Equal(t, VRCapsPos, pos.Caps)
+	require.Equal(t, VRCapsPos16, pos.Caps)
 	poa, ok := VRBuildFor(testVRCode)
 	require.True(t, ok)
 	require.Equal(t, VRCaps, poa.Caps)
-	require.Equal(t, VRCallbackCaps{Elect: 5_000_000, Output: 1_500_000, Record: 2_500_000, Resolved: 500_000, Attach: 3_000_000, Detach: 500_000, Gov: 1_000_000, Adopt: 1_000_000}, VRCapsPos)
+	require.Equal(t, VRCallbackCaps{Elect: 7_000_000, Output: 1_500_000, Record: 2_500_000, Resolved: 500_000, Attach: 3_000_000, Detach: 500_000, Gov: 1_000_000, Adopt: 1_000_000}, VRCapsPos16)
 	require.Equal(t, VRCallbackCaps{Elect: 4_000_000, Output: 1_000_000, Record: 1_500_000, Resolved: 500_000, Attach: 3_000_000, Detach: 500_000, Gov: 1_000_000, Adopt: 1_000_000}, VRCaps)
 	require.Equal(t, poa.RepairFacet, pos.RepairFacet, "the repair facet is byte-identical across builds")
 	require.NotEqual(t, poa.GovernanceFacet, pos.GovernanceFacet)
 	require.NotEqual(t, poa.RecordsFacet, pos.RecordsFacet)
 
 	// an unknown core is refused, never defaulted to the PoA caps
+	_, ok = VRBuildFor(mustHash32("b0c89f13324f81cf743578ac2180661d9fbd69f1f291d19fd3967b4f8adfd4f8"))
+	require.False(t, ok, "the retired PoS build")
 	_, ok = VRBuildFor([32]byte{0x51})
 	require.False(t, ok)
 	m := reviewed()
@@ -264,7 +257,7 @@ func TestTheCapTupleIsBoundToTheVRBuild(t *testing.T) {
 	m.Caps = VRCaps
 	require.ErrorIs(t, m.Valid(), ErrVRHookMeasurement, "the PoS runtime measured at the PoA caps")
 	m = reviewed()
-	m.Caps = VRCapsPos
+	m.Caps = VRCapsPos16
 	require.ErrorIs(t, m.Valid(), ErrVRHookMeasurement, "the PoA runtime measured at the PoS caps")
 	m = reviewedPos()
 	m.RegistryCodeHash = testVRCode // the PoA core claims the PoS tuple
@@ -277,11 +270,6 @@ func TestTheCapTupleIsBoundToTheVRBuild(t *testing.T) {
 	require.ErrorIs(t, CheckVRBuildRoles(poa.RegistryCodeHash, poa.GovernanceFacet, poa.RepairFacet, poa.RecordsFacet, true), ErrVRHookMeasurement, "a PoS plan on the PoA build")
 	require.ErrorIs(t, CheckVRBuildRoles([32]byte{0x51}, poa.GovernanceFacet, poa.RepairFacet, poa.RecordsFacet, false), ErrVRHookMeasurement)
 	require.ErrorIs(t, CheckVRBuildRoles(pos.RegistryCodeHash, poa.GovernanceFacet, pos.RepairFacet, pos.RecordsFacet, true), ErrVRHookMeasurement, "the PoA governance facet under the PoS core")
-	large, ok := VRBuildFor(VRBuildPos16.RegistryCodeHash)
-	require.True(t, ok)
-	require.Equal(t, VRCapsPos16, large.Caps)
-	require.NoError(t, CheckVRBuildRoles(large.RegistryCodeHash, large.GovernanceFacet, large.RepairFacet, large.RecordsFacet, true))
-	require.ErrorIs(t, CheckVRBuildRoles(large.RegistryCodeHash, pos.GovernanceFacet, large.RepairFacet, large.RecordsFacet, true), ErrVRHookMeasurement)
 }
 
 // The PoA pins stay what the reviewed derivation gave (byte for byte): the PoS build adds a mapping, it changes none.

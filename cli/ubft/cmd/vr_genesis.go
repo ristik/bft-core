@@ -1128,10 +1128,11 @@ func vrVerify(v vrVerifyInput) (vrRootDeployment, error) {
 		return out, err
 	}
 	// #1321: a validator whose builder targets another gas limit has every block it leads refused ("next-block gas_limit mismatch")
-	if _, ok := args["--builder.gaslimit"]; ok {
-		if got, _ := args.uint("--builder.gaslimit", 0); got != v.profile.MaxGas {
-			return fail("ureth --builder.gaslimit is %d, the profile's maxGas is %d", got, v.profile.MaxGas)
-		}
+	if _, ok := args["--builder.gaslimit"]; !ok {
+		return fail("ureth --builder.gaslimit is required")
+	}
+	if got, _ := args.uint("--builder.gaslimit", 0); got != v.profile.MaxGas {
+		return fail("ureth --builder.gaslimit is %d, the profile's maxGas is %d", got, v.profile.MaxGas)
 	}
 	for flag, want := range map[string]uint64{"--unicity.base-fee-floor": in.Fees.BaseFeeFloor, "--unicity.base-fee-change-denominator": in.Fees.ChangeDenominator,
 		"--unicity.elasticity": 2} {
@@ -1394,7 +1395,7 @@ func newVRGenesisVerifyCmd() *cobra.Command {
 	f.StringVar(&profileFile, "b1-profile", "", "the B1 profile")
 	f.StringVar(&idsFile, "genesis-identities", "", "the roots' genesis identities vr-genesis plan wrote")
 	f.StringVar(&freshFile, "vr-hook-measurement", "", "a fresh complete-path VR hook measurement (ureth tests/vr_hook.rs vr_hook_measurement)")
-	f.StringVar(&urethLine, "ureth-flags", "", "the paired ureth's argument vector (its --unicity.* and --txpool.* flags), checked against the profile, the genesis commitment and VR's fees")
+	f.StringVar(&urethLine, "ureth-flags", "", "the paired ureth's argument vector, including --builder.gaslimit, checked against the profile, the genesis commitment and VR's fees")
 	f.StringVar(&feeCollector, "fee-collector", "", "the shard nodes' --engine-fee-collector, checked against VR's")
 	f.StringVar(&fundedFile, "funded-accounts", "", "a development generation's premine: JSON {address: balance hex} of the balance-only accounts it funds, every owner and governor signer among them; the genesis may allocate nothing else besides the SealRegistry and the seven VR accounts (needs --dev-generation)")
 	f.StringVar(&devGeneration, "dev-generation", "", "the development generation's name: its network word must be sha256(\"unicity.dev.vr.\" + name); dev funding is refused for any other generation")
