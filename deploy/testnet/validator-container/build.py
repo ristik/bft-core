@@ -44,14 +44,19 @@ def checkout_revision(revision, source):
 
 def build_handoff(source, out):
     toolchain = json.loads((source/'scripts/ci/lane-pins.json').read_text())['toolchains']['go']
-    subprocess.run(['go', 'build', '-mod=readonly', '-trimpath', '-buildvcs=false', '-o', str(out), './cli/ubft'],
+    # bft-go-base needs libsecp256k1 through CGO. Link the Linux build statically
+    # so the executable runs both on the host and on the image's Debian runtime.
+    subprocess.run(['go', 'build', '-mod=readonly', '-trimpath', '-buildvcs=false',
+                    '-tags', 'netgo,osusergo', '-ldflags', '-linkmode external -extldflags -static',
+                    '-o', str(out), './cli/ubft'],
                    cwd=source, check=True, env={**os.environ, 'GOENV': 'off', 'GOFLAGS': '', 'GOWORK': 'off',
                                                 'GOOS': 'linux', 'GOARCH': 'amd64', 'GOAMD64': 'v1',
-                                                'CGO_ENABLED': '0', 'GOTOOLCHAIN': 'go' + toolchain})
+                                                'CGO_ENABLED': '1', 'GOTOOLCHAIN': 'go' + toolchain})
 
 
 def main():
-    cli = argparse.ArgumentParser(description=__doc__)
+    cli = argparse.ArgumentParser(description=__doc__,
+                                  epilog='Build on Linux amd64 with Go and a C toolchain supporting static linking.')
     cli.add_argument('verified_release', type=Path)
     cli.add_argument('--foundry-archive', required=True, type=Path)
     cli.add_argument('--handoff-revision', required=True, help='full reviewed commit SHA from which to build the signing and join CLI')
