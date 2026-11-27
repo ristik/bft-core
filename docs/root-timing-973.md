@@ -45,8 +45,10 @@ observers before the first stop and polls for rescue independently of proof
 submission. The committed head is timestamped after its read returns. The
 rescue window closes when the submission loop records the last watched-root
 certificate, and samples whose reads finish after that cutoff are discarded.
-The selector is checked for every recovery-run owner through one cycle and
-at its repeat.
+If the head poll has yet to observe a new commit, the final certificate can
+witness one at the cutoff when its seal is newer than the baseline committed
+round. The selector is checked for every recovery-run owner through one
+cycle and at its repeat.
 
 ## Weighted five-root results
 

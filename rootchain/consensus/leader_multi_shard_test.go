@@ -147,11 +147,19 @@ func signedShardRequest(t *testing.T, r *q3Replica, s liveShard, view *storage.R
 }
 
 func shardHash(m *ConsensusManager, s liveShard) []byte {
+	hash, _ := watchedShardCertificate(m, s)
+	return hash
+}
+
+func watchedShardCertificate(m *ConsensusManager, s liveShard) (hash []byte, round uint64) {
 	si := m.blockStore().ShardInfo(s.partition, s.shard)
 	if si == nil || si.LastCR == nil {
-		return nil
+		return nil, 0
 	}
-	return si.LastCR.UC.InputRecord.Hash
+	if seal := si.LastCR.UC.UnicitySeal; seal != nil {
+		round = seal.RootChainRoundNumber
+	}
+	return si.LastCR.UC.InputRecord.Hash, round
 }
 
 // establish certifies every shard's first state, so that an RSMT shard's next request is a proved transition from a certified root and not the first-state exception.
@@ -344,11 +352,8 @@ func gate9RescueTrace(t *testing.T, members int) {
 		return err == nil
 	}
 	seal := func(p liveShard) uint64 {
-		si := m(watch).blockStore().ShardInfo(p.partition, p.shard)
-		if si == nil || si.LastCR == nil {
-			return 0
-		}
-		return si.LastCR.UC.UnicitySeal.RootChainRoundNumber
+		_, round := watchedShardCertificate(m(watch), p)
+		return round
 	}
 	require.Eventually(t, func() bool { // what the node watched reads as established is what establish saw, or a shard would later read as certified with no request sent
 		for _, s := range shards {
@@ -392,6 +397,17 @@ func gate9RescueTrace(t *testing.T, members int) {
 		startRound = m(watch).pacemaker.GetCurrentRound()
 		lastRound, roundAt, lastKnown = startRound, t0, known(startRound)
 		t.Logf("T=%s, block rate %s, topology %s, shards %v, start round %d, committed %d, stopped %v, returned %v", T, blockRate, topology, shards, startRound, committed(), dead, returning)
+	}
+	recordCommit := func(at time.Time, round uint64) {
+		commitAt, commitRound = at, round
+		committedAfterUnknown.Store(true)
+		elapsed := commitAt.Sub(unknownFrom)
+		t.Logf("first commit after that at round %d, %s: unknown-to-commit %s over %d rounds", commitRound, commitAt.Sub(t0).Round(time.Millisecond), elapsed.Round(time.Millisecond), commitRound-unknownRound)
+		counters("the first commit")
+		if larger && !rescueMiss && elapsed > 75*time.Second {
+			rescueMiss = true
+			t.Logf("75 s rescue target missed: first commit after unknown round %d observed after %s", unknownRound, elapsed)
+		}
 	}
 	observe := func(now time.Time, round uint64) {
 		roundKnown := lastKnown
@@ -441,17 +457,9 @@ func gate9RescueTrace(t *testing.T, members int) {
 		} else {
 			head = committed()
 		}
-		elapsed := commitObservedAt.Sub(unknownFrom)
 		if head != commitAtUnknown {
-			commitAt, commitRound = commitObservedAt, round
-			committedAfterUnknown.Store(true)
-			t.Logf("first commit after that at round %d, %s: unknown-to-commit %s over %d rounds", commitRound, commitAt.Sub(t0).Round(time.Millisecond), elapsed.Round(time.Millisecond), commitRound-unknownRound)
-			counters("the first commit")
-			if larger && !rescueMiss && elapsed > 75*time.Second {
-				rescueMiss = true
-				t.Logf("75 s rescue target missed: first commit after unknown round %d observed after %s", unknownRound, elapsed)
-			}
-		} else if larger && !rescueMiss && elapsed >= 75*time.Second {
+			recordCommit(commitObservedAt, round)
+		} else if larger && !rescueMiss && commitObservedAt.Sub(unknownFrom) >= 75*time.Second {
 			rescueMiss = true
 			t.Logf("75 s elapsed since the first unknown leader at round %d; no commit by round %d", unknownRound, round)
 		}
@@ -557,11 +565,20 @@ certify:
 			if _, done := certAt[p.String()]; done {
 				continue
 			}
-			if !bytes.Equal(shardHash(m(watch), p), established[p.String()]) {
+			hash, sealRound := watchedShardCertificate(m(watch), p)
+			if !bytes.Equal(hash, established[p.String()]) {
 				if larger && len(certAt)+1 == len(shards) {
 					end = rescueWindow.finish()
 					certAt[p.String()] = end.Sub(t0)
+					certificateRound := m(watch).pacemaker.GetCurrentRound()
 					stopObserving()
+					// The certificate and its seal came from one read of the durable
+					// root. It can witness progress at the cutoff when a separate
+					// head read did not return in time.
+					if commitAt.IsZero() && !unknownFrom.IsZero() && sealRound > commitAtUnknown {
+						t.Logf("last watched-root certificate witnesses commit of round %d at the rescue cutoff", sealRound)
+						recordCommit(end, certificateRound)
+					}
 					break certify
 				}
 				certAt[p.String()] = time.Since(t0)
