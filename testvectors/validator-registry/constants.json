@@ -193,6 +193,12 @@
    "owner": "PoA"
   },
   {
+   "name": "POP_WINDOW",
+   "value": "4096",
+   "kind": "rule",
+   "owner": "roots"
+  },
+  {
    "name": "COMPOSER_POOL",
    "value": "6",
    "kind": "rule",
@@ -224,7 +230,7 @@
   },
   {
    "name": "RECORD_WIDTHS",
-   "value": "32/128/288/192/96/224/128/128",
+   "value": "32/128/288/192/96/224/128/128/96",
    "kind": "schema",
    "owner": "all"
   },

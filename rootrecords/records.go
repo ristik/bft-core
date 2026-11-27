@@ -33,10 +33,13 @@ const (
 	KindOutputRejected
 	// KindHolderRetirement authorizes the retirement of one identity generation at one liability holder.
 	KindHolderRetirement
+	// KindPoPMissed names the result's members whose handoff-PoP miss a root quorum certified (#1319): between the result's Expired
+	// OutputRejected and its SessionClosed, only when a member is certified.
+	KindPoPMissed
 )
 
 var (
-	// ErrKind reports a record kind outside the eight the log carries.
+	// ErrKind reports a record kind outside the nine the log carries.
 	ErrKind = errors.New("rootrecords: unknown record kind")
 	// ErrPayload reports a record payload that is not exactly the kind's words.
 	ErrPayload = errors.New("rootrecords: malformed record payload")
@@ -53,9 +56,9 @@ var (
 )
 
 // payloadWords is the exact word count of each kind's abi-encoded payload (P85Types.sol structs, all static; kinds 6 to 8 are the frozen
-// widths of validator-registry schema v1, section 7).
+// widths of validator-registry schema v1, section 7, kind 9 its #1319 extension).
 var payloadWords = map[Kind]int{KindSessionClosed: 1, KindAck: 4, KindRecoveryAck: 9, KindClosure: 6, KindRetirement: 3,
-	KindBoundary: 7, KindOutputRejected: 4, KindHolderRetirement: 4}
+	KindBoundary: 7, KindOutputRejected: 4, KindHolderRetirement: 4, KindPoPMissed: 3}
 
 // Record is one projected control record, the contract's RootRecord.
 type Record struct {
@@ -140,6 +143,7 @@ var payloadWordBits = map[Kind][]uint{
 	KindBoundary:         {wBytes, 64, 64, 64, 64, wBool, 16},
 	KindOutputRejected:   {wBytes, 8, 64, 16},
 	KindHolderRetirement: {8, 64, 64, wBytes},
+	KindPoPMissed:        {wBytes, 64, 16},
 }
 
 // MaxHolders is MAX_HOLDERS: a HolderRetirement names a holder below it.
@@ -213,6 +217,14 @@ func checkWords(kind Kind, data []byte) error {
 		if v(0) >= MaxHolders {
 			return fmt.Errorf("%w: holder %d", errRange, v(0))
 		}
+	case KindPoPMissed:
+		// nonzero result; a nonzero missed bitmap
+		if zero(0) {
+			return fmt.Errorf("%w: zero result id", errRange)
+		}
+		if v(2) == 0 {
+			return fmt.Errorf("%w: an empty missed bitmap", errRange)
+		}
 	}
 	return nil
 }
@@ -232,6 +244,11 @@ func BoundaryPayload(resultID [32]byte, changesEpoch, installedRootEpoch, instal
 // OutputRejectedPayload is the 128-byte kind 7 payload: resultID, reason, memberId, readyBitmap.
 func OutputRejectedPayload(resultID [32]byte, reason uint8, memberID uint64, readyBitmap uint16) []byte {
 	return concat(resultID[:], word(uint64(reason)), word(memberID), word(uint64(readyBitmap)))
+}
+
+// PoPMissedPayload is the 96-byte kind 9 payload: resultID, deadline, missedBitmap.
+func PoPMissedPayload(resultID [32]byte, deadline uint64, missedBitmap uint16) []byte {
+	return concat(resultID[:], word(deadline), word(uint64(missedBitmap)))
 }
 
 // HolderRetirementPayload is the 128-byte kind 8 payload: holder, id, generation, refDigest.

@@ -40,7 +40,11 @@ var ControlShapes = map[uint64]struct {
 	OpRejectResult:     {"[predecessorBodyID bstr32, attempt uint, evmBlockHash bstr32, evmStateRoot bstr32]", 128, []uint8{RecOutputRejected, RecSessionClosed}},
 	OpRuleSupport:      {"[commitments: 1..64 SupportCommitment, strictly ascending by (stakingID, ruleId)]", 0, nil},
 	OpHandoffView:      {"[intentDigest bstr32, view uint >= 1]", 0, nil},
+	OpPoPRequest:       {"[intentDigest bstr32]", 0, nil},
 }
+
+// RejectMissesShape is the optional fifth element of a RejectResult v2 context (#1319): the certified handoff-PoP misses of an expiry.
+const RejectMissesShape = "misses: 1..16 MissCertificate, strictly ascending by stakingID"
 
 type vrControlWire struct {
 	_             struct{} `cbor:",toarray"`
@@ -77,6 +81,18 @@ type supportCtx struct {
 	_           struct{} `cbor:",toarray"`
 	Commitments []SupportCommitment
 }
+type rejectMissCtx struct {
+	_         struct{} `cbor:",toarray"`
+	Pred      []byte
+	Attempt   uint64
+	BlockHash []byte
+	StateRoot []byte
+	Misses    []MissCertificate
+}
+type requestCtx struct {
+	_      struct{} `cbor:",toarray"`
+	Intent []byte
+}
 type viewCtx struct {
 	_      struct{} `cbor:",toarray"`
 	Intent []byte
@@ -94,6 +110,8 @@ type ControlContext struct {
 	Commitments      []SupportCommitment
 	IntentDigest     []byte
 	View             uint64
+	// Misses are a RejectResult's certified handoff-PoP misses (#1319): empty for an ordinary rejection, whose context keeps its four elements.
+	Misses []MissCertificate
 }
 
 func (c ControlContext) wire(op uint64) (any, error) {
@@ -111,6 +129,12 @@ func (c ControlContext) wire(op uint64) (any, error) {
 	case OpRejectResult:
 		if !len32(c.Predecessor, c.EVMBlockHash, c.EVMStateRoot) {
 			return nil, ErrLength
+		}
+		if len(c.Misses) > 0 {
+			if err := CheckMissCertificates(c.Misses); err != nil {
+				return nil, err
+			}
+			return rejectMissCtx{Pred: c.Predecessor, Attempt: c.Attempt, BlockHash: c.EVMBlockHash, StateRoot: c.EVMStateRoot, Misses: c.Misses}, nil
 		}
 		return rejectCtx{Pred: c.Predecessor, Attempt: c.Attempt, BlockHash: c.EVMBlockHash, StateRoot: c.EVMStateRoot}, nil
 	case OpRuleSupport:
@@ -135,6 +159,11 @@ func (c ControlContext) wire(op uint64) (any, error) {
 			return nil, ErrRange
 		}
 		return viewCtx{Intent: c.IntentDigest, View: c.View}, nil
+	case OpPoPRequest:
+		if !len32(c.IntentDigest) || isZero(c.IntentDigest) {
+			return nil, ErrRange
+		}
+		return requestCtx{Intent: c.IntentDigest}, nil
 	}
 	return nil, fmt.Errorf("%w: op %d", ErrUnknownKind, op)
 }
@@ -188,9 +217,16 @@ func DecodeVRControl(b []byte) (uint64, ControlContext, []byte, error) {
 		err = types.Cbor.Unmarshal(w.Context, &x)
 		c.EVMBlockHash, c.EVMStateRoot = x.BlockHash, x.StateRoot
 	case OpRejectResult:
-		var x rejectCtx
-		err = types.Cbor.Unmarshal(w.Context, &x)
-		c.Predecessor, c.Attempt, c.EVMBlockHash, c.EVMStateRoot = x.Pred, x.Attempt, x.BlockHash, x.StateRoot
+		var arity []cbor.RawMessage
+		if err = types.Cbor.Unmarshal(w.Context, &arity); err == nil && len(arity) == 5 {
+			var x rejectMissCtx
+			err = types.Cbor.Unmarshal(w.Context, &x)
+			c.Predecessor, c.Attempt, c.EVMBlockHash, c.EVMStateRoot, c.Misses = x.Pred, x.Attempt, x.BlockHash, x.StateRoot, x.Misses
+		} else if err == nil {
+			var x rejectCtx
+			err = types.Cbor.Unmarshal(w.Context, &x)
+			c.Predecessor, c.Attempt, c.EVMBlockHash, c.EVMStateRoot = x.Pred, x.Attempt, x.BlockHash, x.StateRoot
+		}
 	case OpRuleSupport:
 		var x supportCtx
 		err = types.Cbor.Unmarshal(w.Context, &x)
@@ -199,6 +235,10 @@ func DecodeVRControl(b []byte) (uint64, ControlContext, []byte, error) {
 		var x viewCtx
 		err = types.Cbor.Unmarshal(w.Context, &x)
 		c.IntentDigest, c.View = x.Intent, x.View
+	case OpPoPRequest:
+		var x requestCtx
+		err = types.Cbor.Unmarshal(w.Context, &x)
+		c.IntentDigest = x.Intent
 	default:
 		return 0, c, nil, fmt.Errorf("%w: op %d", ErrUnknownKind, w.Op)
 	}
@@ -223,9 +263,23 @@ func DecodeVRControl(b []byte) (uint64, ControlContext, []byte, error) {
 
 // ProjectRejectResult is the record pair a RejectResult v2 projects from one control: OutputRejected(data), then SessionClosed(resultId).
 func ProjectRejectResult(data []byte) ([][2]any, error) {
+	return ProjectRejectResultMissed(data, PoPMissed{})
+}
+
+// ProjectRejectResultMissed is the projection with certified misses (#1319): OutputRejected(data), PoPMissed(missed) when its bitmap is
+// nonzero, then SessionClosed(resultId).
+func ProjectRejectResultMissed(data []byte, missed PoPMissed) ([][2]any, error) {
 	o, err := DecodeOutputRejected(data)
 	if err != nil {
 		return nil, err
 	}
-	return [][2]any{{RecOutputRejected, o.Encode()}, {RecSessionClosed, o.ResultID[:]}}, nil
+	out := [][2]any{{RecOutputRejected, o.Encode()}}
+	if missed.MissedBitmap != 0 {
+		missed.ResultID = o.ResultID
+		if o.Reason != RejExpired {
+			return nil, fmt.Errorf("%w: certified misses outside an expiry", ErrRange)
+		}
+		out = append(out, [2]any{RecPoPMissed, missed.Encode()})
+	}
+	return append(out, [2]any{RecSessionClosed, o.ResultID[:]}), nil
 }

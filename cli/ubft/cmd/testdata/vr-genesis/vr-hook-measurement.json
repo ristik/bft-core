@@ -1,5 +1,5 @@
 {
-  "boundary": 17977590,
+  "boundary": 17977775,
   "caps": {
     "adopt": 1000000,
     "attach": 3000000,
@@ -22,25 +22,25 @@
     {
       "name": "mixed-first",
       "records": 32,
-      "reservation": 67741742
+      "reservation": 67744218
     },
     {
       "name": "mixed-middle",
       "records": 32,
-      "reservation": 67010352
+      "reservation": 67012828
     },
     {
       "name": "mixed-last",
       "records": 32,
-      "reservation": 66332582
+      "reservation": 66335058
     }
   ],
-  "elect": 7981443,
+  "elect": 7981487,
   "h": 32,
   "invariant": "vr-v1-single-live-output",
-  "moduleCodeHash": "0x193a4828e336927f92ced0232191f3babb52d61d38ab5c5382932729e3c23291",
-  "records": 52262738,
+  "moduleCodeHash": "0xdc32fd0656973ea957215de192a96e4287ba061afd663386af795d6c64c55814",
+  "records": 52265192,
   "registry": "0xff00000000000000000000000000000000000003",
-  "registryCodeHash": "0x19094777cb74c783f82392439d1f6c79fe62b6b57c2915790f00a9e16ee490e9",
-  "source": "ureth tests/vr_hook.rs over testdata/vr-hook.json sha256 0x54d69d3f95c67b4af77e59a8a64c3804b81848b6c9b40a3074ee679db00fa2ce (vt14/genesis (ristik/unicity-pos-contracts, VT-14 combined fixtures))"
+  "registryCodeHash": "0x3abfd37f4f7c1f3e7af8b0a449a4c0b509ec49a1bfdfb7e669855f9c557c7b39",
+  "source": "ureth tests/vr_hook.rs over testdata/vr-hook.json sha256 0xf14727d0acf130d050eb141f70cfadee3163d6a04a3dde2e1b7cc95715171d29 (unicity-pos-contracts 85950b44 (bft-core#1319: record kind 9 PoPMissed; the origin of its registry genesis))"
 }
