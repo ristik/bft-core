@@ -201,15 +201,18 @@ fi
 # from leaving them holding their ports and datadirs.
 negativeReths="reth-wrong reth-wrongchain reth-othergenesis reth-laterfork"
 
+# Allow more than the lane's normal 10-second consensus round timeout. Zero disables dumps.
+laneStallDumpSecs=${LANE_STALL_DUMP_SECS:-15}
+
 # Everything here is ownership-scoped (helper.sh, "ownership"): stop-evm.sh -a stops this checkout's
 # nodes only, and a reth is stopped by its pid file only if that pid is still a `reth node` running
 # from this checkout. This runs nested inside scripts/reth-smoke.sh, whose own teardown cannot undo
 # anything a machine-wide sweep here had already killed.
-# At teardown, dump roots whose logs have been quiet for LANE_STALL_DUMP_SECS (default 5; 0 disables dumps). After an H6
+# At teardown, dump roots whose logs have been quiet for LANE_STALL_DUMP_SECS. After an H6
 # timeout, dump the whole owned committee: a wedged consensus goroutine can coexist with active RPC or network logs (#1063).
 # SIGQUIT writes the Go stacks to debug.log (m2_start_root) and exits. The lane copies the logs into its evidence.
 dump_stalled_roots() {
-  local secs=${LANE_STALL_DUMP_SECS:-5} now p home log age reason dumped=()
+  local secs=$laneStallDumpSecs now p home log age reason dumped=()
   [ "$secs" -gt 0 ] 2>/dev/null || return 0
   now=$(date +%s)
   for p in $(owned_pids 'ubft root-node run'); do
@@ -235,8 +238,14 @@ dump_stalled_roots() {
 
 H6_ROOT_DUMP_REASON=
 nb2DriverPid=
+rootStallWatchPid=
 cleanup() {
   if [ "${NB2_T7_LANE:-0}" = 1 ]; then trap '' TERM HUP INT; fi
+  if declare -F vrb_poa_resume >/dev/null; then vrb_poa_resume || true; fi
+  if [ -n "${rootStallWatchPid:-}" ]; then
+    kill -TERM "$rootStallWatchPid" 2>/dev/null || true
+    wait "$rootStallWatchPid" 2>/dev/null || true
+  fi
   if [ -n "$nb2DriverPid" ]; then kill -TERM "$nb2DriverPid" 2>/dev/null || true; wait "$nb2DriverPid" || true; fi
   dump_stalled_roots
   if [ "${F8_MIXED_LANE:-0}" = 1 ]; then f8_stop; fi
@@ -1003,6 +1012,12 @@ echo "=== 5. the v2 bootstrap certifies a real EVM block 1 ==="
 preflightFailures=$failures
 # the roots register every test-nodes/shard-conf-* file when they start: the aggregator partition's configurations must exist before
 if [ "${ANYAGE_LANE:-0}" = 1 ]; then agg_prepare_confs || { echo "aggregator shard configuration failed" >&2; exit 1; }; fi
+# All paired rehearsal lanes use this root launcher, including restarts and joiners.
+if [ "$laneStallDumpSecs" -gt 0 ] 2>/dev/null; then
+  export UBFT_LANE_ROOT_DEBUG=1
+  python3 scripts/root-stall-watch.py test-nodes "$(lane_port 25866)" "$laneStallDumpSecs" &
+  rootStallWatchPid=$!
+fi
 ./start-evm.sh -r -a -e engine-api -v "$validators" >test-nodes/start-evm.log 2>&1
 if [ "${ANYAGE_LANE:-0}" = 1 ]; then root_alive && start_aggs || { echo "aggregator-go did not start (see test-nodes/agg*/stdout.log)" >&2; exit 1; }; fi
 

@@ -99,6 +99,12 @@ if vrp_k_shard_serving 5; then
   echo 'FAIL: a stale shard node was accepted' >&2
   exit 1
 fi
+health=$(jq '.binding.shardEpoch = 2' <<<"$health")
+vrp_k_shard_serving 5 3 2
+if vrp_k_shard_serving 5 3 3; then
+  echo 'FAIL: a shard node at the wrong recovery shard epoch was accepted' >&2
+  exit 1
+fi
 health=
 if vrp_k_shard_serving 5; then
   echo 'FAIL: a missing shard node was accepted' >&2

@@ -683,6 +683,7 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		warnIfRPCExposed(log, "root", flags.RPCServerAddress)
 
 		mux := http.NewServeMux()
+		registerRootLaneDebug(mux, flags.RPCServerAddress, cm.CurrentRound)
 		if pr := flags.observe.PrometheusRegisterer(); pr != nil {
 			mux.Handle("/api/v1/metrics", promhttp.HandlerFor(pr.(prometheus.Gatherer), promhttp.HandlerOpts{MaxRequestsInFlight: 1}))
 		}
