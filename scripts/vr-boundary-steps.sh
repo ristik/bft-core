@@ -120,8 +120,95 @@ vrb_restart_member() { # VR_RESTART_MEMBER=1: after the certificate, before the 
   vrb_log "PASS: root$node restarted, signed nothing again (its member file is byte for byte unchanged)"
 }
 
+vrb_poa_finalized() { # <evidence file>: read the enshrined EVM's finalized block
+  cast rpc --rpc-url "$vrb_rpc" eth_getBlockByNumber finalized false |
+    jq -e '{number, hash} | select(.number != null and .hash != null)' >"$VR_EVIDENCE/$1.json" || return 1
+  jq -r .number "$VR_EVIDENCE/$1.json"
+}
+
+vrb_poa_stall() {
+  local i pid
+  # Keep every root and execution client online. Two of four shard validators cannot acknowledge J.
+  for i in 3 4; do
+    pid=$(cat "test-nodes/evm$i/pid") || return 1
+    owned_pid "$pid" 'ubft shard-node run' && stop_one_evm_validator "$i" ||
+      { vrb_log "FAIL: could not stop this lane's shard node evm$i"; return 1; }
+    vrb_wait 15 "shard node evm$i stopped" vrb_poa_shard_stopped "$pid" || return 1
+  done
+}
+
+vrb_poa_shard_stopped() { ! owned_pid "$1" 'ubft shard-node run'; }
+
+vrb_poa_recovery() {
+  source scripts/vr-pos-steps.sh || return 1
+  vrp_source_q3 || return 1
+  H3_ROOTS="1 2 3 4"
+  Q3_DIR=$VR_EVIDENCE/recovery-logs
+  mkdir -p "$Q3_DIR"
+
+  local before after last_acked i root_boot bootnodes
+  before=$(vrb_poa_finalized j-finalized-before) || return 1
+  sleep 45
+  after=$(vrb_poa_finalized j-finalized-after) || return 1
+  last_acked=$(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'lastAcked()(bytes32)') || return 1
+  [ "$((after - before))" -le 1 ] && [ "$(vrp_result_state "$vrb_result")" = 2 ] &&
+    [ "$last_acked" = "$(cat "$VR_EVIDENCE/genesis-last-acked.txt")" ] ||
+    { vrb_log "FAIL: J did not remain unacknowledged"; return 1; }
+  printf '%s\n' "$last_acked" >"$VR_EVIDENCE/j-last-acked.txt"
+  cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'output(bytes32)' "$vrb_result" >"$VR_EVIDENCE/j-output-stalled.hex" || return 1
+  for i in 1 2 3 4; do
+    q3_status_of "$i" >"$VR_EVIDENCE/root$i-j-status.json" || return 1
+    jq -e '.activeEpoch == 2' "$VR_EVIDENCE/root$i-j-status.json" >/dev/null || return 1
+  done
+  vrb_log "PASS: J is still Published and unacknowledged after 45 s (finalized $((before)) -> $((after)))"
+
+  h3_retry_handoff 2 vrp_recovery_attempt || return 1
+  vrp_recovery_evidence 2 handoff || return 1
+  vrp_install_k 3 "$H3_ROOTS" || return 1
+  vrp_recovery_evidence 2 switch || return 1
+
+  root_boot=$(m2_root_addr 1) || return 1
+  for i in 3 4; do
+    bootnodes=$(evm_bootnodes_for_peers "$root_boot" "$i" 1 2 3 4) || return 1
+    start_one_evm_validator "$i" 4 "$partitionID" "$root_boot" engine-api rpc "$bootnodes" || return 1
+  done
+  vrb_wait 900 "VR's output of R is Recovered (state 6)" vrb_poa_recovered || return 1
+  for i in 1 2 3 4; do
+    vrb_wait 180 "shard node evm$i serves and votes in K" vrp_k_shard_serving "$i" 3 2 || return 1
+    q3_status_of "$i" >"$VR_EVIDENCE/root$i-k-status.json" || return 1
+    jq -e '.activeEpoch == 3' "$VR_EVIDENCE/root$i-k-status.json" >/dev/null || return 1
+  done
+
+  before=$(vrb_poa_finalized k-finalized-before) || return 1
+  vrb_wait 180 "K finalizes at least three more EVM blocks" vrb_poa_advancing "$before" || return 1
+  cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'output(bytes32)' "$vrb_result" >"$VR_EVIDENCE/output-recovered.hex" || return 1
+  cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'lastAcked()(bytes32)' >"$VR_EVIDENCE/recovery-last-acked.txt" || return 1
+  cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'health()(uint8)' >"$VR_EVIDENCE/recovery-health.txt" || return 1
+  cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'committee()' >"$VR_EVIDENCE/committee-after.hex" || return 1
+  cmp -s "$VR_EVIDENCE/committee-genesis.hex" "$VR_EVIDENCE/committee-after.hex" ||
+    { vrb_log "FAIL: the recovered committee differs from the incumbents"; return 1; }
+  vrb_log "PASS: K restored the exact incumbent committee, including identity 4's original payee"
+}
+
+vrb_poa_recovered() {
+  [ "$(vrp_result_state "$vrb_result")" = 6 ] &&
+    [ "$(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'health()(uint8)')" = 0 ] && vrb_acked
+}
+
+vrb_poa_advancing() {
+  local after
+  after=$(vrb_poa_finalized k-finalized-after) || return 1
+  [ "$((after - $1))" -ge 3 ]
+}
+
 vrb_main() {
   local i keys owner payee cfg p1
+  if [ "${VR_POA_RECOVERY:-0}" = 1 ]; then
+    [ "${VR_POS:-0}:${VR_JOINER:-0}:${SIGNING:-local}:$validators" = 0:0:local:4 ] ||
+      { vrb_log "FAIL: VR_POA_RECOVERY needs four plain PoA validators with local signing"; return 1; }
+    cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'committee()' >"$VR_EVIDENCE/committee-genesis.hex" || return 1
+    cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'lastAcked()(bytes32)' >"$VR_EVIDENCE/genesis-last-acked.txt" || return 1
+  fi
   if [ "${VR_RESTART_BETWEEN:-0}" = 1 ] || [ "${VR_RESTART_EARLY:-0}" = 1 ] || [ "${VR_JOINER_FOLLOW:-0}" = 1 ]; then
     grep -qa UBFT_VR_MEMBER_HOLD build/ubft || { vrb_log "FAIL: these runs need a binary built with -tags vrdev (the development hooks)"; return 1; }
   fi
@@ -187,6 +274,7 @@ EOF
   if [ "${VR_JOINER:-0}" = 1 ] && [ "${VR_JOINER_FOLLOW:-0}" != 1 ] && [ "${VR_ARCHIVE:-0}" = 1 ]; then vrj_restore_evm5 || return 1; fi
   cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'output(bytes32)' "$vrb_result" >"$VR_EVIDENCE/output.hex"
   vrb_log "R = $vrb_result"
+  if [ "${VR_POA_RECOVERY:-0}" = 1 ]; then vrb_poa_stall || return 1; fi
   # 3. every root observed the source and derives the intent
   # the schedule lane first requires exactly this lane's roots (scoped discovery; merge dependency: bft-core#1233): a cross-lane problem shows here
   if [ "${VR_SCHEDULE:-0}" != 0 ]; then source scripts/vr-schedule-steps.sh; vrs_require_roots || return 1; fi
@@ -234,10 +322,14 @@ EOF
     [ "${VR_JOINER:-0}" = 1 ] || source scripts/vr-joiner-steps.sh
     vrj_advance_authorities || return 1
   fi
-  vrb_wait 900 "the EVM shard acknowledged and VR applied the Boundary (lastAcked = R)" vrb_acked || return 1
-  cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'committee()' >"$VR_EVIDENCE/committee-after.hex"
+  if [ "${VR_POA_RECOVERY:-0}" = 1 ]; then
+    vrb_poa_recovery || return 1
+  else
+    vrb_wait 900 "the EVM shard acknowledged and VR applied the Boundary (lastAcked = R)" vrb_acked || return 1
+    cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'committee()' >"$VR_EVIDENCE/committee-after.hex"
+    vrb_log "PASS: the Boundary installed J"
+  fi
   cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'identity(uint64)' 4 >"$VR_EVIDENCE/identity4-after.hex"
-  vrb_log "PASS: the Boundary installed J"
   if [ "${VR_SEED2:-0}" = 1 ]; then source scripts/vr-seed-steps.sh; vrs_second || return 1; fi   # VT-11: a seed after the Boundary (trust-base tip epoch 2)
   if [ "${VR_JOINER:-0}" = 1 ]; then vrj_validates || return 1; fi
   if [ "${VR_POS:-0}" = 1 ]; then
