@@ -402,12 +402,12 @@ def vr_joiner_exit(r):
         if '[anchor]' in text:
             anchors += 1
             run = rec.cli(live, home, 'validator', 'claim', mounts=mounts, check=False)
-            (exit_ev / f'anchor-{anchors}.log').write_text(r.scrub(run.stdout + run.stderr) + f'rc={run.returncode}\n')
+            (exit_ev / f'anchor-{anchors}.log').write_text(r.scrub(run.stdout + run.stderr).rstrip('\n') + f'\nrc={run.returncode}\n')
             r.say(f'  anchoring run {anchors}: exit {run.returncode}')
         elif dry.returncode == 0 and 'REFUSED' not in text and 'not run' not in text:
             attempts += 1
             run = rec.cli(live, home, 'validator', 'claim', mounts=mounts, check=False)
-            (exit_ev / f'claim-attempt-{attempts}.log').write_text(r.scrub(run.stdout + run.stderr) + f'rc={run.returncode}\n')
+            (exit_ev / f'claim-attempt-{attempts}.log').write_text(r.scrub(run.stdout + run.stderr).rstrip('\n') + f'\nrc={run.returncode}\n')
             r.say(f'  claim attempt {attempts}: exit {run.returncode}')
             if run.returncode == 0:
                 claimed = run
