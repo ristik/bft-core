@@ -145,12 +145,34 @@ vrb_poa_stall() {
 vrb_poa_shard_paused() { [[ $(ps -o stat= -p "$1") =~ ^[[:space:]]*T ]]; }
 
 vrb_poa_resume() {
-  local pid failed=0
+  local pid failed=()
   for pid in ${vrb_poa_paused_pids[@]+"${vrb_poa_paused_pids[@]}"}; do
-    owned_pid "$pid" 'ubft shard-node run' && kill -CONT "$pid" || failed=1
+    if ! owned_pid "$pid" 'ubft shard-node run' || ! kill -CONT "$pid"; then
+      failed+=("$pid")
+    fi
   done
-  [ "$failed" -eq 0 ] || return 1
-  vrb_poa_paused_pids=()
+  vrb_poa_paused_pids=(${failed[@]+"${failed[@]}"})
+  [ "${#failed[@]}" -eq 0 ]
+}
+
+vrb_poa_resume_on_exit() {
+  vrb_poa_resume && return 0
+
+  local pid retry=()
+  for pid in ${vrb_poa_paused_pids[@]+"${vrb_poa_paused_pids[@]}"}; do
+    if ! kill -0 "$pid" 2>/dev/null && ! ps -p "$pid" >/dev/null 2>&1; then
+      vrb_log "WARN: teardown resume failed for shard PID $pid: process exited"
+      continue
+    fi
+    if owned_pid "$pid" 'ubft shard-node run' && vrb_poa_shard_paused "$pid"; then
+      vrb_log "WARN: teardown resume failed for shard PID $pid: still owned and stopped, retrying"
+    else
+      vrb_log "WARN: teardown resume failed for shard PID $pid: process exists, rechecking ownership"
+    fi
+    retry+=("$pid")
+  done
+  vrb_poa_paused_pids=(${retry[@]+"${retry[@]}"})
+  vrb_poa_resume || vrb_log "WARN: teardown resume retry failed for shard PIDs ${vrb_poa_paused_pids[*]}"
 }
 
 vrb_poa_recovery() {
