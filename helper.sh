@@ -106,6 +106,7 @@ function start_root_nodes() {
   local bootNode=""
   local p2pPort=$rootPortStart
   local rpcPort=$((25866+LANE_PORT_OFFSET))
+  local rpcHost=127.0.0.1
 
   bootNode=$(boot_node test-nodes/root1 "$rootPortStart")
 
@@ -161,7 +162,7 @@ function start_root_nodes() {
                     --address "/ip4/127.0.0.1/tcp/$p2pPort" \
                     $bootNodeParam \
                     --trust-base test-nodes/trust-base.json \
-                    --rpc-server-address "127.0.0.1:$rpcPort" \
+                    --rpc-server-address "$rpcHost:$rpcPort" \
                     --log-format text \
                     --log-level "$rootLogLevel" \
                     --metrics prometheus \
