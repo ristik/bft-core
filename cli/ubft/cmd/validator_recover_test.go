@@ -335,6 +335,8 @@ type chainPosSource struct {
 	chain *vrfake.Chain
 	view  signingauthority.PosDeploymentView
 	seen  []bool
+	// onBound runs when a read finds the id bound: a concurrent change while the pin is verified
+	onBound func()
 }
 
 func (s *chainPosSource) ReadPosDeployment(_ context.Context, q signingauthority.PosQuery) (signingauthority.PosDeploymentView, error) {
@@ -344,6 +346,9 @@ func (s *chainPosSource) ReadPosDeployment(_ context.Context, q signingauthority
 		bound := idn != nil && ((idn.Current.EvmNodeID == q.NodeID && bytes.Equal(idn.Current.EvmKey, q.EVMKey)) ||
 			(idn.Staged != nil && idn.Staged.EvmNodeID == q.NodeID && bytes.Equal(idn.Staged.EvmKey, q.EVMKey)))
 		s.seen = append(s.seen, bound)
+		if bound && s.onBound != nil {
+			s.onBound()
+		}
 		if !bound {
 			v.Unbound = map[uint64][20]byte{id: idn.Owner}
 		}
@@ -351,9 +356,16 @@ func (s *chainPosSource) ReadPosDeployment(_ context.Context, q signingauthority
 	return v, nil
 }
 
-// #1222: recover onto a fresh signing authority stages VR's binding (the authority's proof by op 110, its P85 signing gated), and only
-// after it confirms pins the authority (which verifies that binding) and signs the delegation possession. A pin before is refused.
-func TestValidatorRecoverOntoAFreshAuthorityPinsAfterTheBinding(t *testing.T) {
+// freshAuthorityRecover is a recover fixture whose new EVM key is a fresh in-process signing authority over the fake chain, with a binding
+// authorization for the identity and a P85 source reading VR; args runs recover onto it with the release's pin template.
+type freshAuthorityRecover struct {
+	*recoverFixture
+	src  *chainPosSource
+	a    *evmAuthority
+	args []string
+}
+
+func newFreshAuthorityRecover(t *testing.T) *freshAuthorityRecover {
 	f := newRecoverFixture(t)
 	v, keys := loadHome(t, f.home)
 	operator := ethcrypto.PubkeyToAddress(keys.Operator.PublicKey)
@@ -369,29 +381,79 @@ func TestValidatorRecoverOntoAFreshAuthorityPinsAfterTheBinding(t *testing.T) {
 	policy := signingauthority.RegistrationPolicy{Deployment: signingauthority.RegistrationDeployment{Network: network, ChainID: vrschema.U64(chainID.Uint64()), Registry: vrclient.DefaultRegistry},
 		Authorized: []signingauthority.RegistrationAuthorization{{Domain: vrschema.BindingDomainText, Owner: operator, ID: f.id, RootNodeID: root.NodeID, RootKey: root.Public(), Payee: payee}}}
 	socket, cred, info := startAuthority(t, policy, signingauthority.WithPosSource(src, chainID.Uint64()), signingauthority.WithRequirePosPolicy())
-
 	a, err := loadEVMAuthority(evmAuthorityConfig{Socket: socket, Credential: cred, NodeInfo: info})
 	require.NoError(t, err)
-	early := signingauthority.PosPolicy{IDs: []uint64{f.id}}
-	require.ErrorContains(t, a.PinPosPolicy(context.Background(), early), "signing-pos-policy-refused", "VR does not bind the fresh key yet")
-
 	pin := writePin(t, fmt.Sprintf(`{"network":"0x%x","chainId":%d,"election":"%s"}`, network, chainID.Uint64(), election.Hex()))
-	out, err := runValidator(t, f.home, "recover", "--id", fmt.Sprint(f.id), "--old-authority-home", f.marker, "--new-evm-authority-socket", socket,
-		"--new-evm-authority-credential", cred, "--new-evm-node-info", info, "--pin-pos-policy", pin)
+	return &freshAuthorityRecover{recoverFixture: f, src: src, a: a, args: []string{"recover", "--id", fmt.Sprint(f.id), "--old-authority-home", f.marker,
+		"--new-evm-authority-socket", socket, "--new-evm-authority-credential", cred, "--new-evm-node-info", info, "--pin-pos-policy", pin}}
+}
+
+// #1222: recover onto a fresh signing authority stages VR's binding (the authority's proof by op 110, its P85 signing gated), and only
+// after it confirms pins the authority (which verifies that binding) and signs the delegation possession. A pin before is refused.
+func TestValidatorRecoverOntoAFreshAuthorityPinsAfterTheBinding(t *testing.T) {
+	f := newFreshAuthorityRecover(t)
+	require.ErrorContains(t, f.a.PinPosPolicy(context.Background(), signingauthority.PosPolicy{IDs: []uint64{f.id}}), "signing-pos-policy-refused",
+		"VR does not bind the fresh key yet")
+	out, err := runValidator(t, f.home, f.args...)
 	require.NoError(t, err, out)
 	require.Equal(t, 2, f.chain.Sends(), out)
 	f.chain.With(func(c *vrfake.Chain) {
 		require.Equal(t, selector(vrclient.VRABI.Methods["proposeBinding"].ID), c.Sent[0][:4])
 		require.Equal(t, selector(vrclient.PosElectionABI.Methods["admitDelegation"].ID), c.Sent[1][:4])
 	})
-	require.Equal(t, []bool{false, true}, src.seen, "refused before VR's binding, verified after it")
+	require.Equal(t, []bool{false, true}, f.src.seen, "refused before VR's binding, verified after it")
 	ib, ip, id := strings.Index(out, "confirmed: VR stages"), strings.Index(out, "pinned the new signing authority"), strings.Index(out, "confirmed: identity")
 	require.True(t, ib >= 0 && ip > ib && id > ip, "binding, pin, delegation: %s", out)
 	require.Equal(t, "e2e-evm-auth", f.chain.Identity(f.id).Staged.EvmNodeID)
 
-	out, err = runValidator(t, f.home, "recover", "--id", fmt.Sprint(f.id), "--old-authority-home", f.marker, "--new-evm-authority-socket", socket,
-		"--new-evm-authority-credential", cred, "--new-evm-node-info", info, "--pin-pos-policy", pin)
+	out, err = runValidator(t, f.home, f.args...)
 	require.NoError(t, err, out)
 	require.Equal(t, 2, f.chain.Sends(), "a re-run re-reads both contracts and sends nothing")
 	require.Contains(t, out, "nothing to do")
+}
+
+// Both contracts are read again after the pin is verified (sol's review of #1328): a matching admission that landed while the authority
+// verified the pin is not sent again, and no delegation possession is asked for it.
+func TestValidatorRecoverRereadsAfterThePin(t *testing.T) {
+	f := newFreshAuthorityRecover(t)
+	f.src.onBound = func() {
+		f.chain.With(func(c *vrfake.Chain) {
+			c.Pos.Delegations[[2]uint64{f.id, 1}] = &vrfake.Delegated{Binding: delegationOf(registrationOfStaged(c, f.id)), NextNonce: 2}
+		})
+	}
+	out, err := runValidator(t, f.home, f.args...)
+	require.NoError(t, err, out)
+	require.Equal(t, 1, f.chain.Sends(), "only VR's binding: %s", out)
+	require.Contains(t, out, "already done: identity")
+	f.chain.With(func(c *vrfake.Chain) { require.Zero(t, c.Pos.Admitted) })
+}
+
+// registrationOfStaged is VR's staged registration of id (the fake chain's lock held).
+func registrationOfStaged(c *vrfake.Chain, id uint64) vrclient.Registration {
+	return *c.Identities[id].Staged
+}
+
+// A step is skipped only on a fresh read of the latest state (sol's review of #1328): a certified view whose delegation is already the
+// new words, while the latest one is not, still sends the delegation; the reverse skips it.
+func TestValidatorRecoverDecidesFromTheLatestState(t *testing.T) {
+	f := newRecoverFixture(t)
+	f.chain.With(func(c *vrfake.Chain) {
+		c.FinalizedDelegations = map[[2]uint64]*vrfake.Delegated{{f.id, 1}: {Binding: delegationOf(f.want), NextNonce: 2}}
+	})
+	out, err := f.recover(t)
+	require.NoError(t, err, out)
+	require.Equal(t, 2, f.chain.Sends(), "the certified view's delegation does not skip the latest one: %s", out)
+	require.True(t, sameDelegation(f.delegation(), delegationOf(f.want)))
+
+	g := newRecoverFixture(t)
+	g.chain.With(func(c *vrfake.Chain) {
+		c.FinalizedDelegations = map[[2]uint64]*vrfake.Delegated{{g.id, 1}: {Binding: delegationOf(g.old), NextNonce: 1}}
+		c.Pos.Delegations[[2]uint64{g.id, 1}] = &vrfake.Delegated{Binding: delegationOf(g.want), NextNonce: 2}
+	})
+	out, err = g.recover(t)
+	require.NoError(t, err, out)
+	require.Equal(t, 1, g.chain.Sends(), out)
+	g.chain.With(func(c *vrfake.Chain) {
+		require.Equal(t, selector(vrclient.VRABI.Methods["proposeBinding"].ID), c.Sent[0][:4], "the latest delegation is the new words: only VR's binding")
+	})
 }

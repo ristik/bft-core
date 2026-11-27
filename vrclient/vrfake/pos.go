@@ -108,7 +108,11 @@ func (c *Chain) election(from ethcommon.Address, data []byte, write bool) ([]byt
 	}
 	switch m.Name {
 	case "delegation":
-		d := c.Pos.Delegations[[2]uint64{in[0].(uint64), in[1].(uint64)}]
+		delegations := c.Pos.Delegations
+		if c.atFinalized {
+			delegations = c.FinalizedDelegations
+		}
+		d := delegations[[2]uint64{in[0].(uint64), in[1].(uint64)}]
 		if d == nil {
 			d = &Delegated{Binding: vrclient.Delegation{RootKey: []byte{}, EvmKey: []byte{}}}
 		}

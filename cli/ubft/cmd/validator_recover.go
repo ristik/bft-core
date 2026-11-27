@@ -245,15 +245,14 @@ func (r *posKeyChangeRun) run(ctx context.Context, w io.Writer) error {
 	}
 	fmt.Fprintf(w, "identity %d: custody generation %d, %d open lot(s), certified at block %d; new EVM node %s\n", r.id, st.Position.Generation,
 		st.Position.OpenLots, height, r.want.EvmNodeID)
-	// the latest state decides each transaction's nonces; it must agree with the certified plan (a step done since is skipped)
+	// the certified state is the preflight (its refusals stand); the steps are decided from a fresh read of the latest state only: a step is
+	// skipped only when the latest state holds its words at custody's current generation, never because the certified view says so
 	latest, err := readPosBindingState(ctx, r.ch.vr, r.custody, r.election, r.id)
 	if err != nil {
 		return err
 	}
-	if lp, err := planPosKeyChange(latest, operator, r.want, r.evmOnly); err != nil {
+	if plan, err = planPosKeyChange(latest, operator, r.want, r.evmOnly); err != nil {
 		return err
-	} else {
-		plan.Admit, plan.Stage = plan.Admit && lp.Admit, plan.Stage && lp.Stage
 	}
 	if !plan.Stage {
 		fmt.Fprintf(w, "already done: VR's binding of identity %d is the new words\n", r.id)
@@ -265,9 +264,10 @@ func (r *posKeyChangeRun) run(ctx context.Context, w io.Writer) error {
 		fmt.Fprintln(w, "nothing to do: VR's binding and the delegation are the new words")
 		return nil
 	}
-	// admit pins the new key's authority (when asked) and builds the delegation from the state read now: custody's current generation and
-	// nonces, after VR's binding confirmed
-	admit := func(now posBindingState) ([]step, error) {
+	// admit pins the new key's authority (when asked; the pin may wait for the authority's verification), then re-reads both contracts and
+	// builds the delegation from that read: skipped when the latest state already holds it, refused unless VR's binding is the new words,
+	// and signed (op 108) for custody's current generation and nonces only
+	admit := func() ([]step, error) {
 		if r.pin != nil && !r.dry {
 			p := *r.pin
 			p.IDs = []uint64{r.id}
@@ -275,6 +275,21 @@ func (r *posKeyChangeRun) run(ctx context.Context, w io.Writer) error {
 				return nil, err
 			}
 			fmt.Fprintf(w, "  pinned the new signing authority's P85 scope to identity %d (verified against VR's binding)\n", r.id)
+		}
+		now, err := readPosBindingState(ctx, r.ch.vr, r.custody, r.election, r.id)
+		if err != nil {
+			return nil, err
+		}
+		p, err := planPosKeyChange(now, operator, r.want, r.evmOnly)
+		if err != nil {
+			return nil, err
+		}
+		if !p.Admit {
+			fmt.Fprintf(w, "already done: identity %d's delegation at generation %d is the new words\n", r.id, now.Position.Generation)
+			return nil, nil
+		}
+		if !(vrclient.BindingMatches(now.Identity.Current, r.want) || (now.Identity.StagedRef != ([32]byte{}) && vrclient.BindingMatches(now.Identity.Staged, r.want))) {
+			return nil, fmt.Errorf("%w: VR's bindings of identity %d are no longer the new words: stop and re-run", ErrValidator, r.id)
 		}
 		s, err := r.admitStep(ctx, now)
 		if err != nil {
@@ -295,9 +310,12 @@ func (r *posKeyChangeRun) run(ctx context.Context, w io.Writer) error {
 				"(the new key's authority signs its possession only once it verifies that binding): not simulated\n", r.id)
 		}
 	default:
-		more, err := admit(latest)
+		more, err := admit()
 		if err != nil {
 			return err
+		}
+		if len(more) == 0 {
+			return nil
 		}
 		steps = append(steps, more...)
 	}
@@ -317,15 +335,7 @@ func (r *posKeyChangeRun) run(ctx context.Context, w io.Writer) error {
 			if !plan.Admit {
 				return nil, nil
 			}
-			// re-plan from the confirmed state: the delegation may have been admitted meanwhile (a concurrent run)
-			p, err := planPosKeyChange(now, operator, r.want, r.evmOnly)
-			if err != nil {
-				return nil, err
-			}
-			if !p.Admit {
-				return nil, nil
-			}
-			return admit(now)
+			return admit()
 		}
 		if !sameDelegation(now.Delegation, delegationOf(r.want)) {
 			return nil, fmt.Errorf("%w: after the confirmed delegation the election stages other words for identity %d: stop and re-run", ErrValidator, r.id)

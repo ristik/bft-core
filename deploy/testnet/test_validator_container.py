@@ -259,6 +259,71 @@ class ValidatorContainer(unittest.TestCase):
                 self.assertEqual(shard[shard.index('--signing-authority-socket') + 1], str(home/'authority-2/client.sock'))
                 self.assertEqual(shard[shard.index('--archive-store') + 1], str(home/'evm-2/archive'))
 
+
+    def test_recover_resumes_an_older_journal_at_the_transactions_phase(self):
+        """sol's review of #1328: a journal that reached `transactions` under the pin-first container (pos-policy.json, no template)
+        resumes: the template is written at the transactions entry and passed to recover."""
+        with tempfile.TemporaryDirectory() as path:
+            home, calls = self.volume(path), []
+            (home/'authority-2').mkdir()
+            (home/'evm-2').mkdir()
+            (home/'network.json').write_text(json.dumps({'ports':[1, 2, 3]}))
+            (home/'authority-2/pos-policy.json').write_text(json.dumps({'ids':[3]}))
+            (home/'authority-2/fingerprint').write_text('new')   # the authority phase stamped it
+            (home/'authority-2/node-info.json').write_text(json.dumps({'nodeId':'16Uiu2new', 'sigKey':'0x02AB'}))
+            (home/'recover.json').write_text(json.dumps({'phase':'transactions', 'id':3, 'old':1, 'new':2,
+                                                          'scope':{'rootEpoch':2, 'shardEpoch':2}}))
+            info = {'nodeId':'16Uiu2new', 'sigKey':'0x02AB'}
+            def tool(*args, **_):
+                calls.append([str(a) for a in args])
+                if 'node-info' in args:
+                    (home/'authority-2/node-info.json').write_text(json.dumps(info))
+                if args[:2] == ('q3', 'shard-conf'):
+                    Path(args[args.index('--out') + 1]).write_text(json.dumps({'epoch':2, 'validators':[{'nodeId':'16Uiu2new', 'sigKey':'0x02ab'}]}))
+                return SimpleNamespace(stdout='{}', returncode=0)
+            status = {'signingKeyFingerprint':'new', 'enrollmentComplete':False}
+            advanced = []
+            patches = [*self.patched(home, calls), patch.object(validator, 'ubft', tool),
+                       patch.object(validator, 'RELEASE', home/'release'),
+                       patch.object(validator, 'authority_status', return_value=status),
+                       patch.object(validator, 'root_status', return_value={'activeEpoch':3}),
+                       patch.object(validator, 'advance', side_effect=lambda target: advanced.append((target, validator.auth_dir().name))),
+                       patch.object(validator, 'local_status', return_value=SimpleNamespace(stdout='{"member":true}')),
+                       patch.object(validator, 'show_status')]
+            (home/'release').mkdir()
+            for name, doc in (('manifest.json', {'chain_id':7}), ('vr-deployment.json', {'networkWord':'0x' + '00'*32}),
+                              ('deployment.json', {'election':'0x' + '22'*20})):
+                (home/'release'/name).write_text(json.dumps(doc))
+            self.assertEqual(self.run_patched(patches, validator.recover, self.settings(), {}), 0)
+            order = [c[:2] for c in calls if c[0] == 'validator']
+            self.assertEqual(order, [['validator', 'recover'], ['validator', 'init']])   # the transactions before the relink
+            rec, = [c for c in calls if c[:2] == ['validator', 'recover']]
+            self.assertEqual(rec[rec.index('--old-authority-home') + 1], 'authority')
+            self.assertEqual(rec[rec.index('--new-evm-authority-socket') + 1], 'authority-2/operator.sock')
+            # #1222: recover pins the fresh authority after VR's binding confirms; nothing pins it before
+            template = Path(rec[rec.index('--pin-pos-policy') + 1])
+            self.assertEqual(json.loads(template.read_text()), {'network':'0x' + '00'*32, 'chainId':7, 'election':'0x' + '22'*20})
+            self.assertFalse(any(c[:2] == ['signing-authority', 'pos-policy'] for c in calls), 'recover pins the authority itself')
+            init, = [c for c in calls if c[:2] == ['validator', 'init']]
+            self.assertEqual(init[init.index('--evm-authority-socket') + 1], 'authority-2/operator.sock')
+            self.assertEqual(init[init.index('--id') + 1], '3')
+            self.assertIn(['signing-authority', 'complete-enrollment', '--shard-conf', str(home/'authority-2/activated-shard.json'),
+                           '--operator-socket', str(home/'authority-2/operator.sock'), '--operator-credential', str(home/'authority-2/operator.cred')], calls)
+            self.assertEqual(advanced, [(3, 'authority-2')])
+            self.assertEqual((home/'authority-2/fingerprint').read_text(), 'new')
+            self.assertEqual(json.loads((home/'recover.json').read_text())['phase'], 'activated')
+            self.assertEqual((home/'authority/lifetime').read_text(), 'fail-stop\n')
+            with patch.object(validator, 'HOME', home), patch.object(validator, 'RELEASE', home/'release'):
+                self.assertEqual((validator.slot(), validator.auth_dir().name, validator.evm_dir().name, validator.ureth_dir().name,
+                                  validator.active_file().name), (2, 'authority-2', 'evm-2', 'ureth-2', 'shard-active-2.json'))
+                (home/'release/fee-collector.txt').write_text('0x' + '33'*20)
+                (home/'bootstrap.json').write_text('{"body":"0x01"}')
+                with patch.object(validator, 'peers', return_value=['/ip4/1/tcp/1/p2p/a', '/ip4/1/tcp/2/p2p/b']):
+                    shard = [str(x) for x in validator.shard_command({'ports':[1, 2, 3], 'announce':None}, {'utb_genesis_id':'0x01'}, 2)]
+                self.assertEqual(shard[1:3], ['shard-node', 'restore'])   # the fresh node joins from the seed, staging-only
+                self.assertEqual(shard[shard.index('--home') + 1], str(home/'evm-2'))
+                self.assertEqual(shard[shard.index('--signing-authority-socket') + 1], str(home/'authority-2/client.sock'))
+                self.assertEqual(shard[shard.index('--archive-store') + 1], str(home/'evm-2/archive'))
     def test_an_activation_that_does_not_name_the_fresh_key_is_refused(self):
         info = {'nodeId':'16Uiu2new', 'sigKey':'0x02ab'}
         validator.check_activated_conf({'validators':[{'nodeId':'16Uiu2new', 'sigKey':'0x02AB'}]}, info)

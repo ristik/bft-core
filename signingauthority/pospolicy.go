@@ -47,8 +47,8 @@ var ErrPosPolicyConflict = errors.New("signing-pos-policy-conflict")
 // registered at the block read. Nothing was found wrong; retry. Signing stays refused meanwhile.
 var ErrPosPending = errors.New("signing-pos-policy-pending")
 
-// posVerifyTimeout bounds the verification a signing request triggers for a pending startup pin.
-const posVerifyTimeout = 10 * time.Second
+// posVerifyTimeout bounds the verification a signing request triggers for a pending pin, and each attempt of the CLI's watcher.
+const PosVerifyTimeout = 10 * time.Second
 
 // PosPolicy is the scope of the P85 possession signatures. In a pin to install, a zero Network, ChainID or Election is derived from
 // the deployment; a verified pin has all four.
@@ -199,6 +199,12 @@ func (a *Authority) SetPosPolicy(ctx context.Context, p PosPolicy) error {
 
 // VerifyPosPolicy verifies the pending pin, if there is one. It reports whether this call installed it.
 func (a *Authority) VerifyPosPolicy(ctx context.Context) (bool, error) {
+	a.mu.Lock()
+	idle := a.pos != nil || a.posWant == nil
+	a.mu.Unlock()
+	if idle {
+		return false, nil // nothing pending: never wait for another verification
+	}
 	return a.installPos(ctx, nil)
 }
 
@@ -225,9 +231,16 @@ func (a *Authority) installPos(ctx context.Context, in *PosPolicy) (bool, error)
 			return false, err
 		}
 	}
-	a.posInstall.Lock()
-	defer a.posInstall.Unlock()
+	// wait for a running verification only as long as this request's own context allows: a source that hangs holds one verification,
+	// never every pin install and P85 signing request behind it
+	select {
+	case a.posInstall <- struct{}{}:
+	case <-ctx.Done():
+		return false, fmt.Errorf("%w: another pin verification is still running: %w", ErrPosPending, ctx.Err())
+	}
+	defer func() { <-a.posInstall }()
 
+	req := in // the request as supplied (nil: verify the pending pin); a supplied field is checked against the verified scope
 	a.mu.Lock()
 	if in == nil {
 		if a.pos != nil || a.posWant == nil {
@@ -288,6 +301,10 @@ func (a *Authority) installPos(ctx context.Context, in *PosPolicy) (bool, error)
 	switch {
 	case err == nil:
 		a.pos, a.posWant, a.posWantStartup = &verified, nil, false
+		if req != nil && !verified.compatible(*req) {
+			// the verified scope is the startup pin's: a late request that named another election, network word or chain is not it
+			return true, fmt.Errorf("%w: the startup pin is verified for another election, network word or chain than this request names", ErrPosPolicyConflict)
+		}
 		return true, nil
 	case a.posWantStartup:
 		// the startup pin stays as it is: pending, or refused for the authority's lifetime
@@ -352,7 +369,7 @@ func (a *Authority) noteConfLocked(conf *types.PartitionDescriptionRecord) error
 // posPrepare verifies a pending startup pin before a P85 signing request takes the lock (a source that cannot be read leaves it pending,
 // and the request is then refused).
 func (a *Authority) posPrepare() {
-	ctx, cancel := context.WithTimeout(context.Background(), posVerifyTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), PosVerifyTimeout)
 	defer cancel()
 	_, _ = a.VerifyPosPolicy(ctx)
 }

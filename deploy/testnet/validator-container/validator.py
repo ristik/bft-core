@@ -891,10 +891,11 @@ def recover(a, pins):
             wait_for(f'the fresh authority in {d} (start the authority container)', lambda: authority_status(d), limit=300)
             stamp_authority(d)
             authority('node-info', '--out', d/'node-info.json', home=d)
-            # #1222: recover pins the fresh authority to the identity after VR's binding names its key, then signs the delegation
-            write(d/'pos-policy-template.json', json.dumps(pos_policy()).encode())
             journal(HOME/RECOVERY, 'transactions', **{k: rec[k] for k in ('id', 'old', 'new', 'scope')})
         if read(HOME/RECOVERY)['phase'] == 'transactions':
+            # #1222: recover pins the fresh authority to the identity after VR's binding names its key, then signs the delegation. The
+            # template is (re)written here, so a journal that reached this phase under an older container (which pinned first) resumes too
+            write(d/'pos-policy-template.json', json.dumps(pos_policy()).encode())
             with lock('.tx.lock', wait=True):
                 ubft('validator', 'recover', '--old-authority-home', auth_name(old),
                      '--new-evm-authority-socket', f'{d.name}/operator.sock',

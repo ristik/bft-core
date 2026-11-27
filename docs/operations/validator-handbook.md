@@ -271,11 +271,14 @@ ubft signing-authority run --home "$UBFT_HOME/authority" --authority-id "$SHARD_
   --operator-socket "$UBFT_HOME/authority/operator.sock" --operator-credential "$UBFT_HOME/authority/operator.cred" \
   --pop-socket "$UBFT_HOME/authority/pop.sock" --pop-credential "$UBFT_HOME/authority/pop.cred" \
   --registration-policy "$UBFT_HOME/authority/registration.json" --require-pos-policy \
+  --lineage-genesis-trust-base "$UBFT_HOME/release/trust-base.json" --lineage-utb-genesis \
+  --b1-profile "$UBFT_HOME/release/b1-profile.json" --activation-source-url http://127.0.0.1:8545 \
+  --execution-genesis-hash "$(jq -er '.genesis_hash' release/manifest.json)" \
   --metrics-address 127.0.0.1:29352 >logs/authority.log 2>&1 &
 AUTHORITY_PID=$!
 ```
 
-A pending authority is scoped to the shard epoch that will first name it. Save the confirmed cutoff, successor shard epoch and current root epoch with your service configuration.
+The registration policy makes this a VR generation's authority, so its activation fence is mandatory: it verifies its root activations from the release's genesis trust base, and reads VR from your own ureth (`--activation-source-url`, started in Section 3) under the release's b1 profile and execution genesis hash. The same execution client is what the P85 pin below is verified against. These are the validator container's flags for the same joiner path. A pending authority is scoped to the shard epoch that will first name it. Save the confirmed cutoff, successor shard epoch and current root epoch with your service configuration.
 
 VR assigns the identity id at application, so the authority's P85 pin (the ids its key may sign possession proofs for) is installed then, on the operator channel. The authority verifies it before it signs anything P85: it derives the network word and the election from its execution client (VR's network word and active PoS module, under the execution genesis hash and the b1 profile's VR code hash), requires the client's chain id to be the b1 profile's (the enrolled shard configuration's once enrollment is complete), and requires every id to be a VR identity bound to this node and key. A wrong field in the pin file is refused. With a provisioned identity, give the pin at startup with `--pos-policy`; it is verified the same way. Wait for `signing authority running` in `logs/authority.log`, then select the authority in the validator config.
 

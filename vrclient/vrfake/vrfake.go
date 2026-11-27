@@ -93,7 +93,14 @@ type Chain struct {
 	FailSyncing bool
 	// FailActivations makes activationCount fail.
 	FailActivations bool
+	// FinalizedDelegations, when set, are the election's delegations as the finalized block (eth_getBlockByNumber "finalized") reads
+	// them: a certified view that lags the latest one. Reads at any other block see Pos.Delegations.
+	FinalizedDelegations map[[2]uint64]*Delegated
+	atFinalized          bool
 }
+
+// finalizedHash is the finalized block's hash while FinalizedDelegations is set.
+var finalizedHash = ethcommon.HexToHash("0xf1")
 
 // New returns a chain with VR at 0xff..03, PoaElection at 0xff..07 and the SealRegistry at 0xff..02, chain id 3, no identities.
 func New() *Chain {
@@ -233,6 +240,11 @@ func (c *Chain) dispatch(req request) (any, *rpcError) {
 		}
 		return false, nil
 	case "eth_getBlockByNumber":
+		var tag string
+		_ = json.Unmarshal(req.Params[0], &tag)
+		if tag == "finalized" && c.FinalizedDelegations != nil {
+			return map[string]any{"number": hexutil.Uint64(c.Head - 1), "hash": finalizedHash, "timestamp": hexutil.Uint64(c.HeadTime), "baseFeePerGas": (*hexutil.Big)(c.BaseFee)}, nil
+		}
 		return map[string]any{"number": hexutil.Uint64(c.Head), "hash": ethcommon.BigToHash(new(big.Int).SetUint64(c.Head + 1)),
 			"timestamp": hexutil.Uint64(c.HeadTime), "baseFeePerGas": (*hexutil.Big)(c.BaseFee)}, nil
 	case "eth_getCode":
@@ -258,7 +270,15 @@ func (c *Chain) dispatch(req request) (any, *rpcError) {
 		if a.From != nil {
 			from = *a.From
 		}
+		var at struct {
+			BlockHash ethcommon.Hash `json:"blockHash"`
+		}
+		if len(req.Params) > 1 {
+			_ = json.Unmarshal(req.Params[1], &at)
+		}
+		c.atFinalized = c.FinalizedDelegations != nil && at.BlockHash == finalizedHash
 		ret, rerr := c.exec(from, a.To, a.Data, false)
+		c.atFinalized = false
 		if rerr != nil {
 			return nil, rerr
 		}

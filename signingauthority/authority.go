@@ -111,8 +111,9 @@ type Authority struct {
 	// configuration, not only a hash given at New), the chain reference once the enrollment is complete. Guarded by mu.
 	confChain                uint64
 	confChainKnown, confSeen bool
-	// posInstall serialises pin verification: it runs outside mu, and only one runs at a time.
-	posInstall sync.Mutex
+	// posInstall serialises pin verification (a one-slot semaphore, so a waiter gives up with its own context): it runs outside mu, and
+	// only one runs at a time.
+	posInstall chan struct{}
 	// fence refuses to sign for, or advance to, a root epoch >= E of an effective activation-schedule rule this binary lacks (WithFence).
 	fence *vrrules.Gate
 	// fencePending is the pre-genesis enrollment mode (WithFencePending): the authority serves key and enrollment operations only and signs
@@ -275,7 +276,7 @@ func New(enroll Enrollment, trust TrustBases, opts ...Option) (*Authority, error
 	fingerprint := sha256.Sum256(pub)
 	enroll = enroll.clone()
 	enroll.SigningKeyFingerprint = fingerprint[:]
-	a := &Authority{enroll: enroll, trust: trust, signer: signer, instance: instance}
+	a := &Authority{enroll: enroll, trust: trust, signer: signer, instance: instance, posInstall: make(chan struct{}, 1)}
 	for _, opt := range opts {
 		if err := opt(a); err != nil {
 			return nil, fmt.Errorf("signingauthority: %w", err)

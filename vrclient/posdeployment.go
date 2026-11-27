@@ -67,8 +67,9 @@ type PosDeployment struct {
 	ChainID  *big.Int
 	Election ethcommon.Address
 	Custody  ethcommon.Address
-	// Unbound are the queried ids whose VR bindings do not name the node with the key, with each one's VR owner: a key change or a
-	// recovery, whose P85 delegation precedes the VR binding proposal (the caller decides whether its configuration authorizes that).
+	// Unbound are the queried ids whose VR bindings (current, or staged with a nonzero reference) do not name the node with the key, with
+	// each one's VR owner. The authority refuses a pin listing one: a key change or recovery stages VR's binding first and pins after it
+	// confirms (#1222), so no configuration stands in for VR's binding.
 	Unbound map[uint64]ethcommon.Address
 }
 

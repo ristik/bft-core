@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/big"
 	"testing"
+	"time"
 
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/stretchr/testify/require"
@@ -456,4 +457,76 @@ func testRootKey(t *testing.T) []byte {
 	k, err := ethcrypto.GenerateKey()
 	require.NoError(t, err)
 	return ethcrypto.CompressPubkey(&k.PublicKey)
+}
+
+// sol's review of #1328: a startup pin of ids alone must not acknowledge a late request that names another election, network word or
+// chain: before the startup pin is verified (the request triggers its verification) and after it.
+func TestALateRequestIsCheckedAgainstAPendingStartupPin(t *testing.T) {
+	for name, mutate := range map[string]func(p *PosPolicy){
+		"election":     func(p *PosPolicy) { p.Election = [20]byte{0xEE} },
+		"network word": func(p *PosPolicy) { p.Network = [32]byte{9} },
+		"chain id":     func(p *PosPolicy) { p.ChainID = [32]byte{31: 9} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			wrong := posPin()
+			mutate(&wrong)
+			before := newPosAuthority(t, newFakePos(), WithPosPolicy(PosPolicy{IDs: []uint64{5}}))
+			require.ErrorIs(t, before.SetPosPolicy(context.Background(), wrong), ErrPosPolicyConflict, "before the startup pin is verified")
+			require.Equal(t, posPin().Election, before.pos.Election, "the startup pin itself is verified and installed")
+
+			after := newPosAuthority(t, newFakePos(), WithPosPolicy(PosPolicy{IDs: []uint64{5}}))
+			installed, err := after.VerifyPosPolicy(context.Background())
+			require.NoError(t, err)
+			require.True(t, installed)
+			require.ErrorIs(t, after.SetPosPolicy(context.Background(), wrong), ErrPosPolicyConflict, "after it is verified")
+			require.NoError(t, after.SetPosPolicy(context.Background(), posPin()))
+		})
+	}
+}
+
+// blockingPos is a source that connects and never answers until released (or the read's context ends).
+type blockingPos struct {
+	fakePos
+	release chan struct{}
+	entered chan struct{}
+}
+
+func (b *blockingPos) ReadPosDeployment(ctx context.Context, q PosQuery) (PosDeploymentView, error) {
+	b.entered <- struct{}{}
+	select {
+	case <-b.release:
+		return b.fakePos.ReadPosDeployment(ctx, q)
+	case <-ctx.Done():
+		return PosDeploymentView{}, fmt.Errorf("%w: %w", ErrPosPending, ctx.Err())
+	}
+}
+
+// sol's review of #1328: a source that hangs holds one verification only. A competing pin install and a P85 signing request give up with
+// their own deadlines (pending, nothing signed); once the hung read ends with its own deadline, a replacement pin is verified.
+func TestAHungSourceDoesNotBlockOtherRequests(t *testing.T) {
+	src := &blockingPos{fakePos: *newFakePos(), release: make(chan struct{}), entered: make(chan struct{}, 4)}
+	a := newPosAuthority(t, nil)
+	require.NoError(t, a.ProvisionPosSource(src, 0))
+	enrolledOn(a, posChain)
+
+	hung, stop := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- a.SetPosPolicy(hung, PosPolicy{IDs: []uint64{6}}) }()
+	<-src.entered
+
+	short, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	require.ErrorIs(t, a.SetPosPolicy(short, posPin()), ErrPosPending, "the competing install gives up with its own deadline")
+	require.Less(t, time.Since(start), 5*time.Second)
+	_, err := a.SignPosPoP(posRequest())
+	require.ErrorIs(t, err, ErrPosPolicy, "nothing is signed while no pin is verified")
+
+	stop() // the hung read ends with its own context
+	require.ErrorIs(t, <-done, ErrPosPending)
+	close(src.release)
+	require.NoError(t, a.SetPosPolicy(context.Background(), posPin()), "a replacement pin is verified")
+	require.Equal(t, []uint64{5}, a.pos.IDs)
+	_, err = a.SignPosPoP(posRequest())
+	require.NoError(t, err)
 }

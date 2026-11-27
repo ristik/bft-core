@@ -263,9 +263,21 @@ func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) e
 		}
 	}
 	if flags.VRRegistryCodeHash != "" {
-		if fenceGen.CodeHash, err = parseCodeHash(flags.VRRegistryCodeHash); err != nil {
+		h, err := parseCodeHash(flags.VRRegistryCodeHash)
+		if err != nil {
 			return err
 		}
+		// as the deferred path (mergePins): two stated VR code hashes must agree, so the P85 reader and the fence check the b1 profile's
+		if fenceGen.CodeHash != nil && *fenceGen.CodeHash != *h {
+			return fmt.Errorf("%w: --vr-registry-code-hash %x is not the b1 profile's VR measurement %x", errVRFenceRequired, h[:], fenceGen.CodeHash[:])
+		}
+		fenceGen.CodeHash = h
+	}
+	if (len(flags.PosPolicies) > 0 || flags.RequirePosPolicy) && !fenceGen.VR {
+		// #1222: a P85 pin is verified against the VR generation's deployment (VR's active PoS module and its election) through the
+		// execution client; a standalone P85 election without VR has no such verifier, so its pin could never be verified
+		return fmt.Errorf("%w: --pos-policy and --require-pos-policy need a VR generation (a b1 profile with the VR measurement, a registration "+
+			"policy or --vr-generation): a standalone P85 election without VR has no verifier for its pin", errVRFenceRequired)
 	}
 	if flags.ExecutionGenesisHash != "" {
 		if fenceGen.GenesisHash, err = parseCodeHash(flags.ExecutionGenesisHash); err != nil {
@@ -1013,7 +1025,10 @@ const posPolicyRetry = 2 * time.Second
 func watchPosPolicy(ctx context.Context, log *slog.Logger, a *signingauthority.Authority) {
 	last := ""
 	for {
-		installed, err := a.VerifyPosPolicy(ctx)
+		// each attempt is bounded: a source that connects and never answers must not hold the authority's verification for its lifetime
+		actx, cancel := context.WithTimeout(ctx, signingauthority.PosVerifyTimeout)
+		installed, err := a.VerifyPosPolicy(actx)
+		cancel()
 		switch {
 		case installed:
 			log.Info("the P85 pin is verified against the execution client")
