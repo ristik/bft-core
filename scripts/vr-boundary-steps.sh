@@ -126,18 +126,32 @@ vrb_poa_finalized() { # <evidence file>: read the enshrined EVM's finalized bloc
   jq -r .number "$VR_EVIDENCE/$1.json"
 }
 
+vrb_poa_paused_pids=()
 vrb_poa_stall() {
   local i pid
-  # Keep every root and execution client online. Two of four shard validators cannot acknowledge J.
+  # Two of four shard validators cannot acknowledge J. Pause the processes so their local signers
+  # retain their signing state. A new process with a local key cannot vote after restoring a certificate.
   for i in 3 4; do
     pid=$(cat "test-nodes/evm$i/pid") || return 1
-    owned_pid "$pid" 'ubft shard-node run' && stop_one_evm_validator "$i" ||
-      { vrb_log "FAIL: could not stop this lane's shard node evm$i"; return 1; }
-    vrb_wait 15 "shard node evm$i stopped" vrb_poa_shard_stopped "$pid" || return 1
+    owned_pid "$pid" 'ubft shard-node run' ||
+      { vrb_log "FAIL: evm$i is not this lane's shard node"; return 1; }
+    vrb_poa_paused_pids+=("$pid")
+    kill -STOP "$pid" || return 1
+    vrb_wait 15 "shard node evm$i paused" vrb_poa_shard_paused "$pid" || return 1
+    printf '%s %s\n' "$i" "$pid" >>"$VR_EVIDENCE/paused-shards.txt"
   done
 }
 
-vrb_poa_shard_stopped() { ! owned_pid "$1" 'ubft shard-node run'; }
+vrb_poa_shard_paused() { [[ $(ps -o stat= -p "$1") =~ ^[[:space:]]*T ]]; }
+
+vrb_poa_resume() {
+  local pid failed=0
+  for pid in ${vrb_poa_paused_pids[@]+"${vrb_poa_paused_pids[@]}"}; do
+    owned_pid "$pid" 'ubft shard-node run' && kill -CONT "$pid" || failed=1
+  done
+  [ "$failed" -eq 0 ] || return 1
+  vrb_poa_paused_pids=()
+}
 
 vrb_poa_recovery() {
   source scripts/vr-pos-steps.sh || return 1
@@ -146,7 +160,7 @@ vrb_poa_recovery() {
   Q3_DIR=$VR_EVIDENCE/recovery-logs
   mkdir -p "$Q3_DIR"
 
-  local before after last_acked i root_boot bootnodes
+  local before after last_acked i
   before=$(vrb_poa_finalized j-finalized-before) || return 1
   sleep 45
   after=$(vrb_poa_finalized j-finalized-after) || return 1
@@ -167,11 +181,8 @@ vrb_poa_recovery() {
   vrp_install_k 3 "$H3_ROOTS" || return 1
   vrp_recovery_evidence 2 switch || return 1
 
-  root_boot=$(m2_root_addr 1) || return 1
-  for i in 3 4; do
-    bootnodes=$(evm_bootnodes_for_peers "$root_boot" "$i" 1 2 3 4) || return 1
-    start_one_evm_validator "$i" 4 "$partitionID" "$root_boot" engine-api rpc "$bootnodes" || return 1
-  done
+  vrb_poa_resume || return 1
+  vrb_log "Resumed the two paused shard nodes in K"
   vrb_wait 900 "VR's output of R is Recovered (state 6)" vrb_poa_recovered || return 1
   for i in 1 2 3 4; do
     vrb_wait 180 "shard node evm$i serves and votes in K" vrp_k_shard_serving "$i" 3 2 || return 1
@@ -208,6 +219,7 @@ vrb_main() {
       { vrb_log "FAIL: VR_POA_RECOVERY needs four plain PoA validators with local signing"; return 1; }
     cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'committee()' >"$VR_EVIDENCE/committee-genesis.hex" || return 1
     cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'lastAcked()(bytes32)' >"$VR_EVIDENCE/genesis-last-acked.txt" || return 1
+    : >"$VR_EVIDENCE/paused-shards.txt"
   fi
   if [ "${VR_RESTART_BETWEEN:-0}" = 1 ] || [ "${VR_RESTART_EARLY:-0}" = 1 ] || [ "${VR_JOINER_FOLLOW:-0}" = 1 ]; then
     grep -qa UBFT_VR_MEMBER_HOLD build/ubft || { vrb_log "FAIL: these runs need a binary built with -tags vrdev (the development hooks)"; return 1; }

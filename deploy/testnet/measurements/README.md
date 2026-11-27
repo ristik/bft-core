@@ -59,8 +59,9 @@ CARGO_BUILD_JOBS=4 VR_LANE=1 Q3_B1=1 M2_PROFILE2=1 \
   ./scripts/reth-paired-devnet.sh 4 10
 ```
 
-The stage rotates identity 4's payee to create a successor, then stops two
-shard nodes so the successor cannot acknowledge. It checks the committed
-recovery into root epoch 3, restarts both shard nodes and verifies that all
-four incumbent nodes serve and vote. It also compares the complete recovered
-committee to genesis and polls the EVM's finalized block number after recovery.
+The stage rotates identity 4's payee to create a successor, then pauses two
+shard processes so the successor cannot acknowledge. It checks the committed
+recovery into root epoch 3, resumes both processes with their signing state
+intact and verifies that all four incumbent nodes serve and vote. It also
+compares the complete recovered committee to genesis and polls the EVM's
+finalized block number after recovery.
