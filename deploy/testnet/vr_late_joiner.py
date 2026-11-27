@@ -26,8 +26,9 @@ term when the preview plans it), keeps a log per attempt, and the first claim at
 transaction of the joiner's owner after the retirement request goes to custody (anchorTerm, mature, claim), none to the election or VR.
 It waits out custody's time floor (3,600 s), so it is not in the default stage list.
 
-vr-finalizer (#1323) follows: two elections in which every member (and the joiner, if it is still one) runs `pos-publish --participate` at
-the same moment, as each validator's own loop polls the same certified block. The first runs with --finalizer-step 0s, the pre-#1323
+vr-finalizer (#1323) follows: two elections in which every member (and the joiner, if it is still one) runs `pos-publish --participate` in its
+own loop every few seconds, as each validator's own participation loop polls the certified block (lockstep rounds do not race: the last
+prover finalizes in its own run before the others poll again). The first runs with --finalizer-step 0s, the pre-#1323
 behaviour in which every member finalizes a ready result at once; the second with the default order, in which the lowest frozen identity
 finalizes and publishes and the others only after a delay that grows with their rank. It counts each election's finalizeCandidate and
 VR.publish transactions and their reverts, and asserts that the ordered election sent exactly one of each, neither reverted.
@@ -492,7 +493,7 @@ def vr_finalizer(r):
         epoch = rec.root_view(1)['activeEpoch']
         first = int(r.call('eth_blockNumber'), 16)
         outputs = {}
-        target = rec.participate_until(epoch, extra=extra, pods=pods, watch=1, outputs=outputs)
+        target = rec.participate_polling(epoch, rec.participants(extra=extra), pods=pods, outputs=outputs)
         last = int(r.call('eth_blockNumber'), 16)
         txs = rec.publication_txs(first, last)
         summary = publication_summary(txs)

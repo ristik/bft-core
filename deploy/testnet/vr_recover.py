@@ -552,6 +552,46 @@ class Recovery:
                   r.scrub(' | '.join(text.splitlines()[-2:])[-240:]))
         return result
 
+    def participate_polling(self, epoch, parts, pods=None, seconds=3600, every=3, outputs=None):
+        """#1323: as each validator's own participation loop does (validator.py polls every 5 s): every participant runs `pos-publish
+        --participate` on the open result in its own loop, independently of the others, until the roots activate an epoch after `epoch`.
+        Unlike participate_until's lockstep rounds, the members then see a result become ready at about the same block, which is when the
+        finalize race happens. Returns the activated epoch."""
+        r = self.r
+        step = ['--finalizer-step', self.finalizer_step] if self.finalizer_step is not None else []
+        stop = threading.Event()
+        lock = threading.Lock()
+
+        def loop(m, ident, home, auth):
+            while not stop.is_set():
+                try:
+                    result = r.view_text(self.deployment['election'], 'openResult()(bytes32)').strip()
+                    if int(result, 16):
+                        done = self.cli((pods or {}).get(m, m), home, 'validator', 'pos-publish', '--participate', '--result', result,
+                                        '--proof-member', str(ident), *step, mounts=[(auth, '/home/authority')], check=False)
+                        text = r.scrub((done.stdout + done.stderr).strip())
+                        if outputs is not None and text:
+                            with lock:
+                                outputs.setdefault(m, []).append({'utc': utc(), 'result': result, 'exit': done.returncode, 'output': text})
+                except Exception as error:   # a failed read is the next poll's
+                    with lock:
+                        if outputs is not None:
+                            outputs.setdefault(m, []).append({'utc': utc(), 'error': str(error)[-300:]})
+                stop.wait(every)
+        threads = [threading.Thread(target=loop, args=(m, *part), daemon=True) for m, part in parts.items()]
+        for t in threads:
+            t.start()
+        try:
+            def activated():
+                view = self.root_view(self.i)
+                switching = view.get('switch') and view['switch']['phase'] not in ('running', 'following')
+                return view['activeEpoch'] if view['activeEpoch'] > epoch and not switching else None
+            return r.wait(f'the roots activate an epoch after {epoch} (every member polling on its own)', activated, seconds, every=10)
+        finally:
+            stop.set()
+            for t in threads:
+                t.join(timeout=700)
+
     def publication_txs(self, first, last):
         """#1323: every finalizeCandidate (to the election) and VR.publish (to VR) in blocks first..last, with its sender, status and gas."""
         r = self.r
