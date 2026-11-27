@@ -115,6 +115,7 @@ h3_q3_wait_joiner() { # entity
 h3_q3_activate_coupled() { # epoch replaced new
   local epoch=$1 replace=$2 new=$3 i oldBoot
   oldBoot=$(m2_root_addr "$replace")
+  lane_pause_root_watch || return 1
   # the new root is a running follower (a joiner) or a stopped member that returns (the recovery's root): either way it restarts into the install epoch
   [ ! -f "test-nodes/root$new/pid" ] || stop_pidfile "test-nodes/root$new/pid" 'ubft root-node' || true
   for _ in $(seq 1 50); do lsof -nP -iTCP:"$(m2_rpc_port "$new")" -sTCP:LISTEN >/dev/null 2>&1 || break; sleep 0.2; done
@@ -129,5 +130,6 @@ h3_q3_activate_coupled() { # epoch replaced new
   done
   stop_pidfile "test-nodes/root$replace/pid" 'ubft root-node' || return 1
   H3_ROOTS=$(for i in $H3_ROOTS; do [ "$i" = "$replace" ] && echo "$new" || echo "$i"; done | tr '\n' ' ' | sed 's/ $//')
-  m2_wait_root_epoch "$(h3_first_root)" "$epoch"
+  m2_wait_root_epoch "$(h3_first_root)" "$epoch" || return 1
+  lane_resume_root_watch
 }

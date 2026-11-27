@@ -154,11 +154,14 @@ func TestRestartOfSomeRootsBootstrapsToTheSwitchedRoot(t *testing.T) {
 		dir := t.TempDir()
 		script := `
 source "` + lib + `"
-stop_pidfile() { :; }; lsof() { return 1; }; m2_archive_root_state() { :; }; m2_rpc_port() { echo 1; }
+mkdir test-nodes
+marker=test-nodes/.stall-watch-pause
+stop_pidfile() { [ -f "$marker" ]; }; lsof() { return 1; }; m2_archive_root_state() { :; }; m2_rpc_port() { echo 1; }
 m2_root_addr() { echo "addr$1"; }
-m2_start_root() { echo "start $1 epoch=$2 boot=[$3]" >>calls.txt; }
-m2_wait_root_epoch() { echo "wait $1 epoch=$2" >>calls.txt; }
-h3_restart_roots 3
+m2_start_root() { [ -f "$marker" ] && echo "start $1 epoch=$2 boot=[$3]" >>calls.txt; }
+m2_wait_root_epoch() { [ -f "$marker" ] && echo "wait $1 epoch=$2" >>calls.txt; }
+h3_restart_roots 3 || exit 1
+[ ! -e "$marker" ] || exit 1
 cat calls.txt`
 		cmd := exec.Command("bash", "-c", script)
 		cmd.Dir = dir
@@ -180,4 +183,37 @@ cat calls.txt`
 		require.Contains(t, out, "wait 1 epoch=3")
 		require.Contains(t, run(t, "H3_ROOTS=1 2", "H3_RESTART_TOGETHER=1"), "start 1 epoch=3 boot=[]", "as before: the first root has no bootnode")
 	})
+}
+
+func TestM2InstallPausesRootWatchdogThroughEpochReadiness(t *testing.T) {
+	lib, err := filepath.Abs("../lib/m2-handoff-lib.sh")
+	require.NoError(t, err)
+	script := `
+set -eu
+source "$1"
+mkdir test-nodes
+marker=test-nodes/.stall-watch-pause
+stop_pidfile() { [ -f "$marker" ]; }
+lsof() { return 1; }
+m2_root_addr() { echo "addr$1"; }
+m2_archive_root_state() { [ -f "$marker" ]; }
+m2_start_root() { [ -f "$marker" ]; }
+m2_wait_root_epoch() { [ -f "$marker" ] || exit 2; [ "$2" = 2 ]; }
+m2_online_validators() { :; }
+m2_advance_authorities() { [ ! -e "$marker" ]; }
+m2_send_paid() { :; }
+m2_measure_pause() { :; }
+
+m2_install_epoch 2 "1 2"
+[ ! -e "$marker" ]
+
+if m2_install_epoch 3 "1 2"; then
+  echo "install succeeded despite failed epoch readiness" >&2
+  exit 1
+fi
+[ -f "$marker" ]`
+	cmd := exec.Command("bash", "-c", script, "m2-install-watchdog-fixture", lib)
+	cmd.Dir = t.TempDir()
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
 }

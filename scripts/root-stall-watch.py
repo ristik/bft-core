@@ -11,6 +11,9 @@ import signal
 import time
 
 
+PAUSE_MAX_AGE = 10 * 60
+
+
 def read_root(port, pid, path, timeout):
     connection = HTTPConnection("127.0.0.1", port, timeout=timeout)
     try:
@@ -34,10 +37,28 @@ class Root:
     round_number: int | None = None
     dumped: bool = False
     last_attempt: float | None = None
+    paused: bool = False
+
+    def restart_paused(self):
+        # A rolling restart can delay peers that were never stopped, so the marker covers the lane.
+        try:
+            age = time.time() - (self.home.parent / ".stall-watch-pause").stat().st_mtime
+        except OSError:
+            if self.paused:
+                self.progressed = time.monotonic()
+            self.paused = False
+            return False
+        self.paused = 0 <= age < PAUSE_MAX_AGE
+        if self.paused:
+            self.dumped = False
+            self.last_attempt = None
+        return self.paused
 
     def sample(self, threshold):
+        if self.restart_paused():
+            return
         current = read_root(self.port, self.pid, "/debug/consensus/round", 0.5)
-        if current is None or not current.strip().isdigit():
+        if current is None or not current.strip().isdigit() or self.restart_paused():
             return
         now = time.monotonic()
         round_number = int(current)
@@ -56,7 +77,7 @@ class Root:
             if int(pidfile.read_text()) != self.pid:
                 return
             stacks = read_root(self.port, self.pid, "/debug/pprof/goroutine?debug=2", 2)
-            if not stacks:
+            if not stacks or self.restart_paused():
                 return
             if int(pidfile.read_text()) != self.pid:
                 return  # The lane has replaced this root since we began sampling it.

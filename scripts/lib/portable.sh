@@ -15,6 +15,9 @@ p_sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else 
 p_size() { stat -c %s "$1" 2>/dev/null || stat -f %z "$1"; }
 # p_mtime is a file's modification time in seconds since the epoch (GNU, then BSD stat)
 p_mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"; }
+# The root watchdog (root-stall-watch.py) uses the marker's mtime to bound a planned outage.
+lane_pause_root_watch() { touch test-nodes/.stall-watch-pause; }
+lane_resume_root_watch() { rm -f test-nodes/.stall-watch-pause; }
 # epoch seconds of a UTC time stamp YYYY-MM-DDTHH:MM:SSZ (GNU date -d, else BSD date -j)
 p_epoch() { date -u -d "$1" +%s 2>/dev/null || date -u -j -f %Y-%m-%dT%H:%M:%SZ "$1" +%s; }
 # timeout SECONDS COMMAND...: GNU timeout, Homebrew gtimeout, else the command unbounded (the caller's own deadline then applies)

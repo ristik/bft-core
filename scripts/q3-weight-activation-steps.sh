@@ -228,6 +228,7 @@ q3_real_tc() {
   local root=test-nodes/root1/debug.log mark
   mark=$(wc -l <"$root")
   h3_mark
+  lane_pause_root_watch || return 1
   stop_pidfile test-nodes/root4/pid 'ubft root-node run' INT
   q3_wait_grep_since 180 "$root" "$mark" "$Q3_PAT_TC" || return 1
   q3_wait_grep_since 60 "$root" "$mark" "$(q3_pat "$Q3_PAT_SIGNED_TIMEOUT" 2)" || return 1
@@ -235,6 +236,7 @@ q3_real_tc() {
   [ -s "$Q3_DIR/tc-trace.txt" ] || return 1
   # root 4 returns (same state, same epoch: a plain restart, no archive of its stores)
   m2_start_root 4 2 "$(m2_root_addr 1)" || return 1
+  lane_resume_root_watch || return 1
   h3_progress after-tc 8
 }
 
@@ -244,6 +246,7 @@ q3_real_tc() {
 q3_root_boundary() {
   local root1=test-nodes/root1/debug.log mark mark2 settled end i signed timeouts formed committed
   mark=$(wc -l <"$root1")
+  lane_pause_root_watch || return 1
   for i in 2 3 4; do stop_pidfile "test-nodes/root$i/pid" 'ubft root-node run' KILL; done
   sleep 12     # what was in flight commits or dies out; the chain is then stuck
   settled=$(q3_signers_of 1 | jq -r .round)
@@ -271,6 +274,7 @@ q3_root_boundary() {
   [ "$committed" -gt "$end" ] || { echo "heavy plus one light (weight 7) did not commit a round ($end -> $committed)" >&2; return 1; }
   m2_start_root 3 2 "$(m2_root_addr 1)" || return 1
   m2_start_root 4 2 "$(m2_root_addr 1)" || return 1
+  lane_resume_root_watch || return 1
   h3_progress root-boundary-restored 8
 }
 
@@ -315,6 +319,7 @@ q3_ids() { grep -aoE 'messageID=[0-9a-f]+' | sort -u; }
 q3_heavy_crash() {
   local root1=test-nodes/root1/debug.log signed lastsigned recovered recov rebroadcast i mark
   mark=$(wc -l <"$root1")
+  lane_pause_root_watch || return 1
   for i in 2 3 4; do stop_pidfile "test-nodes/root$i/pid" 'ubft root-node run' KILL; done   # the lights away: the heavy root cannot complete a certificate alone
   q3_wait_grep_since 180 "$root1" "$mark" "$(q3_pat "$Q3_PAT_SIGNED_TIMEOUT" 2)" || return 1
   stop_pidfile test-nodes/root1/pid 'ubft root-node run' KILL          # the heavy root dies right after signing
@@ -326,6 +331,7 @@ q3_heavy_crash() {
   # a cold network: the heavy root starts first without a bootnode (as at genesis), the lights follow with it as their bootnode
   m2_start_root 1 2 "" || return 1
   for i in 2 3 4; do m2_start_root "$i" 2 "$(m2_root_addr 1)" || return 1; done
+  lane_resume_root_watch || return 1
   # the last vote the node stored before it died is held again at start under the identity it was signed with (independent of the timer path below)
   q3_wait_grep_since 60 "$root1" "$mark" "msg=\"recovered last vote\" .*kind=timeout round=[0-9]+ messageID=$lastsigned" || return 1
   # The original message comes back by one of two paths, both with its identity: the pacemaker is reset from the stored last vote (which a node that

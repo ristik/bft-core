@@ -1024,6 +1024,7 @@ preflightFailures=$failures
 if [ "${ANYAGE_LANE:-0}" = 1 ]; then agg_prepare_confs || { echo "aggregator shard configuration failed" >&2; exit 1; }; fi
 # All paired rehearsal lanes use this root launcher, including restarts and joiners.
 if [ "$laneStallDumpSecs" -gt 0 ] 2>/dev/null; then
+  lane_resume_root_watch || exit 1   # clear a marker left by a previous run
   export UBFT_LANE_ROOT_DEBUG=1
   python3 scripts/root-stall-watch.py test-nodes "$(lane_port 25866)" "$laneStallDumpSecs" &
   rootStallWatchPid=$!

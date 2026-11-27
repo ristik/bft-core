@@ -435,6 +435,7 @@ m2_install_epoch() { # epoch roots: after the handoff to this epoch committed, t
   local i waitStep first boot prev activated
   first=$(echo "$roots" | awk '{print $1}')
   # Every root restarts on the install epoch; each fetches and verifies the committed bundle.
+  lane_pause_root_watch || return 1
   for i in $roots; do
     prev=$(echo "$roots" | tr ' ' '\n' | grep -vx "$i" | head -1)
     boot=$(m2_root_addr "$prev")
@@ -447,6 +448,7 @@ m2_install_epoch() { # epoch roots: after the handoff to this epoch committed, t
     m2_start_root "$i" "$epoch" "$boot" || return 1
   done
   m2_wait_root_epoch "$first" "$epoch" || return 1
+  lane_resume_root_watch || return 1
   for i in $(m2_online_validators); do
     activated=false
     for waitStep in $(seq 1 90); do

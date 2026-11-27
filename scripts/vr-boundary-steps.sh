@@ -79,9 +79,11 @@ vrb_restart_root() { # <n> <description>
   local node=$1 boot rc
   declare -F m2_start_root >/dev/null || source scripts/lib/m2-handoff-lib.sh || { vrb_log "FAIL: the root restart library"; return 1; }
   boot=$(m2_root_addr $((node == 2 ? 3 : 2)))
+  lane_pause_root_watch || return 1
   stop_pidfile "test-nodes/root$node/pid" 'ubft root-node' || { vrb_log "FAIL: stopping root$node"; return 1; }
   { m2_start_root "$node" 1 "$boot"; rc=$?; } >/dev/null 2>&1   # its readiness check needs lsof (not on the dev server): the RPC is the check
   vrb_wait 90 "root$node answers on its RPC $2" curl -sf "http://127.0.0.1:$(m2_rpc_port "$node")/api/v1/roundInfo" || return 1
+  lane_resume_root_watch
 }
 vrb_hold() { # <n>: start root n with the readiness hold
   touch "test-nodes/root$1/vr-member.hold"

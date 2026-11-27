@@ -1,4 +1,5 @@
 import http.server
+import os
 from pathlib import Path
 import runpy
 import tempfile
@@ -7,7 +8,9 @@ import unittest
 from unittest.mock import patch
 
 
-Root = runpy.run_path(str(Path(__file__).with_name("root-stall-watch.py")))["Root"]
+watchdog = runpy.run_path(str(Path(__file__).with_name("root-stall-watch.py")))
+Root = watchdog["Root"]
+PAUSE_MAX_AGE = watchdog["PAUSE_MAX_AGE"]
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -49,7 +52,10 @@ class RootStallWatchTest(unittest.TestCase):
         self.server.fail_capture = False
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        home = Path(directory.name)
+        nodes = Path(directory.name)
+        self.pause_marker = nodes / ".stall-watch-pause"
+        home = nodes / "root1"
+        home.mkdir()
         (home / "pid").write_text("123\n")
         self.log = home / "debug.log"
         self.root = Root(home, 123, self.server.server_port, 0)
@@ -84,6 +90,42 @@ class RootStallWatchTest(unittest.TestCase):
         self.assertFalse(self.log.exists())
         self.server.round_number = 51
         self.sample_at(8)
+        self.assertEqual(["123"], self.server.stack_requests)
+
+    def test_marker_suppresses_capture_until_removed_then_rearms(self):
+        self.sample_at(1)
+        self.pause_marker.touch()
+        self.sample_at(6)
+        self.sample_at(20)
+        self.assertEqual([], self.server.stack_requests)
+        self.assertFalse(self.log.exists())
+
+        self.pause_marker.unlink()
+        self.sample_at(21)
+        self.sample_at(25)
+        self.assertEqual([], self.server.stack_requests)
+        self.sample_at(26)
+        self.assertEqual(["123"], self.server.stack_requests)
+        self.assertIn("5.0s without round progress", self.log.read_text())
+
+    def test_stale_marker_allows_capture_even_if_previously_active(self):
+        self.sample_at(1)
+        self.pause_marker.touch()
+        marked_at = self.pause_marker.stat().st_mtime
+        self.sample_at(6)
+        self.assertEqual([], self.server.stack_requests)
+
+        with patch("time.time", return_value=marked_at + PAUSE_MAX_AGE):
+            self.sample_at(7)
+        self.assertEqual(["123"], self.server.stack_requests)
+        self.assertTrue(self.pause_marker.exists())
+        self.assertIn("round 51", self.log.read_text())
+
+    def test_stale_marker_at_start_does_not_pause_watchdog(self):
+        self.pause_marker.touch()
+        os.utime(self.pause_marker, (0, 0))
+        self.sample_at(1)
+        self.sample_at(6)
         self.assertEqual(["123"], self.server.stack_requests)
 
     def test_failed_capture_is_rate_limited(self):
