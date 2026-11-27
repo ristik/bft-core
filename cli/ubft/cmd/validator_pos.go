@@ -557,6 +557,14 @@ func validatorPosPublishCmd(base *baseFlags) *cobra.Command {
 						return err
 					}
 				}
+				gate, err := readPosParticipation(ctx, ch, memberID)
+				if err != nil {
+					return err
+				}
+				if gate.Reason != "" {
+					fmt.Fprintf(w, "no election transactions: %s\n", gate.Reason)
+					return nil
+				}
 				for _, member := range members {
 					if member.Id == memberID {
 						if err := submitMemberProof(ctx, w, keys, ch, s, election, rid, member, f.DryRun); err != nil {
@@ -650,6 +658,74 @@ func validatorPosPublishCmd(base *baseFlags) *cobra.Command {
 	cmd.MarkFlagsMutuallyExclusive("participate", "evm-authority")
 	cmd.MarkFlagsMutuallyExclusive("participate", "evm-keys")
 	return cmd
+}
+
+// posParticipationState is what the election-participation gate decides from, read at the certified block: custody's position of the
+// identity and whether evidence excluded it.
+type posParticipationState struct {
+	ID       uint64
+	Position custodyPosition
+	Excluded bool
+}
+
+// posParticipation is the gate of `pos-publish --participate` (#1316): Reason is empty when the identity still takes part in the
+// elections (its own possession proof when it is a frozen member of the open result, and the permissionless finalization and VR
+// publication of a result whose proofs are all in), and names why it sends nothing otherwise.
+type posParticipation struct {
+	Reason string
+}
+
+// planPosParticipation applies the P85 rules to an identity's state:
+//   - an identity that requested retirement is excluded at the next election, and a result that froze it cannot be finalized
+//     (finalizeCandidate requires every member covered, and custody's coverage refuses a retiring member): its proof is useless and its
+//     finalization can only revert; the other members relay every result it is not part of;
+//   - an identity excluded by evidence is not covered either;
+//   - an identity custody does not know, or with no open lots (never bonded, or matured), is no member of any result.
+//
+// What a leaving identity keeps is outside the election: its custody steps (`validator claim`: the permissionless anchorTerm, then
+// mature and claim), which this gate does not touch.
+func planPosParticipation(st posParticipationState) posParticipation {
+	switch {
+	case st.Position.Owner == (common.Address{}):
+		return posParticipation{Reason: fmt.Sprintf("custody knows no identity %d", st.ID)}
+	case st.Position.RetirementRequested:
+		return posParticipation{Reason: fmt.Sprintf("identity %d requested retirement: it leaves at the next election, and the remaining members publish the results", st.ID)}
+	case st.Excluded:
+		return posParticipation{Reason: fmt.Sprintf("identity %d is excluded by evidence", st.ID)}
+	case st.Position.OpenLots == 0:
+		return posParticipation{Reason: fmt.Sprintf("identity %d has no open lots (not bonded, or its bond matured)", st.ID)}
+	}
+	return posParticipation{}
+}
+
+// readPosParticipation reads the gate's state at the RPC's certified (finalized) block and applies it.
+func readPosParticipation(ctx context.Context, ch *validatorChain, id uint64) (posParticipation, error) {
+	if id == 0 {
+		return posParticipation{Reason: "the operator account owns no identity"}, nil
+	}
+	custody, _, err := ch.posAddrs(ctx)
+	if err != nil {
+		return posParticipation{}, err
+	}
+	c, _, err := ch.certifiedClient(ctx)
+	if err != nil {
+		return posParticipation{}, err
+	}
+	st := posParticipationState{ID: id}
+	if err := c.CallPosMulti(ctx, custody, vrclient.CustodyABI, "positions", &st.Position, id); err != nil {
+		return posParticipation{}, err
+	}
+	var evidence common.Address
+	if err := c.CallPos(ctx, custody, vrclient.CustodyABI, "evidence", &evidence); err != nil {
+		return posParticipation{}, err
+	}
+	if evidence == (common.Address{}) {
+		return posParticipation{}, fmt.Errorf("%w: custody %s names no evidence contract", ErrValidator, custody.Hex())
+	}
+	if err := c.CallPos(ctx, evidence, vrclient.EvidenceABI, "excluded", &st.Excluded, id); err != nil {
+		return posParticipation{}, err
+	}
+	return planPosParticipation(st), nil
 }
 
 func publishOwnPosProof(ctx context.Context, w io.Writer, v *loadedValidator, keys *validatorKeys, ch *validatorChain, sender vrclient.Sender,

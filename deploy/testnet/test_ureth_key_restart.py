@@ -47,6 +47,17 @@ def public_key(secret_hex):
     return f'{r[0]:064x}{r[1]:064x}'
 
 
+def profile_bindings(source):
+    """The profile bindings generate.topology appended to a generation's ureth (its ureth_flags) and the builder's gas limit, from either layout:
+    `... --builder.gaslimit G --unicity.fee-collector FEE <bindings>` before #1321, `... --log.file.max-files 0 <bindings> --unicity.fee-collector=FEE
+    --builder.gaslimit=G --engine.persistence-threshold=64` (vr_genesis.ureth_runtime_flags) since."""
+    if generate.FEE in source:
+        return source[source.index(generate.FEE) + 1:], int(source[source.index('--builder.gaslimit') + 1])
+    fee = source.index('--unicity.fee-collector=' + generate.FEE)
+    gas = next(a for a in source if a.startswith('--builder.gaslimit=')).split('=', 1)[1]
+    return source[source.index('--log.file.max-files') + 2:fee], int(gas)
+
+
 @unittest.skipUnless(all(os.environ.get(v) for v in ('URETH_KEY_IMAGE', 'URETH_KEY_GENESIS', 'URETH_KEY_COMPOSE')), 'opt-in: needs Docker and a node image')
 class UrethKeyOnDocker(unittest.TestCase):
     def setUp(self):
@@ -57,10 +68,9 @@ class UrethKeyOnDocker(unittest.TestCase):
         shutil.copy(os.environ['URETH_KEY_GENESIS'], self.gen / 'network' / 'genesis.json')
         source = json.loads(Path(os.environ['URETH_KEY_COMPOSE']).read_text())['services']['ureth1']['entrypoint']
         source = source[source.index('unicity-reth'):]
-        bindings = source[source.index(generate.FEE) + 1:]   # the profile bindings generate.topology appends (ureth_flags)
-        gas = source[source.index('--builder.gaslimit') + 1]
+        bindings, gas = profile_bindings(source)
         images = {k: os.environ['URETH_KEY_IMAGE'] for k in ('node', 'rpc', 'guard', 'signer')}
-        cfg = generate.topology(self.gen, 1, {'root': ['r1'], 'evm': ['e1']}, images, 'captcha', bindings, int(gas))
+        cfg = generate.topology(self.gen, 1, {'root': ['r1'], 'evm': ['e1']}, images, 'captcha', bindings, gas)
         self.project = 'vt08-ureth-key-' + secrets.token_hex(4)
         compose = {'name': self.project, 'services': {'ureth1': cfg['services']['ureth1']}, 'networks': {'validators': {'internal': True}}}
         (self.gen / 'compose.yaml').write_text(json.dumps(compose, indent=1))

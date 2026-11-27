@@ -133,3 +133,20 @@ func TestCustodyClaimedAmountChecksReceiptScope(t *testing.T) {
 	_, ok = CustodyClaimedAmount(&Receipt{Logs: []Log{withdrawal}}, custody, creditor, creditor)
 	require.False(t, ok)
 }
+
+// #1316: a refused claim or finalization names the custody or election error (selectors from `cast sig`), not a bare "execution reverted".
+func TestThePoSErrorsDecode(t *testing.T) {
+	word := func(s string) []byte { b, err := hex.DecodeString(s); require.NoError(t, err); return b }
+	for sel, want := range map[string]string{
+		"90219d2a": "TimeGateNotMet: the certified UC time has not reached the retirement time floor yet",
+		"cb95d57d": "RecordsPending: custody has root records to apply",
+		"9ac89bcd": "AlreadyPublished: another party published the candidate first",
+	} {
+		r := DecodeRevert(word(sel))
+		require.NotNil(t, r, sel)
+		require.Contains(t, r.Error(), want)
+	}
+	r := DecodeRevert(append(word("a5339376"), common.LeftPadBytes([]byte{5}, 32)...))
+	require.NotNil(t, r)
+	require.Contains(t, r.Error(), "NotCovered(5): a frozen member is no longer eligible")
+}

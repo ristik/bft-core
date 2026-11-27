@@ -510,16 +510,40 @@ class Recovery:
         sent = r.call('eth_sendRawTransaction', [r.raw_tx(to, nonce, int(r.call('eth_gasPrice'), 16), 1)])
         return r.wait('the transfer is mined', lambda: r.call('eth_getTransactionReceipt', [sent]), 600)
 
-    def participate_until(self, epoch, homes=None, pods=None, seconds=3600, watch=None):
+    def participants(self, homes=None, extra=None):
+        """{entity: (identity, operator home, authority directory)} of the genesis members (their 'recover-participant' homes unless `homes`
+        names another) and of the `extra` entities (a joiner: {entity: (identity, home, authority directory)})."""
+        gen = self.gen
+        compose = handoff_ops.load_compose(gen)
+        out = {m: (genesis_identity(gen, m)[0], (homes or {}).get(m) or self.home(m, 'recover-participant'), authority_dir(gen, compose, m))
+               for m in self.r.members()}
+        out.update(extra or {})
+        return out
+
+    def participate_once(self, parts, pods=None, outputs=None):
+        """Every participant's own `pos-publish --participate` on the open result, if one is open (each in its own pod unless `pods` names
+        another). `outputs` (a dict) collects each entity's output lines. Returns the open result, or None."""
+        r = self.r
+        result = r.view_text(self.deployment['election'], 'openResult()(bytes32)').strip()
+        if not int(result, 16):
+            return None
+        for m, (ident, home, auth) in parts.items():
+            done = self.cli((pods or {}).get(m, m), home, 'validator', 'pos-publish', '--participate', '--result', result,
+                            '--proof-member', str(ident), mounts=[(auth, '/home/authority')], check=False)
+            text = (done.stdout + done.stderr).strip()
+            if outputs is not None:
+                outputs.setdefault(m, []).append({'result': result, 'exit': done.returncode, 'output': r.scrub(text)})
+            r.say(f'  member {ident} on result {result[:18]}: exit {done.returncode}: ' +
+                  r.scrub(' | '.join(text.splitlines()[-2:])[-240:]))
+        return result
+
+    def participate_until(self, epoch, homes=None, pods=None, seconds=3600, watch=None, extra=None, outputs=None):
         """Until the roots activate an epoch after `epoch`: every genesis member's own `pos-publish --participate` on the open result (its
         possession proof from its own authority, then anyone's publication), each in its own pod unless `pods` names another (a member
-        whose own shard node does not sign yet sends through a live one). Returns the activated epoch."""
-        r, gen = self.r, self.gen
-        members = r.members()
-        homes = {m: (homes or {}).get(m) or self.home(m, 'recover-participant') for m in members}
-        auths = {m: authority_dir(gen, handoff_ops.load_compose(gen), m) for m in members}
-        ids = {m: genesis_identity(gen, m)[0] for m in members}
-        election = self.deployment['election']
+        whose own shard node does not sign yet sends through a live one), and the `extra` entities' (participants()). Returns the
+        activated epoch."""
+        r = self.r
+        parts = self.participants(homes, extra)
 
         def participate():
             if watch is not None:
@@ -528,13 +552,7 @@ class Recovery:
                 if refused:
                     r.keep_redacted(self.ev / 'root-refusal.log', '\n'.join(refused[-200:]))
                     return f'the roots refuse the Freeze ({len(refused)} lines, root-refusal.log): ' + r.scrub(refused[-1][-400:])
-            result = r.view_text(election, 'openResult()(bytes32)').strip()
-            if int(result, 16):
-                for m in members:
-                    done = self.cli((pods or {}).get(m, m), homes[m], 'validator', 'pos-publish', '--participate', '--result', result,
-                                    '--proof-member', str(ids[m]), mounts=[(auths[m], '/home/authority')], check=False)
-                    r.say(f'  member {ids[m]} on result {result[:18]}: exit {done.returncode}: ' +
-                          r.scrub(' | '.join((done.stdout + done.stderr).strip().splitlines()[-2:])[-240:]))
+            self.participate_once(parts, pods, outputs)
             view = self.root_view(self.i)
             switching = view.get('switch') and view['switch']['phase'] not in ('running', 'following')
             return view['activeEpoch'] if view['activeEpoch'] > epoch and not switching else None
