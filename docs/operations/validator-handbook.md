@@ -110,15 +110,28 @@ the custody owner is the operator, the identity has open lots, has not
 requested retirement and is not excluded. Then it sends two transactions,
 each confirmed and re-read before the next:
 
-1. `ElectionPolicy.admitDelegation` of the new EVM key at custody's current
-   generation. It fences the old key: no later election snapshot selects the
-   identity with the old key.
-2. `VR.proposeBinding` of the identical words. The next election freezes the
-   new key, the new authority proves possession, and the boundary installs
-   the binding at the same generation.
+1. `VR.proposeBinding` of the new words, with the surviving root key's and
+   the fresh EVM key's proofs over VR's binding digest. The fresh authority
+   gives its proof under its registration policy (a `binding` entry for the
+   identity) while its P85 signing is still refused. VR needs no delegation
+   for it.
+2. After it confirms, `--pin-pos-policy` (a pin file without ids, as for
+   `apply`) pins the fresh authority to the identity. The authority verifies
+   the pin against its own execution client: VR's confirmed binding must name
+   its node and key. Only then does it sign the delegation possession, and
+   `ElectionPolicy.admitDelegation` of the identical words lands at
+   custody's current generation and nonces. It fences the old key: no later
+   election snapshot selects the identity with the old key. The next
+   election freezes the new key, the new authority proves possession, and
+   the boundary installs the binding at the same generation.
 
-A re-run compares the exact words and skips the steps already done, so an
-interrupted recovery is resumed with the same command. While an open
+Until the delegation confirms, an election can still freeze the old key
+against the current binding. Keep the old authority stopped; a result
+frozen with the dead key follows the normal expiry or recovery. The
+container passes the pin template itself.
+
+A re-run re-reads both contracts, compares the exact words and skips each
+confirmed step, so an interrupted recovery is resumed with the same command. While an open
 election result has frozen the identity's staged binding, recover refuses to
 replace it; wait until that result is published and acknowledged, rejected
 or recovered. A result that froze the old, dead key cannot publish; it ends
@@ -142,7 +155,7 @@ docker exec unicity-node ubft-validator recover --yes
 docker rename unicity-authority unicity-authority-lost
 docker run -d --name unicity-authority-2 --restart=no --network host \
   -v unicity-validator:/data "$IMAGE" authority
-# 2: sends the delegation, then the binding; relinks; waits for the boundary, enrolls and advances
+# 2: sends VR's binding, pins the fresh authority, sends the delegation; relinks; waits for the boundary, enrolls and advances
 docker exec unicity-node ubft-validator recover --yes
 docker exec unicity-node ubft-validator status
 ```
@@ -257,14 +270,17 @@ ubft signing-authority run --home "$UBFT_HOME/authority" --authority-id "$SHARD_
   --client-socket "$UBFT_HOME/authority/client.sock" \
   --operator-socket "$UBFT_HOME/authority/operator.sock" --operator-credential "$UBFT_HOME/authority/operator.cred" \
   --pop-socket "$UBFT_HOME/authority/pop.sock" --pop-credential "$UBFT_HOME/authority/pop.cred" \
-  --registration-policy "$UBFT_HOME/authority/registration.json" --dev-allow-late-pos-policy \
+  --registration-policy "$UBFT_HOME/authority/registration.json" --require-pos-policy \
+  --lineage-genesis-trust-base "$UBFT_HOME/release/trust-base.json" --lineage-utb-genesis \
+  --b1-profile "$UBFT_HOME/release/b1-profile.json" --activation-source-url http://127.0.0.1:8545 \
+  --execution-genesis-hash "$(jq -er '.genesis_hash' release/manifest.json)" \
   --metrics-address 127.0.0.1:29352 >logs/authority.log 2>&1 &
 AUTHORITY_PID=$!
 ```
 
-A pending authority is scoped to the shard epoch that will first name it. Save the confirmed cutoff, successor shard epoch and current root epoch with your service configuration.
+The registration policy makes this a VR generation's authority, so its activation fence is mandatory: it verifies its root activations from the release's genesis trust base, and reads VR from your own ureth (`--activation-source-url`, started in Section 3) under the release's b1 profile and execution genesis hash. The same execution client is what the P85 pin below is verified against. These are the validator container's flags for the same joiner path. A pending authority is scoped to the shard epoch that will first name it. Save the confirmed cutoff, successor shard epoch and current root epoch with your service configuration.
 
-The late P85 pin is for this prototype rehearsal when VR assigns the identity at application. For a deployment with a provisioned identity, use an approved startup `--pos-policy` and `--require-pos-policy`. Wait for `signing authority running` in `logs/authority.log`, then select the authority in the validator config.
+VR assigns the identity id at application, so the authority's P85 pin (the ids its key may sign possession proofs for) is installed then, on the operator channel. The authority verifies it before it signs anything P85: it derives the network word and the election from its execution client (VR's network word and active PoS module, under the execution genesis hash and the b1 profile's VR code hash), requires the client's chain id to be the b1 profile's (the enrolled shard configuration's once enrollment is complete), and requires every id to be a VR identity bound to this node and key. A wrong field in the pin file is refused. With a provisioned identity, give the pin at startup with `--pos-policy`; it is verified the same way. Wait for `signing authority running` in `logs/authority.log`, then select the authority in the validator config.
 
 ```bash
 AUTH=(--operator-socket "$UBFT_HOME/authority/operator.sock" --operator-credential "$UBFT_HOME/authority/operator.cred")
@@ -704,7 +720,7 @@ ubft validator status --custody "$CUSTODY" --sample 0 | grep '^clock'
 
 If the application has sent no registration, confirm a new window, stop only the pending authority using its saved `AUTHORITY_PID`, and start an authority for the confirmed successor using the existing registration policy and credentials. Write its node info to a fresh filename and select it with `validator init --force`. Keep the wallet, root key, shard peer identity and payee.
 
-If PoS registration already committed, keep the authority running. While it runs and holds its key, change keys only with `validator rotate`: on the PoS adapter it sends `admitDelegation` of the new words at custody's current generation first, then `VR.proposeBinding` of the identical words, and a re-run resumes. `validator apply` on a bonded identity refuses a delegation that is not VR's current or staged binding and points to `rotate`. Rotate refuses a root-key change, and it refuses to replace a staged binding that an open election result froze. If the authority has already stopped, follow [Authority loss](#authority-loss): preserve the old volume and marker and run `recover`.
+If PoS registration already committed, keep the authority running. While it runs and holds its key, change keys only with `validator rotate`: on the PoS adapter it sends `VR.proposeBinding` of the new words first, then, once that confirms, `admitDelegation` of the identical words at custody's current generation (with a new authority-held key, give `--pin-pos-policy` so the new authority is pinned between the two), and a re-run resumes. `validator apply` on a bonded identity refuses a delegation that is not VR's current or staged binding and points to `rotate`. Rotate refuses a root-key change, and it refuses to replace a staged binding that an open election result froze. If the authority has already stopped, follow [Authority loss](#authority-loss): preserve the old volume and marker and run `recover`.
 
 ## Troubleshooting
 

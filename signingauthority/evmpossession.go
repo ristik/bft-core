@@ -77,6 +77,7 @@ func (a *Authority) SignElectionPoP(req ElectionPoPRequest) (evmassign.EVMPoP, e
 	if _, err := a.fenceGate(); err != nil {
 		return evmassign.EVMPoP{}, err
 	}
+	a.posPrepare()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	hs, pub, err := a.ethSigner()
@@ -116,6 +117,7 @@ func (a *Authority) SignDelegationPossession(req DelegationPossessionRequest) ([
 	if _, err := a.fenceGate(); err != nil {
 		return nil, err
 	}
+	a.posPrepare()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	hs, pub, err := a.ethSigner()
