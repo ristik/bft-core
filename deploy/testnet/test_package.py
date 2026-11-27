@@ -3523,6 +3523,8 @@ class StagingKnobs(unittest.TestCase):
             self.assertIn(f'./validator{i}/auth/pop:/pop:ro', root['volumes'])
             self.assertNotIn(f'./validator{i}/auth:/authority', root['volumes'])
             self.assertIn('--fence-provision-file', authority['entrypoint'])
+            self.assertIn('--vr-generation', authority['entrypoint'], 'the fence file is read only on a VR generation (#1222)')
+            self.assertNotIn('--dev-allow-late-pos-policy', authority['entrypoint'])
             auth = authority['entrypoint']
             self.assertEqual(auth[auth.index('--follow-root-activations') + 1], 'http://127.0.0.2:8002')
             self.assertEqual(auth[auth.index('--follow-client-credential') + 1], '/authority/client.cred')

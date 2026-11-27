@@ -72,7 +72,7 @@ func newFixtureWith(t *testing.T, log *slog.Logger, options func(tb *types.RootT
 	return newConfiguredFixture(t, log, options, ManagedSession{})
 }
 
-func newConfiguredFixture(t *testing.T, log *slog.Logger, options func(*types.RootTrustBaseV1) []signingauthority.Option, managed ManagedSession) *fixture {
+func newConfiguredFixture(t *testing.T, log *slog.Logger, options func(*types.RootTrustBaseV1) []signingauthority.Option, managed ManagedSession, bounds ...Config) *fixture {
 	t.Helper()
 	rootSigner, err := abcrypto.NewInMemorySecp256K1Signer()
 	require.NoError(t, err)
@@ -98,13 +98,17 @@ func newConfiguredFixture(t *testing.T, log *slog.Logger, options func(*types.Ro
 		AuthorityID: "authority-1", NodeID: "node-1", NetworkID: 5, PartitionID: testPartitionID,
 		ShardID: types.ShardID{}, ShardEpoch: 0, RootEpoch: signingauthority.PinRootEpoch(1),
 		ShardConfHash: confHash, Profile: signingauthority.ProfileLegacyBCRv1,
-	}, staticTrust{tb: tb}, append(fixtureOptions(options, tb), signingauthority.WithLatePosPolicy())...)
+	}, staticTrust{tb: tb}, fixtureOptions(options, tb)...)
 	require.NoError(t, err)
 	t.Cleanup(authority.Close)
 
 	operatorCredential, err := NewCredential()
 	require.NoError(t, err)
-	server, err := NewServer(authority, Config{OperatorCredential: operatorCredential, Log: log, ManagedSession: managed})
+	cfg := Config{OperatorCredential: operatorCredential, Log: log, ManagedSession: managed}
+	if len(bounds) > 0 {
+		cfg.PinTimeout = bounds[0].PinTimeout
+	}
+	server, err := NewServer(authority, cfg)
 	require.NoError(t, err)
 	t.Cleanup(server.Close)
 
