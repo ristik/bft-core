@@ -69,7 +69,23 @@ if [[ "${NB2_QUALIFY_OFFLINE:-0}" = 1 ]]; then
   [[ -s "$scratch/offline-burn.private.json" ]]
   NB2_RESUME_STAGE=checkpoint run_driver "${driver[@]}"
   stop_archive
-  if [[ "${NB2_OFFLINE_PEAK:-0}" = 1 ]]; then
+  if [[ "${NB2_OFFLINE_EXTERNAL:-0}" = 1 ]]; then
+    # The run directory is private. Keep this pointer out of the evidence index.
+    printf '%s\n' "$scratch" >"$NB2_OUT/.offline-handoff"
+    if [[ "${NB2_OFFLINE_PEAK:-0}" = 1 ]]; then
+      NB2_RESUME_STAGE=load "${driver[@]}" &
+      load_pid=$!
+    else
+      NB2_RESUME_STAGE=load run_driver "${driver[@]}"
+    fi
+    for ((i = 0; i < 900; ++i)); do
+      [[ ! -e "$NB2_OUT/.offline-handoff" ]] && break
+      sleep 1
+    done
+    [[ ! -e "$NB2_OUT/.offline-handoff" ]]
+    [[ -s "$NB2_OUT/$NB2_QUALIFY_CASE/offline-result.json" ]]
+    if [[ -n "$load_pid" ]]; then wait "$load_pid"; load_pid=; fi
+  elif [[ "${NB2_OFFLINE_PEAK:-0}" = 1 ]]; then
     NB2_RESUME_STAGE=load "${driver[@]}" &
     load_pid=$!
     NB2_RESUME_STAGE=settle run_driver "${driver[@]}"

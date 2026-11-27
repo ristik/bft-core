@@ -101,6 +101,14 @@ from the late checkpoint during a concentrated load window. It uses separate
 load and relayer payers and records seal arrivals and backlog during each
 advance.
 
+Set `NB2_OFFLINE_EXTERNAL=1` to run settlement from another device over
+loopback forwarding. After the holder exits and the preferred archive stops,
+the launcher writes `.offline-handoff` with the private scratch path. The
+device needs the signed burn backup, its certified bytes, the deployment and
+checkpoint evidence, and a funded relayer key. Omit the holder's spending key.
+Run the driver with `NB2_RESUME_STAGE=settle` and the alternate archive. Copy
+the resulting settlement evidence back before removing the handoff marker.
+
 Set `NB2_LOAD_SEGMENTS=12 NB2_LOAD_SKEW=1` on the custody workload for
 concentrated bucket traffic and simultaneous gap advancement. Set
 `NB2_COMPARE_SINGLE_SOURCE=1 NB2_PACKET_OPERATIONS=16` on the smoke workload
