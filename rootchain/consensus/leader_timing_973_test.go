@@ -25,34 +25,71 @@ func TestLargerCommitteeRescueTiming(t *testing.T) {
 }
 
 func TestRescueTimingWindow(t *testing.T) {
-	t.Run("commit timestamp follows the read", func(t *testing.T) {
+	t.Run("commit time and pacemaker round follow the head read", func(t *testing.T) {
 		var window rescueTimingWindow
 		var published time.Time
-		head, observedAt := window.readCommit(func() uint64 {
+		round := uint64(43)
+		readRound := func() uint64 { return round }
+		observation := window.readCommit(func() uint64 {
 			published = time.Now()
+			round++
 			return 42
-		})
-		require.EqualValues(t, 42, head)
-		require.False(t, observedAt.Before(published))
+		}, readRound)
+		require.EqualValues(t, 42, observation.head)
+		require.EqualValues(t, 44, observation.round)
+		require.False(t, observation.at.Before(published))
+		cutoff := window.finish(readRound)
+		round++ // The pacemaker can advance while the observers join or delivery is reported.
+		require.EqualValues(t, 44, cutoff.round)
+		require.False(t, cutoff.at.Before(observation.at))
 	})
 
 	t.Run("last certificate excludes a read still in flight", func(t *testing.T) {
 		var window rescueTimingWindow
 		reading, release := make(chan struct{}), make(chan struct{})
-		observed := make(chan time.Time, 1)
+		observed := make(chan rescueCommitObservation, 1)
+		readRound := func() uint64 { return 43 }
 		go func() {
-			_, at := window.readCommit(func() uint64 {
+			observed <- window.readCommit(func() uint64 {
 				close(reading)
 				<-release
 				return 42
-			})
-			observed <- at
+			}, readRound)
 		}()
 		<-reading
-		window.finish()
+		window.finish(readRound)
 		close(release)
-		require.True(t, (<-observed).IsZero(), "late commit observation")
-		require.True(t, window.sampleTime().IsZero(), "late unknown-leader observation")
+		require.Zero(t, <-observed, "late commit observation")
+		require.Zero(t, window.sampleRound(readRound), "late round observation")
+	})
+
+	t.Run("last certificate excludes a baseline still in flight", func(t *testing.T) {
+		var window rescueTimingWindow
+		reading, release := make(chan struct{}), make(chan struct{})
+		observed := make(chan rescueCommitObservation, 1)
+		readRound := func() uint64 { return 43 }
+		go func() {
+			observed <- window.readUnknown(43, func() uint64 {
+				close(reading)
+				<-release
+				return 42 // The durable round that contains the terminal certificate.
+			}, readRound)
+		}()
+		<-reading
+		window.finish(readRound)
+		close(release)
+		require.Zero(t, <-observed, "late baseline must discard the unknown observation")
+	})
+
+	t.Run("baseline and unknown leader must be observed in the same round", func(t *testing.T) {
+		var window rescueTimingWindow
+		readHead := func() uint64 { return 42 }
+		readRound := func() uint64 { return 44 }
+		require.Zero(t, window.readUnknown(43, readHead, readRound))
+		observation := window.readUnknown(44, readHead, readRound)
+		require.EqualValues(t, 44, observation.round)
+		require.EqualValues(t, 42, observation.head)
+		require.False(t, observation.at.IsZero())
 	})
 }
 
