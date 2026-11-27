@@ -2739,6 +2739,9 @@ func (x *ConsensusManager) updateQCMetrics(ctx context.Context, qc *drctypes.Quo
 	}
 }
 
+// CurrentRound reports the local pacemaker round without waiting on consensus or storage locks.
+func (x *ConsensusManager) CurrentRound() uint64 { return x.pacemaker.GetCurrentRound() }
+
 func (x *ConsensusManager) GetState() (*abdrc.StateMsg, error) {
 	return x.blockStore().GetState()
 }

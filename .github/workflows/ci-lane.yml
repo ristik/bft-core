@@ -512,13 +512,14 @@ jobs:
         with:
           ref: ${{ needs.plan.outputs.sha }}
           fetch-depth: 0   # lane-product.sh selftest reads the pinned product's engineapi/profile.go from history
-      - name: Chain-free self-tests of the CI scripts (classifier, gate, pins, publisher, product selector)
+      - name: Chain-free self-tests of the CI scripts and root stall watchdog
         run: |
           set -euo pipefail
           for c in jq rsync zstd; do command -v "$c" >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq "$c"; }; done
           python3 scripts/ci/classify.py selftest
-          bash scripts/test-ingress-loss-window.sh
+          python3 -m unittest discover -s scripts -p test_root_stall_watch.py
           scripts/ci/gate.sh selftest
+          bash scripts/test-ingress-loss-window.sh
           scripts/ci/check-pins.sh selftest
           scripts/ci/lane-product.sh selftest
           scripts/ci/install-foundry-selftest.sh
