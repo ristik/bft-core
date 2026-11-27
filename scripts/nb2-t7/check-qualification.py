@@ -235,7 +235,7 @@ def main():
             loaded = [row for row in graph['custody'].get('catchUpMeasurements', [])
                       if row['calls'].startswith('loaded-')]
             graph['sealingSample'] = sealing_sample(graph['custody']['windows'], loaded)
-        for name in ('race', 'same-evidence-comparison'):
+        for name in ('race', 'same-evidence-comparison', 'same-eta-sessions', 'authority-open-tip'):
             if (run / (name + '.json')).exists():
                 graph[name] = read(run / (name + '.json'))
         for file in ('validator-graph.json', 'public-relay-check.json', 'gateway-checks.json'):

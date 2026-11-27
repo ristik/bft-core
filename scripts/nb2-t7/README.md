@@ -75,7 +75,7 @@ arguments after the pinned contracts deploy. It starts with a fresh vault and
 can drive the load generator and separate signer, relayer and archive processes.
 The built-in smoke is the default scenario.
 
-The driver uses the local paired validator as its origin authority. The T7
+The driver checks the finalized imported tip through the local paired validator. The T7
 launcher enables replicated shard archives so long runs can pass the default
 256-block live journal bound. It retains the full execution proof sources.
 

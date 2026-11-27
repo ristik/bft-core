@@ -8,7 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { concat, fromHex, toHex } from './sdk/bytes.js';
 import { abiEncode, depositCalldata, redeemCalldata } from './sdk/nb2/abi.js';
 import { SdkAggregator } from './sdk/nb2/aggregator.js';
-import { ascii, u16, u256 } from './sdk/nb2/cbor.js';
+import { ascii, cBytes, head, raw, scanNative, u16, u256 } from './sdk/nb2/cbor.js';
 import { ASSET_UCT, decodeConfig, deriveCoin, deriveType, domainOf, encodeConfig, PRODUCTION_PARAMS, type Config } from './sdk/nb2/config.js';
 import { HE, HU } from './sdk/nb2/crypto.js';
 import { decodeDepositProof, decodeReceiptBacking, depositSalt, depositedData, encodeReceiptBacking, firstOwnerOf, rhoOf, TOPIC, verifyReceiptLog } from './sdk/nb2/deposit.js';
@@ -17,7 +17,7 @@ import { LocalKeySigner, signTx } from './sdk/nb2/evm.js';
 import { RecoveryAuthority, RecoverySession } from './sdk/nb2/recovery.js';
 import { EvmReader, HttpJsonRpc, RpcError } from './sdk/nb2/rpc.js';
 import { checkSegmentLog, encodeHistory, GapTree, genesisHead, nextHead, type Segment } from './sdk/nb2/segment.js';
-import { burnPredicate, decodeToken, encodeProof, lineageOf, stateId, signaturePredicate, valueData } from './sdk/nb2/token.js';
+import { burnPredicate, decodeToken, encodeProof, encodeToken, lineageOf, stateId, signaturePredicate, valueData } from './sdk/nb2/token.js';
 import { appendTransfer, certifyChecked, childMint, headOf, localOwner, mintRequest, splitPlan, tokenOfChild, tokenOfMint, transferRequest } from './sdk/nb2/tokenops.js';
 import { decodeUc, TrustInput } from './sdk/nb2/trust.js';
 import { burnTransitionId, encodeReturnData, redemptionId, verifyReturn, verifySplit } from './sdk/nb2/verify.js';
@@ -630,8 +630,28 @@ function tokenUcs(token: Uint8Array) {
   return [backing.proof.uc, ...levels.flatMap(l => [l.mintProof.uc, ...l.proofs.map(p => p.uc)])];
 }
 
+function anotherPresentation(evidence: Uint8Array) {
+  const token = decodeToken(evidence);
+  const terminal = token.proofs.at(-1)!;
+  const uc = terminal.uc;
+  const witnesses = scanNative(uc).kids[0].kids[6].kids[0].kids[7];
+  assert(witnesses.major === 5 && witnesses.arg < 16n);
+  const label = ascii('t7-nonmember-witness');
+  assert(!decodeUc(uc).unicitySeal.witnesses?.has(Buffer.from(label).toString()));
+  const entries: { key: Uint8Array; signature: Uint8Array }[] = [];
+  for (let i = 0; i < witnesses.kids.length; i += 2) {
+    entries.push({ key: raw(uc, witnesses.kids[i]), signature: raw(uc, witnesses.kids[i + 1]) });
+  }
+  // The extra witness contributes zero weight, and every original signature is unchanged.
+  entries.push({ key: concat(head(3, label.length), label), signature: cBytes(new Uint8Array(65)) });
+  entries.sort((a, b) => a.key.length - b.key.length || Buffer.compare(a.key, b.key));
+  terminal.uc = concat(uc.subarray(0, witnesses.start), head(5, entries.length),
+    ...entries.flatMap(({ key, signature }) => [key, signature]), uc.subarray(witnesses.end));
+  return encodeToken(token);
+}
+
 async function createLoadClaims(label: string, count: number, recipient: Uint8Array, minIndex: bigint,
-  skew: boolean, allowUnskewedLast = false) {
+  skew: boolean, captureBeforeCertification = false) {
   const { GatewayAggregator } = await import('./wallet/core.js');
   const walletAgg = new GatewayAggregator(aggregator);
   const amount = BigInt(count);
@@ -644,6 +664,10 @@ async function createLoadClaims(label: string, count: number, recipient: Uint8Ar
   const dep = await certifyReceipt(label, deposit, c.vault, {
     topics: [TOPIC.Deposited, u256(depositNumber)], data: depositedData(domain, amount, rho, firstOwner),
   });
+  const beforeCertification = captureBeforeCertification
+    ? await reader.rpc.call<{ hash: string; number: string }>('eth_getBlockByNumber', ['finalized', false])
+    : undefined;
+  if (beforeCertification) assert(BigInt(beforeCertification.number) >= BigInt(deposit.blockNumber));
   const root = mintRequest({ network: c.network, recipient: signaturePredicate(owner.publicKey),
     salt: depositSalt(domain, depositNumber, secret), type: c.ty,
     justification: encodeReceiptBacking({ d: domain, n: depositNumber, r: secret, proof: dep.proof }),
@@ -680,7 +704,7 @@ async function createLoadClaims(label: string, count: number, recipient: Uint8Ar
         recipient: burnPredicate(HU(data)), mask: randomBytes(32), data, deadline: null,
       });
       const eta = redemptionId(domain, burnTransitionId(sid, HU(request.tx)));
-      if (!skew || (allowUnskewedLast && i === count - 1) || (eta[0] >> 4) === 0) {
+      if (!skew || (captureBeforeCertification && i === count - 1) || (eta[0] >> 4) === 0) {
         burns.push(request);
         break;
       }
@@ -697,7 +721,7 @@ async function createLoadClaims(label: string, count: number, recipient: Uint8Ar
       concat(new Uint8Array(12), recipient)], data: u256(1) } };
   }));
   assert.equal(new Set(claims.map(({ verdict }) => hex(verdict.eta))).size, count);
-  return { claims, trust };
+  return { claims, trust, beforeCertification };
 }
 
 async function runQualificationCustody() {
@@ -712,13 +736,34 @@ async function runQualificationCustody() {
   const initialBalance = await reader.balance(c.vault);
   assert.equal(initial.segment, 0n);
   assert.equal(initial.population, 0n);
-  const { claims, trust } = await createLoadClaims('deposit', n + 1, recipient, 0n, skew, true);
+  const { claims, trust, beforeCertification } = await createLoadClaims('deposit', n + 1, recipient, 0n, skew, true);
   const target = claims[0], late = claims[n];
+  const ordinaryCall = (claim: typeof target, history: Uint8Array = new Uint8Array()) =>
+    redeemCalldata(claim.evidence, claim.verdict.eta, claim.verdict.minSegment, history);
+  assert(beforeCertification);
+  const at = { blockHash: beforeCertification.hash, requireCanonical: true };
+  const readRegistry = async (name: string) => {
+    const slot = hex(HE(ascii('unicity.seal-registry/' + name)));
+    return BigInt(await reader.rpc.call<string>('eth_getStorageAt', [registry, slot, at]));
+  };
+  const importedTip = await readRegistry('b1.importedTipEpoch');
+  const formerClock = await readRegistry('clock.rootRound');
+  const terminalSeal = decodeUc(decodeToken(target.evidence).proofs.at(-1)!.uc).unicitySeal;
+  assert.equal(terminalSeal.epoch, importedTip);
+  assert(terminalSeal.rootChainRoundNumber > formerClock);
+  await reader.rpc.call('eth_call', [{ from: funded, to: vault, data: hex(ordinaryCall(target)),
+    gas: '0x16e3600' }, at]);
+  json('authority-open-tip.json', { ...beforeCertification, importedTip, formerClock,
+    round: terminalSeal.rootChainRoundNumber, eta: hex(target.verdict.eta), calldata: 'paid-target.calldata' });
   const recovered = await completeRecovery({ ...target, trust }, 'eviction-run');
   const recoveredPacket = await recovered.session.gaps('redeemRecovered', recovered.trust,
     recovered.prior.receipt, { seq: recovered.prior.seq }, []);
-  const ordinaryCall = (claim: typeof target, history: Uint8Array = new Uint8Array()) =>
-    redeemCalldata(claim.evidence, claim.verdict.eta, claim.verdict.minSegment, history);
+  const altEvidence = anotherPresentation(target.evidence);
+  assert.deepEqual(await verifyReturn(gamma, altEvidence, trust, PRODUCTION_PARAMS), target.verdict);
+  const alternative = await completeRecovery({ evidence: altEvidence, trust, paid: target.paid }, 'same-eta-run');
+  assert.notEqual(hex(alternative.session.id), hex(recovered.session.id));
+  const alternativePacket = await alternative.session.gaps('redeemRecovered', alternative.trust,
+    alternative.prior.receipt, { seq: alternative.prior.seq }, []);
   const replayReceipt = await send('paid-target', vault, ordinaryCall(target),
     0n, '0x1', signer, 24_000_000n, signerEpoch(tokenUcs(target.evidence)));
   await certifyReceipt('paid-target', replayReceipt, c.vault, target.paid);
@@ -735,6 +780,9 @@ async function runQualificationCustody() {
   }
   await evmRefusal('before-ordinary', ordinaryCall(target), 'AlreadyPaid(bytes32)', target.verdict.eta);
   await evmRefusal('before-recovered', recoveredPacket.calldata, 'AlreadyPaid(bytes32)', target.verdict.eta);
+  await evmRefusal('before-recovered-other-session', alternativePacket.calldata, 'AlreadyPaid(bytes32)', target.verdict.eta);
+  json('same-eta-sessions.json', { eta: hex(target.verdict.eta), sessions: [hex(recovered.session.id), hex(alternative.session.id)],
+    completeLocators: ['eviction-run-' + recovered.prior.seq, 'same-eta-run-' + alternative.prior.seq] });
   const segments: Segment[] = [];
   const sealEvidence: Uint8Array[] = [];
   const h0 = genesisHead(domain, c.K);
