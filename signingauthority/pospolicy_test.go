@@ -9,6 +9,7 @@ import (
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/evmassign"
+	"github.com/unicitynetwork/bft-core/vrschema"
 )
 
 const posChain = 7
@@ -42,12 +43,16 @@ func (f *fakePos) ReadPosDeployment(_ context.Context, q PosQuery) (PosDeploymen
 	if f.err != nil {
 		return PosDeploymentView{}, f.err
 	}
+	v := f.view
 	for _, id := range q.IDs {
 		if !f.bound[id] {
-			return PosDeploymentView{}, fmt.Errorf("VR identity %d does not bind this node with this key", id)
+			if v.Unbound == nil {
+				v.Unbound = map[uint64][20]byte{}
+			}
+			v.Unbound[id] = [20]byte{0x0a} // the identity's VR owner
 		}
 	}
-	return f.view, nil
+	return v, nil
 }
 
 // enrolledOn stands for the completed enrollment of a shard configuration whose chain_id is chain (the fixture enrolls with a hash only).
@@ -432,4 +437,40 @@ func TestStartupPosPolicyConflictAndReuse(t *testing.T) {
 	require.NoError(t, err)
 	require.NotSame(t, a.pos, b.pos)
 	require.NotSame(t, &a.pos.IDs[0], &b.pos.IDs[0])
+}
+
+// A key change or recovery signs the P85 delegation before VR stages the new binding, so VR does not bind the new key yet: the pin is
+// accepted when the registration policy authorizes this authority's binding of that identity for its VR owner, and refused otherwise.
+func TestPosPolicyRekeyNeedsTheBindingAuthorization(t *testing.T) {
+	policy := func(owner [20]byte, id uint64, domain string) Option {
+		return WithRegistrationPolicy(RegistrationPolicy{Deployment: RegistrationDeployment{Network: [32]byte{1}, ChainID: [32]byte{31: posChain}, Registry: [20]byte{3}},
+			Authorized: []RegistrationAuthorization{{Domain: domain, Owner: owner, ID: id, RootNodeID: "root", RootKey: testRootKey(t), Payee: owner}}})
+	}
+	rekey := PosPolicy{IDs: []uint64{9}}
+	for name, c := range map[string]struct {
+		opt Option
+		ok  bool
+	}{
+		"authorized binding":        {policy([20]byte{0x0a}, 9, vrschema.BindingDomainText), true},
+		"another owner":             {policy([20]byte{0x0b}, 9, vrschema.BindingDomainText), false},
+		"another identity":          {policy([20]byte{0x0a}, 8, vrschema.BindingDomainText), false},
+		"a registration, not a key": {policy([20]byte{0x0a}, 0, vrschema.RegisterDomainText), false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a := newPosAuthority(t, newFakePos(), c.opt)
+			err := a.SetPosPolicy(context.Background(), rekey)
+			if c.ok {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorIs(t, err, ErrPosPolicy)
+		})
+	}
+	require.ErrorIs(t, newPosAuthority(t, newFakePos()).SetPosPolicy(context.Background(), rekey), ErrPosPolicy, "no registration policy")
+}
+
+func testRootKey(t *testing.T) []byte {
+	k, err := ethcrypto.GenerateKey()
+	require.NoError(t, err)
+	return ethcrypto.CompressPubkey(&k.PublicKey)
 }

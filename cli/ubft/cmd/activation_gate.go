@@ -61,6 +61,12 @@ func (s posDeploymentSource) ReadPosDeployment(ctx context.Context, q signingaut
 	}
 	d.ChainID.FillBytes(v.ChainID[:])
 	v.Network, v.Election = d.Network, [20]byte(d.Election)
+	for id, owner := range d.Unbound {
+		if v.Unbound == nil {
+			v.Unbound = map[uint64][20]byte{}
+		}
+		v.Unbound[id] = [20]byte(owner)
+	}
 	return v, nil
 }
 

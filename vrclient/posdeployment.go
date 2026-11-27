@@ -11,7 +11,8 @@ package vrclient
 //     recorded for it;
 //   - the election is the adapter's ELECTION(). The adapter's VR() and the election's registry slot point back to VR, both sides name
 //     the same custody (VR's liability holder), the election's hook caller is the adapter, and the election reports VR's network word;
-//   - each id is a VR identity whose current or staged binding names the authority's EVM node and key together.
+//   - each id is a VR identity; the ids whose current or staged binding does not name the authority's EVM node and key together are
+//     reported with their VR owner (Unbound).
 //
 // A malicious execution client can still fabricate these replies. The reader trusts it as the fence does; it is not a proof.
 
@@ -66,14 +67,17 @@ type PosDeployment struct {
 	ChainID  *big.Int
 	Election ethcommon.Address
 	Custody  ethcommon.Address
+	// Unbound are the queried ids whose VR bindings do not name the node with the key, with each one's VR owner: a key change or a
+	// recovery, whose P85 delegation precedes the VR binding proposal (the caller decides whether its configuration authorizes that).
+	Unbound map[uint64]ethcommon.Address
 }
 
 func unavailable(what string, err error) error {
 	return fmt.Errorf("%w: %s: %w", ErrPosUnavailable, what, err)
 }
 
-// Read derives the deployment and checks that every id's VR binding names evmNodeID with evmKey. A failure wrapped in
-// ErrPosUnavailable may be retried; any other failure is a deployment, or an id, that is not this authority's.
+// Read derives the deployment and reports which ids' VR bindings do not name evmNodeID with evmKey. A failure wrapped in
+// ErrPosUnavailable may be retried; any other failure is a deployment that is not this generation's.
 func (r PosDeploymentReader) Read(ctx context.Context, evmNodeID string, evmKey []byte, ids []uint64) (PosDeployment, error) {
 	var out PosDeployment
 	if r.RPC == nil || r.GenesisHash == nil || r.RegistryCode == nil {
@@ -215,7 +219,10 @@ func (r PosDeploymentReader) Read(ctx context.Context, evmNodeID string, evmKey 
 			return out, fmt.Errorf("%w: VR has no identity %d at block %s", ErrPosUnavailable, id, head.Hash.Hex())
 		}
 		if !names(v.Current) && (v.StagedRef == ([32]byte{}) || !names(v.Staged)) {
-			return out, fmt.Errorf("%w: VR identity %d binds neither in its current nor in its staged binding this node with this key", ErrVR, id)
+			if out.Unbound == nil {
+				out.Unbound = map[uint64]ethcommon.Address{}
+			}
+			out.Unbound[id] = v.Owner
 		}
 	}
 	return out, nil

@@ -197,15 +197,9 @@ func TestPosDeploymentRefusals(t *testing.T) {
 		"election hook not adapter": {mutate: func(c *posChain, _ *PosDeploymentReader) { c.hook = common.HexToAddress("0xab") }},
 		"election of another VR":    {mutate: func(c *posChain, _ *PosDeploymentReader) { c.registry = common.HexToAddress("0xab") }},
 		"election has no code":      {mutate: func(c *posChain, _ *PosDeploymentReader) { c.electCode = nil }},
-		"id bound to another key": {mutate: func(c *posChain, _ *PosDeploymentReader) {
-			c.identities[5] = IdentityView{Generation: 1, Current: boundTo(testNode, []byte{9})}
-		}},
-		"node and key in different bindings": {mutate: func(c *posChain, _ *PosDeploymentReader) {
-			c.identities[5] = IdentityView{Generation: 1, Current: boundTo(testNode, []byte{9}), StagedRef: [32]byte{1}, Staged: boundTo("other", testKey)}
-		}},
-		"id not registered yet": {mutate: func(c *posChain, _ *PosDeploymentReader) { delete(c.identities, 5) }, pending: true},
-		"endpoint down":         {mutate: func(c *posChain, _ *PosDeploymentReader) { c.fail = "eth_call" }, pending: true},
-		"chain id unavailable":  {mutate: func(c *posChain, _ *PosDeploymentReader) { c.fail = "eth_chainId" }, pending: true},
+		"id not registered yet":     {mutate: func(c *posChain, _ *PosDeploymentReader) { delete(c.identities, 5) }, pending: true},
+		"endpoint down":             {mutate: func(c *posChain, _ *PosDeploymentReader) { c.fail = "eth_call" }, pending: true},
+		"chain id unavailable":      {mutate: func(c *posChain, _ *PosDeploymentReader) { c.fail = "eth_chainId" }, pending: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := newPosChain()
@@ -224,4 +218,23 @@ func TestPosDeploymentRefusals(t *testing.T) {
 	}
 	_, err := PosDeploymentReader{RPC: posRPC{newPosChain()}}.Read(context.Background(), testNode, testKey, []uint64{5})
 	require.ErrorIs(t, err, ErrVR, "the genesis and VR code pins are required")
+}
+
+// An id whose bindings do not name the node with the key (in one binding) is reported with its owner, for the caller to judge.
+func TestPosDeploymentReportsUnboundIDs(t *testing.T) {
+	owner := common.HexToAddress("0x0a")
+	for name, v := range map[string]IdentityView{
+		"bound to another key":       {Owner: owner, Generation: 1, Current: boundTo(testNode, []byte{9})},
+		"node and key in two places": {Owner: owner, Generation: 1, Current: boundTo(testNode, []byte{9}), StagedRef: [32]byte{1}, Staged: boundTo("other", testKey)},
+		"staged binding not staged":  {Owner: owner, Generation: 1, Current: boundTo("old", []byte{9}), Staged: boundTo(testNode, testKey)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := newPosChain()
+			c.identities[5] = IdentityView{Generation: 1, Current: boundTo(testNode, testKey)}
+			c.identities[6] = v
+			d, err := c.pins().Read(context.Background(), testNode, testKey, []uint64{5, 6})
+			require.NoError(t, err)
+			require.Equal(t, map[uint64]common.Address{6: owner}, d.Unbound)
+		})
+	}
 }
