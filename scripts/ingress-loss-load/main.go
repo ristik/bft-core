@@ -1,4 +1,4 @@
-// ingress-loss-load supplies a single f8batch transition from each load-only shard.
+// ingress-loss-load supplies consecutive f8batch transitions from one load-only shard.
 // The EVM shard uses its own validators and never uses this generator.
 package main
 
@@ -32,11 +32,12 @@ func main() {
 	roots := flag.String("roots", "", "comma-separated loopback root multiaddresses")
 	ready := flag.String("ready", "", "file created when the pre-state is certified")
 	start := flag.String("start", "", "file that starts the batch")
+	stop := flag.String("stop", "", "file that ends the stream after certification")
 	keyBit := flag.Int("key-bit", -1, "first key bit for a split shard")
 	flag.Parse()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	if err := run(ctx, *conf, *keys, *roots, *ready, *start, *keyBit); err != nil {
+	if err := run(ctx, *conf, *keys, *roots, *ready, *start, *stop, *keyBit); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -49,7 +50,7 @@ func readJSON(path string, dst any) error {
 	return json.Unmarshal(data, dst)
 }
 
-func run(ctx context.Context, confPath, keyPath, addresses, ready, start string, keyBit int) error {
+func run(ctx context.Context, confPath, keyPath, addresses, ready, start, stop string, keyBit int) error {
 	var conf types.PartitionDescriptionRecord
 	if err := readJSON(confPath, &conf); err != nil {
 		return err
@@ -108,7 +109,7 @@ func run(ctx context.Context, confPath, keyPath, addresses, ready, start string,
 	pre := batch.PreRoot()
 	var last *certification.CertificationResponse
 	var sentRound uint64
-	sent := make(map[[32]byte]bool)
+	sent := make(map[string]uint64)
 	prepared := false
 	poll := time.NewTicker(100 * time.Millisecond)
 	defer poll.Stop()
@@ -142,9 +143,15 @@ func run(ctx context.Context, confPath, keyPath, addresses, ready, start string,
 			continue
 		}
 		prev := last.UC.InputRecord.Hash
-		if len(prev) == 32 && sent[[32]byte(prev)] {
+		if ref, ok := sent[string(prev)]; ok {
 			log.Printf("batch certified shard=%s round=%d root_round=%d state=%x", conf.ShardID, last.UC.GetRoundNumber(), last.UC.GetRootRoundNumber(), prev)
-			return nil
+			if _, err := os.Stat(stop); err == nil {
+				return nil
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			batch = batch.Next(ref)
+			clear(sent)
 		}
 		if !prepared && bytes.Equal(pre[:], prev) {
 			if err := os.WriteFile(ready, nil, 0600); err != nil {
@@ -174,7 +181,7 @@ func run(ctx context.Context, confPath, keyPath, addresses, ready, start string,
 			}
 			log.Printf("batch sent partition=%s shard=%s round=%d bytes=%d pre=%d inserted=%d state=%x",
 				conf.PartitionID, conf.ShardID, tr.Round, stats.Bytes, stats.PreLeaves, stats.Inserted, hash)
-			sent[hash] = true
+			sent[string(hash[:])] = ref
 		}
 		req := &certification.BlockCertificationRequest{
 			PartitionID: conf.PartitionID, ShardID: conf.ShardID, NodeID: id, ZkProof: proof,

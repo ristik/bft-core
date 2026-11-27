@@ -64,10 +64,7 @@ loss_load_ready() {
 }
 
 loss_drop_seen() {
-  jq -s -er '[.[] | select(.kind=="drop" and .rule=="evm-loss" and .blockHash)] |
-    group_by([.round,.blockHash]) | map(select([.[].node] | unique | length >= 3)) |
-    .[0][0] // empty | [.round,.blockHash] | @tsv' \
-    "$Q4_SHIM_DIR"/root*/shard-trace.jsonl 2>/dev/null
+  python3 scripts/ingress-loss-evidence.py select "$Q4_SHIM_DIR" 2>/dev/null
 }
 
 loss_receipts_at() {
@@ -85,18 +82,11 @@ loss_followers_at() {
 }
 
 loss_repeat_proposed() {
-  local i
-  for i in 1 2 3 4 5; do
-    if tail -n "+${loss_log_start[$i]}" "test-nodes/root$i/debug.log" | grep 'broadcast proposal.*00000008->timeout' >/dev/null; then
-      return 0
-    fi
-  done
-  return 1
+  python3 scripts/ingress-loss-evidence.py proposal test-nodes "$1" 2>/dev/null
 }
 
 loss_run() {
-  local roots= i logfile tx expected= loss_target loss_tx drop_seen loss_round dropped_block
-  local -a loss_log_start=()
+  local roots= i tx expected= loss_target loss_tx drop_seen loss_round dropped_block first_drop repeat_root
   mkdir -p "$Q4_SHIM_DIR"
   for i in 1 2 3 4 5; do
     roots+=${roots:+,}$(boot_node "test-nodes/root$i" "$((rootPortStart+i-1))")
@@ -105,6 +95,7 @@ loss_run() {
   for i in 0 1 2; do
     "$INGRESS_LOSS_LOAD_BIN" -conf "test-nodes/shard-conf-load$i.json" -keys "test-nodes/load$i/keys.json" \
       -roots "$roots" -key-bit "${loss_key_bits[$i]}" -ready "$Q4_SHIM_DIR/load$i.ready" -start "$Q4_SHIM_DIR/batch.start" \
+      -stop "$Q4_SHIM_DIR/batch.stop" \
       >"$Q4_SHIM_DIR/load$i.log" 2>&1 &
     loss_load_pids+=("$!")
   done
@@ -120,6 +111,8 @@ loss_run() {
   loss_wait 60 "bootstrap did not apply to every validator" loss_followers_at 1 2 3 4 5 || return 1
   loss_gate "{'rules':[{'name':'evm-loss','direction':'in','partition':8,'types':['request'],'action':'drop'}]}" || return 1
   loss_event "all root ingress gates armed"
+  touch "$Q4_SHIM_DIR/batch.start" || return 1
+  loss_event "started f8batch traffic before seeding the EVM attempt"
   export EVM_VALIDATOR_LOG_LEVEL=debug
   for i in 1 2 3 4 5; do
     tx=$(lane_go_run evmtx -send -eth-url "$(loss_eth "$i")" -chain-id "$postM2aChainID" -nonce 3) || return 1
@@ -127,8 +120,8 @@ loss_run() {
     expected=$tx
   done
   loss_event "pending transaction $tx seeded at all five validators"
-  drop_seen=$(loss_wait 35 "three validators never sent matching requests into the drop" loss_drop_seen) || return 1
-  read -r loss_round dropped_block <<< "$drop_seen"
+  drop_seen=$(loss_wait 35 "no ingress received a fully dropped request quorum" loss_drop_seen) || return 1
+  read -r loss_round dropped_block first_drop <<< "$drop_seen"
   [[ "$loss_round" =~ ^[0-9]+$ && "$dropped_block" =~ ^[0-9a-f]{64}$ ]] || return 1
   loss_target=$(loss_block 5) || return 1
   local before=$loss_target
@@ -139,13 +132,10 @@ loss_run() {
   loss_event "validator 5 stopped at $before; its reth stays running"
 
   for i in 1 2 3 4 5; do
-    logfile="test-nodes/root$i/debug.log"
-    loss_log_start[$i]=$(( $(wc -l <"$logfile") + 1 ))
     jq -e '.held | length == 0' "$Q4_SHIM_DIR/root$i/shard-status.json" >/dev/null || return 1
   done
   loss_event "dropped request quorum round=$loss_round block=0x$dropped_block; gates held no requests"
-  loss_wait 30 "no EVM T2 proposal under the batch load" loss_repeat_proposed || return 1
-  touch "$Q4_SHIM_DIR/batch.start"
+  repeat_root=$(loss_wait 30 "no EVM T2 proposal after the first drop" loss_repeat_proposed "$first_drop") || return 1
   loss_gate "{'rules':[{'name':'lost-round','direction':'in','partition':8,'types':['request'],'round':$loss_round,'action':'drop'}]}" || return 1
   loss_event "fresh EVM ingress reopened after the T2 proposal; round $loss_round remains dropped"
 
@@ -156,19 +146,10 @@ loss_run() {
     sleep 0.2
   done
   [ -n "$loss_target" ] || { fail "pending transaction was not applied"; return 1; }
-  local retained
-  retained=$(grep -hE 'shard request retained.*shard.partition=8 .*blockHash='"${loss_target#0x}"'([[:space:]]|$)' test-nodes/root*/debug.log |
-    sed -n 's/.*requestRound=\([0-9]*\).*/\1/p' | sort -n | head -1)
-  [[ "$retained" =~ ^[0-9]+$ ]] && ((retained > loss_round)) ||
-    { fail "the certified transaction did not come from a fresh retained request"; return 1; }
-  if grep -hE 'shard request retained.*shard.partition=8 .*requestRound='"$loss_round"' blockHash='"$dropped_block"'([[:space:]]|$)' \
-    test-nodes/root*/debug.log >/dev/null; then
-    fail "an ingress root retained the dropped request"
-    return 1
-  fi
   loss_tx=$tx
   loss_wait 30 "available executors did not apply the same block" loss_receipts_at 1 2 3 4 || return 1
   loss_event "available validators applied transaction=$tx block=$loss_target"
+  touch "$Q4_SHIM_DIR/batch.stop" || return 1
   [ "$(loss_block 5)" = "$before" ] || { fail "validator 5 had already applied the decision"; return 1; }
   rpc "$(loss_eth 5)" eth_getBlockByHash "[\"$loss_target\",false]" | jq -e 'has("result") and .result == null' >/dev/null ||
     { fail "validator 5's reth already has the missed block"; return 1; }
@@ -190,7 +171,9 @@ loss_run() {
 
   for i in 0 1 2; do
     wait "${loss_load_pids[$i]}" || return 1
-    grep 'batch certified' "$Q4_SHIM_DIR/load$i.log" || return 1
+    grep 'batch certified' "$Q4_SHIM_DIR/load$i.log" | tail -1 || return 1
   done
   loss_load_pids=()
+  python3 scripts/ingress-loss-evidence.py verify "$Q4_SHIM_DIR" test-nodes "$loss_round" "$dropped_block" \
+    "${before#0x}" "${loss_target#0x}" "$tx" "$repeat_root" | tee -a "$Q4_SHIM_DIR/window.log"
 }

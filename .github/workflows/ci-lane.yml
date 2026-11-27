@@ -517,6 +517,7 @@ jobs:
           set -euo pipefail
           for c in jq rsync zstd; do command -v "$c" >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq "$c"; }; done
           python3 scripts/ci/classify.py selftest
+          bash scripts/test-ingress-loss-window.sh
           scripts/ci/gate.sh selftest
           scripts/ci/check-pins.sh selftest
           scripts/ci/lane-product.sh selftest
