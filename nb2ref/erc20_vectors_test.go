@@ -14,7 +14,7 @@ type erc20Vector struct {
 	Held, Evidence, Verdict, Packet, Complete, ReturnProof     string
 }
 
-var erc20SemanticProfileHash = [32]byte(mustHex("99773bbdfde2fa77cf43e029b61086a7eb121adfe57097872fc6ea9f0497e4d9"))
+var erc20SemanticProfileHash = [32]byte(mustHex("f05dd5c3563165d73c1cf91a5af79ec7afcaa77edc90061c6e7666bf53a8b0b6"))
 
 func TestERC20FlatReturnVectors(t *testing.T) {
 	h := func(b []byte) string { return "0x" + hex.EncodeToString(b) }
