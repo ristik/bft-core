@@ -237,6 +237,8 @@ def join_committee(r, rec, ev, j, val, auth, owner, owner_key, epoch, shard_epoc
     before = rec.auth_status(j)
     if rec.root_view(j)['activeEpoch'] < missed:
         r.say(f'  joiner {j}: its root is still a follower; installing verified root epoch {missed}')
+        if os.environ.get('VR_LATE_JOINER_UNAVAILABLE_PROOF') == '1':
+            probe_unavailable_activation(r, rec, j, override_path, epoch, missed, ev)
         install_joiner_root(rec, j, override_path, missed)
     r.wait(f"the joiner's root follows missed root epoch {missed}",
            lambda: rec.root_view(j)['activeEpoch'] >= missed, 300)
@@ -299,17 +301,46 @@ def join_committee(r, rec, ev, j, val, auth, owner, owner_key, epoch, shard_epoc
     r.say(f'  joiner {j}: member from root epoch {target}, led {len(rounds)} round(s), largest block gap {gap} s')
 
 
-def install_joiner_root(rec, j, override_path, epoch):
-    """As the validator container does, keep the follower's DB and install the observed epoch from its peers."""
+def install_joiner_root(rec, j, override_path, epoch, *, probe=False):
+    """Reopen the existing follower DB, optionally requesting one verified activation from peers."""
     override = json.loads(override_path.read_text())
     service = f'root{j}'
-    entry = override['services'][service]['entrypoint']
-    if '--install-handoff-epoch' in entry:
-        entry[entry.index('--install-handoff-epoch') + 1] = str(epoch)
-    elif epoch > 1:
+    root = override['services'][service]
+    entry = root['entrypoint']
+    for flag in ('--install-handoff-epoch', '--install-handoff-wait'):
+        if flag in entry:
+            idx = entry.index(flag)
+            del entry[idx:idx + 2]
+    if epoch is not None and epoch > 1:
         entry += ['--install-handoff-epoch', str(epoch)]
+    if probe:
+        # A remote proof cannot be fetched within this deadline. Observe the
+        # exit so Compose cannot retry the bad invocation itself.
+        entry += ['--install-handoff-wait', '1ns']
+        root['restart'] = 'no'
+    elif root.get('restart') == 'no':
+        root['restart'] = 'unless-stopped'
     override_path.write_text(json.dumps(override, indent=1, sort_keys=True) + '\n')
     rec.dc('up', '-d', '--no-deps', service)
+
+
+def probe_unavailable_activation(r, rec, j, override_path, previous, target, ev):
+    service = f'root{j}'
+    others = [f'{name}{j}' for name in ('shard', 'ureth', 'authority')]
+    before = [rec.container(name) for name in others]
+    r.expect(all(before), 'the joiner’s shard, execution and authority are running before the failed install')
+    install_joiner_root(rec, j, override_path, target, probe=True)
+    r.wait('the follower exits when the activation proof cannot be fetched',
+           lambda: rec.dc('ps', '-a', '--status', 'exited', '-q', service).stdout.strip(), 60)
+    r.keep_redacted(ev / 'unavailable-activation.log', rec.dc('logs', '--no-color', service).stdout)
+    install_joiner_root(rec, j, override_path, None)
+    view = r.wait('the follower reopens the old database after the failed install',
+                  lambda: rec.root_view(j), 60)
+    r.expect(view['activeEpoch'] == previous and view.get('follower') and
+             before == [rec.container(name) for name in others],
+             'a failed hinted install leaves the shard, execution and authority running and the follower restarts at its old epoch', view)
+    # Match the supervisor's backoff before trying the real installation again.
+    time.sleep(60)
 
 
 def advance_joiner(rec, j, auth, target, live, *, scope_only=False):
@@ -444,10 +475,12 @@ def vr_joiner_exit(r):
     r.expect(all(t['to'] == custody and t['status'] == '0x1' for t in sent), 'every one of them went to custody and succeeded', json.dumps(sent)[:300])
 
 
-def publication_summary(txs):
+def publication_summary(txs, *, exclude=()):
     """Per result: how many finalizeCandidate and VR.publish transactions were sent, how many reverted, and their gas."""
     out = {}
     for t in txs:
+        if t['result'] in exclude:
+            continue
         k = out.setdefault(t['result'], {'finalizeCandidate': 0, 'finalizeReverted': 0, 'VR.publish': 0, 'publishReverted': 0, 'gas': 0, 'wastedGas': 0})
         k[t['kind']] += 1
         k['gas'] += t['gasUsed']
@@ -475,6 +508,7 @@ def vr_finalizer(r):
         extra = {state['index']: (state['identity'], Path(state['home']), Path(state['auth']))}
         pods = {state['index']: 1}
     report = {}
+    before_results = set()
     # 'after' names the default step (180 s since the second #1323 lane run) explicitly, so a run against an image built before it measures the
     # same order
     for name, step in (('before', '0s'), ('after', '180s')):
@@ -485,7 +519,9 @@ def vr_finalizer(r):
         target = rec.participate_polling(epoch, rec.participants(extra=extra), pods=pods, outputs=outputs)
         last = int(r.call('eth_blockNumber'), 16)
         txs = rec.publication_txs(first, last)
-        summary = publication_summary(txs)
+        summary = publication_summary(txs, exclude=before_results)
+        if name == 'before':
+            before_results = set(summary)
         report[name] = {'finalizerStep': step or 'default', 'rootEpoch': target, 'blocks': [first, last], 'results': summary, 'txs': txs}
         (ev / f'participation-{name}.json').write_text(json.dumps(outputs, indent=1) + '\n')
         totals = {k: sum(v[k] for v in summary.values()) for k in ('finalizeCandidate', 'finalizeReverted', 'VR.publish', 'publishReverted', 'wastedGas')}

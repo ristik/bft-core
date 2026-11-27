@@ -2,12 +2,14 @@ import hashlib
 import importlib.util
 import io
 import json
+import re
+import subprocess
 from pathlib import Path
 import tarfile
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import generate
 import handoff_ops
@@ -466,6 +468,14 @@ class VRRecoverStage(unittest.TestCase):
         self.assertEqual(out['0xr'], {'finalizeCandidate': 3, 'finalizeReverted': 2, 'VR.publish': 2, 'publishReverted': 0,
                                       'gas': 1951, 'wastedGas': 951})
 
+    def test_finalizer_after_run_ignores_previous_result_transactions(self):
+        import vr_late_joiner
+        old = {'result': '0xold', 'kind': 'VR.publish', 'status': '0x0', 'gasUsed': 80}
+        fresh = {'result': '0xnew', 'kind': 'VR.publish', 'status': '0x1', 'gasUsed': 100}
+        summary = vr_late_joiner.publication_summary([old, fresh], exclude={'0xold'})
+        self.assertEqual(set(summary), {'0xnew'})
+        self.assertEqual(summary['0xnew']['wastedGas'], 0)
+
 # The execution client's arguments that are the node's own: its data directory, key, JWT and listeners, and the local RPC surface. Every
 # other argument binds it to the chain and must be the genesis ureths' (#1321).
 LOCAL_URETH_FLAGS = frozenset({'--chain', '--datadir', '--p2p-secret-key', '--authrpc.jwtsecret', '--authrpc.addr', '--authrpc.port',
@@ -725,6 +735,97 @@ class JoinInOneRun(unittest.TestCase):
             root.side_effect = [{'activeEpoch': 3, 'follower': True}, {'activeEpoch': 4, 'follower': False}]
             registry.return_value = 4
             self.assertIsNone(validator.joiner_root_catchup_epoch())
+
+    def test_unavailable_hinted_activation_backs_off_without_stopping_other_services(self):
+        (self.home/'network.json').write_text(json.dumps({'rpc': 'http://127.0.0.1:8545'}))
+        (self.home/'authority/fingerprint').touch()
+        launched = []
+        now = [0]
+
+        class EndOfTest(Exception):
+            pass
+
+        def popen(args, **kwargs):
+            proc = Mock()
+            proc.poll.return_value = None
+            proc.returncode = None
+            launched.append((args, proc))
+            return proc
+
+        def check_running():
+            for index in (0, 1, 3):  # RPC, execution and shard
+                launched[index][1].terminate.assert_not_called()
+
+        def health_request():
+            if now[0] == 0:
+                self.assertEqual(launched[-1][0][-2:], ['--install-handoff-epoch', '4'])
+                launched[-1][1].poll.return_value = launched[-1][1].returncode = 1
+                now[0] = 1
+            elif now[0] == 1:
+                self.assertEqual(launched[-1][0][:2], ['ubft', 'root'])
+                self.assertNotIn('--install-handoff-epoch', launched[-1][0])
+                check_running()
+                now[0] = 60
+            elif now[0] == 60:
+                self.assertEqual(len(launched), 6, 'no retry during the backoff')
+                check_running()
+                now[0] = 61
+            else:
+                self.assertEqual(launched[-1][0][-2:], ['--install-handoff-epoch', '4'])
+                self.assertEqual(len(launched), 7)
+                check_running()
+                raise EndOfTest
+
+        health = Mock()
+        health.__enter__ = Mock(return_value=health)
+        health.__exit__ = Mock(return_value=False)
+        health.handle_request.side_effect = health_request
+        with patch.object(validator, 'bootstrap'), patch.object(validator, 'link_authority'), \
+                patch.object(validator, 'wait_for'), patch.object(validator, 'root_command', return_value=['ubft', 'root']), \
+                patch.object(validator, 'shard_command', return_value=['ubft', 'shard']), \
+                patch.object(validator, 'ureth_command', return_value=['ureth']), patch.object(validator, 'HTTPServer', return_value=health), \
+                patch.object(validator.threading, 'Thread'), patch.object(validator.signal, 'signal'), \
+                patch.object(validator.time, 'monotonic', side_effect=lambda: now[0]), \
+                patch.object(validator.subprocess, 'Popen', side_effect=popen), \
+                patch.object(validator, 'joiner_root_catchup_epoch', return_value=4):
+            with self.assertRaises(EndOfTest):
+                validator.node(None, {})
+
+    def test_handbook_enrolls_at_root_epoch_two(self):
+        handbook = (Path(__file__).resolve().parents[2]/'docs/operations/validator-handbook.md').read_text()
+        refresh = re.search(r'^advance_authority_from_local_root\(\) \(.*?^\)', handbook, re.M | re.S).group()
+        enroll = re.search(r'^install_authority_scope\(\) \(.*?^\)', handbook, re.M | re.S).group()
+        shell = r"""
+set -e
+ACTIVATED_ROOT_EPOCH=2
+ACTIVATED_SHARD_EPOCH=1
+HANDOFF_MODE=enroll
+HANDOFF_UBFT=handoff_ubft
+AUTH=()
+ubft() {
+  if [[ "$1 $2" == "q3 proof-envelope" ]]; then
+    [[ "$6" == 2 ]] || return 1
+    echo "proof $6"
+  else
+    printf '{"epoch":1}\n' >"${@: -1}"
+  fi
+}
+handoff_ubft() {
+  case "$2" in
+    status) printf '{"lineageEpoch":1}\n' ;;
+    complete-enrollment) echo complete ;;
+    advance-with-proof) echo advance ;;
+    *) return 1 ;;
+  esac
+}
+"""
+        # A stub jq keeps the doctest independent of system package installation.
+        shell += '\njq() { local text; if [[ "${@: -1}" == *.json ]]; then test -s "${@: -1}"; else cat >/dev/null; echo 1; fi; }\n'
+        with tempfile.TemporaryDirectory() as d:
+            done = subprocess.run(['bash', '-c', f'UBFT_HOME="$1"\n{shell}\n{refresh}\n{enroll}\ninstall_authority_scope',
+                                   'handbook', d], text=True, capture_output=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stdout.splitlines(), ['complete', 'proof 2', 'advance'])
 
     def test_join_refreshes_the_same_authority_after_a_missed_activation(self):
         path = self.home/'join.json'

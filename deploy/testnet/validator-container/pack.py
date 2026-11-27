@@ -4,6 +4,7 @@ import argparse
 import gzip
 import hashlib
 import json
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -33,8 +34,20 @@ def main():
         stage.mkdir()
         for name in ('root-peers.txt','shard-peers.txt'):
             shutil.copyfile(a.peers/name, stage/name)
+        # Export the exact executable built into the image for operators deploying on the host.
+        handoff = stage/'handoff-ubft'
+        labels = image['Config'].get('Labels') or {}
+        revision = labels.get('org.unicity.handoff-ubft.revision', '')
+        if not re.fullmatch(r'[0-9a-f]{40}', revision):
+            cli.error('the validator image has no reviewed handoff-ubft revision')
+        with handoff.open('wb') as file:
+            subprocess.run(['docker', 'run', '--rm', '--network', 'none', '--entrypoint', '/bin/cat',
+                            image['Id'], '/usr/local/bin/handoff-ubft'], stdout=file, check=True)
+        handoff_digest = digest(handoff)
+        if labels.get('org.unicity.handoff-ubft.sha256') != handoff_digest:
+            cli.error('handoff-ubft differs from the image build digest')
         tar = stage/'validator-image.tar.gz'
-        with subprocess.Popen(['docker','save',a.image], stdout=subprocess.PIPE) as child:
+        with subprocess.Popen(['docker','save',image['Id']], stdout=subprocess.PIPE) as child:
             with tar.open('wb') as file, gzip.GzipFile(filename='', mode='wb', fileobj=file, mtime=0) as zipped:
                 shutil.copyfileobj(child.stdout, zipped)
             if child.wait() != 0:
@@ -43,6 +56,7 @@ def main():
             'format':'unicity.validator-container.v1',
             'imageId':image['Id'], 'platform':'linux/amd64',
             'archive':tar.name, 'archiveSha256':digest(tar),
+            'handoffUbftRevision':revision, 'handoffUbftSha256':handoff_digest,
             'sourceReleaseSha256':digest(a.source_release/'SHA256SUMS'),
             'utbGenesisId':(a.source_release/'utb-genesis.id').read_text().strip(),
         }

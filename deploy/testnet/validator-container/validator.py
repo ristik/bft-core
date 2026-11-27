@@ -605,6 +605,7 @@ def node(a, pins):
         shard()
         enrolled = active.read_bytes() if active.exists() else None
         next_root_check = 0.0
+        hinted_install = None
 
         class Health(BaseHTTPRequestHandler):
             def do_GET(self):
@@ -628,21 +629,36 @@ def node(a, pins):
                     stop('shard')
                     shard()
                     enrolled = active.read_bytes()
+                now = time.monotonic()
+                if hinted_install is not None and procs['root'].poll() is not None:
+                    # The hint did not make the proof available. Keep the shard, execution and
+                    # RPC running, and reopen the same root database without a requested epoch.
+                    print(f'validator: root install for epoch {hinted_install} failed; restarting the follower', flush=True)
+                    stop('root')
+                    start('root', root_args)
+                    hinted_install = None
+                    next_root_check = now + 60
                 for name, proc in procs.items():
                     if proc.poll() is not None:
                         raise RuntimeError(f'{name} exited with status {proc.returncode}')
-                if enrolled is None and time.monotonic() >= next_root_check:
-                    next_root_check = time.monotonic() + 30
+                if now >= next_root_check:
+                    next_root_check = now + 30
+                    target = None
                     try:
-                        target = joiner_root_catchup_epoch()
+                        if hinted_install is not None:
+                            view = root_status()
+                            if view and view['activeEpoch'] >= hinted_install:
+                                hinted_install = None
+                        elif enrolled is None:
+                            target = joiner_root_catchup_epoch()
                     except (OSError, ValueError, subprocess.SubprocessError):
-                        target = None
+                        pass
                     if target is not None and not active.exists():
-                        # A follower excluded from the successor may never see that switch in process.
-                        # Keep its database and request exactly one verified installation from peers.
+                        # Request one verified installation from peers on the current database.
                         print(f'validator: catching up the follower root to epoch {target}', flush=True)
                         stop('root')
                         start('root', [*root_args, '--install-handoff-epoch', target])
+                        hinted_install = target
                 health.handle_request()
     finally:
         if 'halted' in locals():

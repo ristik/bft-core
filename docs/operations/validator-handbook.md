@@ -221,6 +221,32 @@ install_release
 
 Continue after all manifest entries verify. The commands below use free local ports 26652 (root), 28152 (shard), 30303 (ureth devp2p), 8545 (Ethereum RPC), 8551 (Engine), 25852 (root status) and 28352 (shard status). Adapt the ports together if these are in use.
 
+Install the host signing CLI from the validator bundle published for this release. Obtain its URL, SHA256SUMS digest and reviewed revision from the authenticated operator announcement. Use the release's `ubft` for the root and shard and the bundle's `handoff-ubft` for authority and join operations.
+
+```bash
+read -rp 'Validator bundle URL: ' VALIDATOR_BUNDLE_URL
+read -rp 'Validator bundle SHA256SUMS digest: ' VALIDATOR_BUNDLE_DIGEST
+read -rp 'Reviewed handoff-ubft commit SHA: ' HANDOFF_REVISION
+HANDOFF_UBFT="$HOME/.local/bin/handoff-ubft"
+install_handoff_ubft() (
+  set -eo pipefail
+  work=$(mktemp -d "$UBFT_HOME/handoff-cli.XXXXXXXX")
+  trap 'rm -rf -- "$work"' EXIT
+  cd "$work"
+  for name in SHA256SUMS manifest.json handoff-ubft; do
+    curl -fsS "${VALIDATOR_BUNDLE_URL%/}/$name" -o "$name"
+  done
+  printf '%s  SHA256SUMS\n' "$VALIDATOR_BUNDLE_DIGEST" | sha256sum -c -
+  awk '$2 == "manifest.json" || $2 == "handoff-ubft"' SHA256SUMS | sha256sum -c -
+  digest=$(jq -er --arg rev "$HANDOFF_REVISION" --arg release "$RELEASE_DIGEST" '
+    select(.handoffUbftRevision == $rev and .sourceReleaseSha256 == $release) | .handoffUbftSha256 | select(test("^[a-f0-9]{64}$"))
+  ' manifest.json)
+  printf '%s  handoff-ubft\n' "$digest" | sha256sum -c -
+  install -m 755 handoff-ubft "$HANDOFF_UBFT"
+)
+install_handoff_ubft
+```
+
 ## 2. Create the operator identity and start the authority
 
 The single-account commands in Sections 2–4 are for the isolated rehearsal. For an external deployment, put the authority and its operator socket, administrative credential and wallet in an administrative security boundary. Run root, shard and ureth as separate unprivileged services. Keep their homes, credentials and backups separate from the administrative files. Restrict the root to the PoP socket and `pop.cred`, and the shard to the certification socket and current `client.cred`. Ureth needs neither endpoint.
@@ -251,7 +277,12 @@ jq -n --arg network "$NETWORK_WORD" --argjson chainId "$CHAIN_ID" \
   '{network:$network,chainId:$chainId,registry:$registry,authorized:[
     {action:"register",owner:$owner,payee:$owner,rootNodeId:$root[0].nodeId,rootKey:$root[0].sigKey}
   ]}' > authority/registration.json
-ubft signing-authority run --home "$UBFT_HOME/authority" --authority-id "$SHARD_NODE" --network-id 3 --partition-id 8 \
+start_pending_authority() (
+  set -eo pipefail
+  "$HANDOFF_UBFT" signing-authority run --help | grep -F -- --pending-join-scope >/dev/null
+  "$HANDOFF_UBFT" validator apply --help | grep -F -- --pin-pos-policy >/dev/null
+  "$HANDOFF_UBFT" signing-authority advance-with-proof --help | grep -F -- --scope-only >/dev/null
+  exec "$HANDOFF_UBFT" signing-authority run --home "$UBFT_HOME/authority" --authority-id "$SHARD_NODE" --network-id 3 --partition-id 8 \
   --shard-id 0x80 --shard-epoch "$NEXT_SHARD_EPOCH" --root-epoch 1 --node-id "$SHARD_NODE" \
   --trust-base "$UBFT_HOME/release/trust-base.json" \
   --client-socket "$UBFT_HOME/authority/client.sock" \
@@ -261,7 +292,9 @@ ubft signing-authority run --home "$UBFT_HOME/authority" --authority-id "$SHARD_
   --pending-join-scope --lineage-genesis-trust-base "$UBFT_HOME/release/trust-base.json" --lineage-utb-genesis \
   --b1-profile "$UBFT_HOME/release/b1-profile.json" --activation-source-url http://127.0.0.1:8545 \
   --execution-genesis-hash "$(jq -er '.genesis_hash' release/manifest.json)" \
-  --metrics-address 127.0.0.1:29352 >logs/authority.log 2>&1 &
+  --metrics-address 127.0.0.1:29352
+)
+start_pending_authority >logs/authority.log 2>&1 &
 AUTHORITY_PID=$!
 ```
 
@@ -440,10 +473,10 @@ Check the PoS committee profile in the authenticated release announcement. A six
 Use a fresh root signing key for every root history. Never bring a root key from an earlier generation or reset, whether you enroll now, join later or rotate. Post-term evidence charges a quorum seal from its signed bytes, and those bytes bind the network but not the root genesis. A seal your old key signed in another history that shares the network would therefore be chargeable here ([D5 §2.1](../design/d5-accountability-retirement-inbox.md#21-post-term-seal-offence-1297)). The release ships the retired root key hashes as `retired-root-keys.json`. `apply` and `rotate` read `release/retired-root-keys.json` under the validator home by default and refuse a configured root key on the list. A release of a first generation has no list, and then there is nothing to check. `--retired-root-keys FILE` names another list, and `--no-retired-root-keys` skips the shipped one.
 
 ```bash
-ubft validator apply --dry-run
+"$HANDOFF_UBFT" validator apply --dry-run
 jq -n --arg network "$NETWORK_WORD" --argjson chainId "$CHAIN_ID" --arg election "$ELECTION" \
   '{network:$network,chainId:$chainId,election:$election}' > authority/pos-policy-template.json
-ubft validator apply --pin-pos-policy authority/pos-policy-template.json
+"$HANDOFF_UBFT" validator apply --pin-pos-policy authority/pos-policy-template.json
 ```
 
 On PoS, apply registers the keys in VR and P85 custody, admits the delegation and bonds the stake, all in one run. VR assigns the identity id at registration, and `--pin-pos-policy` pins the authority's P85 policy to that id just before the delegation possession. The delegation comes before the first bond, because the bond makes the identity eligible. A result reserved before the bond can pass over you. Keep the authority running and follow the scope refresh below after that result activates. A retry pins the same policy again, which is a no-op. The template must name the release's election; apply refuses another before it sends anything. The default is one bond unit. To choose the amount or recipient, supply `--bond` in decimal base units and `--withdrawal` on the initial application. Keep the same settings on retries. A dry run previews the next transaction against the state currently visible. Read the receipts before treating an application as complete.
@@ -458,8 +491,11 @@ advance_authority_from_local_root() (
   local target=$1 mode=$2 tip epoch work path
   local -a proofs=() args=()
   [[ "$target" =~ ^[1-9][0-9]*$ ]] || return 1
+  if [[ "$mode" == pending && "$target" == 1 ]]; then
+    return 0 # genesis is already pinned; there is no activation bundle for it
+  fi
   (( target >= 2 )) || return 1
-  tip=$(ubft signing-authority status "${AUTH[@]}" | jq -er '.lineageEpoch')
+  tip=$("$HANDOFF_UBFT" signing-authority status "${AUTH[@]}" | jq -er '.lineageEpoch')
   work=$(mktemp -d "$UBFT_HOME/activation.XXXXXXXX")
   trap 'rm -rf -- "$work"' EXIT
   if [[ "$mode" == pending ]]; then
@@ -475,7 +511,7 @@ advance_authority_from_local_root() (
     ubft q3 proof-envelope --root-rpc http://127.0.0.1:25852 --epoch "$epoch" --out "$path"
     proofs+=(--proof "$path")
   done
-  ubft signing-authority advance-with-proof "${AUTH[@]}" "${args[@]}" "${proofs[@]}"
+  "$HANDOFF_UBFT" signing-authority advance-with-proof "${AUTH[@]}" "${args[@]}" "${proofs[@]}"
 )
 # Use the locally installed root epoch that excluded this authority.
 read -rp 'Installed root epoch that excluded this node: ' MISSED_ROOT_EPOCH
@@ -496,7 +532,7 @@ The roots log the bitmap they built (`election result due for rejection`), the l
 **Known limit: incumbent withholding (testnet only).** Parking never applies to incumbents, so it cannot help when a member of the committee in force withholds its successor proof. Every output then expires and continuity keeps reselecting that member, so rotations and the exits waiting on them can stall indefinitely, at one lifetime per attempt, while the current committee keeps producing blocks. This is accepted on the resettable testnet and tracked under bft-core#1303. A remedy is required before real value is at stake. A clear bit alone is never grounds to remove an incumbent.
 
 ```bash
-ubft validator pos-publish --own-proof
+"$HANDOFF_UBFT" validator pos-publish --own-proof
 ```
 
 Once the result is published, the roots derive the intent and the nodes collect readiness. Watch for Prepare, Freeze, the committed handoff and activation. Wait for your own root to install the first activated epoch that names you. Read its certified configuration and trust base over its loopback operator RPC. Use the root epoch and successor shard epoch confirmed for that handoff. Immediately after a root switch, round-info can still show the shard epoch of the last certificate. That early sample cannot distinguish a root-only change from a coupled assignment. Check that the verified shard configuration for the confirmed epoch is available before changing the authority's scope.
@@ -518,7 +554,7 @@ install_authority_scope() (
     if (( ACTIVATED_ROOT_EPOCH > 1 )); then
       advance_authority_from_local_root "$((ACTIVATED_ROOT_EPOCH - 1))" pending
     fi
-    ubft signing-authority complete-enrollment "${AUTH[@]}" --shard-conf "$shard_conf"
+    "$HANDOFF_UBFT" signing-authority complete-enrollment "${AUTH[@]}" --shard-conf "$shard_conf"
   fi
   advance_authority_from_local_root "$ACTIVATED_ROOT_EPOCH" enrolled
 )

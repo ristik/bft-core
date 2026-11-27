@@ -257,9 +257,12 @@ func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) e
 	// to that (it cannot disable it).
 	fenceGen := vrFence{VR: flags.VRGeneration || flags.RegistrationPolicy != ""} // never from --pos-policy: that also pins the standalone P85 election of a pre-VR generation
 	if flags.B1Profile != "" {
-		_, pf, perr := readB1ProfileFile(flags.B1Profile)
+		profile, pf, perr := readB1ProfileFile(flags.B1Profile)
 		if perr != nil {
 			return fmt.Errorf("loading the b1 profile: %w", perr)
+		}
+		if flags.PendingJoinScope {
+			opts = append(opts, signingauthority.WithPendingJoinChainID(profile.ExecutionChainID))
 		}
 		if pf.VRHookMeasurement != nil {
 			fenceGen.VR = true

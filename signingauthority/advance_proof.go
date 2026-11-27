@@ -106,6 +106,7 @@ func (a *Authority) AdvanceWithProof(ctx context.Context, bundle []byte) (Advanc
 	}
 	enroll, lineage, trust, scope, retired, recovery := a.enroll.clone(), a.lineage, a.trust, a.scopeVersion, a.retired, a.recovery
 	pending := !enroll.complete() && a.pendingJoinScope
+	joinChainID, pos := a.joinChainID, a.pos
 	pub, err := publicKeyOf(a.signer)
 	a.mu.Unlock()
 	if err != nil {
@@ -165,7 +166,7 @@ func (a *Authority) AdvanceWithProof(ctx context.Context, bundle []byte) (Advanc
 			return AdvanceResult{}, err
 		}
 		if pending {
-			pendingSuccessor, err = verifyPendingJoinSuccessor(lineage, next, step, enroll, pub)
+			pendingSuccessor, err = verifyPendingJoinSuccessor(lineage, next, step, enroll, pub, joinChainID, pos)
 		} else {
 			successor, err = verifySuccessor(lineage, next, step, enroll, pub)
 		}
@@ -188,8 +189,8 @@ func (a *Authority) AdvanceWithProof(ctx context.Context, bundle []byte) (Advanc
 	if a.state != healthActive {
 		return AdvanceResult{}, fmt.Errorf("%w: this authority has latched faulted", ErrStateUntrusted)
 	}
-	if a.scopeVersion != scope || a.lineage != lineage || a.retired != retired || a.enroll.complete() != enroll.complete() {
-		// Enrollment or an operator-trusted recovery advance landed meanwhile. Verify again against what is now held.
+	if a.scopeVersion != scope || a.lineage != lineage || a.retired != retired || a.enroll.complete() != enroll.complete() || (pending && a.pos != pos) {
+		// Enrollment, a PoS pin or an operator-trusted advance landed meanwhile. Verify again against what is now held.
 		return AdvanceResult{}, fmt.Errorf("%w: the authority's scope changed while the proof was verified", ErrConflict)
 	}
 	if pendingSuccessor != nil && a.joinScopeProved && pendingSuccessor.shardEpoch != enroll.ShardEpoch {

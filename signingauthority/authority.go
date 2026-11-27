@@ -66,6 +66,7 @@ type Authority struct {
 
 	// A fresh joiner may follow verified exclusions until its first shard-bound possession proof.
 	pendingJoinScope bool
+	joinChainID      uint64
 	joinScopeProved  bool
 
 	// While a successor assignment's acknowledgement is pending, the certificate an authority is asked to extend carries the new
@@ -173,6 +174,14 @@ func WithPendingJoinScope() Option {
 			return errors.New("pending join scope requires an incomplete enrollment")
 		}
 		a.pendingJoinScope = true
+		return nil
+	}
+}
+
+// WithPendingJoinChainID binds the joiner's shard configuration to the startup B1 execution profile.
+func WithPendingJoinChainID(chainID uint64) Option {
+	return func(a *Authority) error {
+		a.joinChainID = chainID
 		return nil
 	}
 }
@@ -415,6 +424,11 @@ func (a *Authority) CompleteEnrollment(conf *types.PartitionDescriptionRecord) e
 		return fmt.Errorf("%w: shard configuration is for shard %s, this authority is enrolled for %s", ErrContextMismatch, conf.ShardID, enroll.ShardID)
 	case conf.Epoch != enroll.ShardEpoch:
 		return fmt.Errorf("%w: shard configuration is for shard epoch %d, this authority is enrolled for %d", ErrContextMismatch, conf.Epoch, enroll.ShardEpoch)
+	}
+	if a.pendingJoinScope {
+		if err := checkJoinChainID(conf, a.joinChainID, a.pos); err != nil {
+			return err
+		}
 	}
 	pub, err := publicKeyOf(a.signer)
 	if err != nil {
