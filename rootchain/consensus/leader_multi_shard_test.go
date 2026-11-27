@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -360,7 +361,101 @@ func gate9RescueTrace(t *testing.T, members int) {
 	if larger {
 		reportRecoveryCycle(t, m(watch), c, names)
 	}
-	t0 := time.Now()
+	var t0 time.Time
+	since := func() time.Duration { return time.Since(t0).Round(time.Millisecond) }
+	counters := func(label string) {
+		if traceCounters != nil {
+			t.Logf("counters at %s: %s", label, traceCounters())
+		}
+	}
+	type sample struct {
+		round uint64
+		d     time.Duration
+		known bool
+	}
+	var samples []sample
+	var startRound, lastRound uint64
+	var roundAt time.Time
+	var lastKnown bool
+	var unknownFrom, firstKnownAfter, commitAt time.Time
+	var lastEdge uint64
+	var unknownRound, firstKnownRound, commitRound, commitAtUnknown uint64
+	var rescueMiss bool
+	var committedAfterUnknown atomic.Bool
+	committed := func() uint64 { return c.committedRound(watch) }
+	if larger {
+		committed = func() uint64 { return m(watch).blockStore().CommittedRound() }
+	}
+	beginObservation := func() {
+		startRound = m(watch).pacemaker.GetCurrentRound()
+		lastRound, roundAt, lastKnown = startRound, t0, known(startRound)
+		t.Logf("T=%s, block rate %s, topology %s, shards %v, start round %d, committed %d, stopped %v, returned %v", T, blockRate, topology, shards, startRound, committed(), dead, returning)
+	}
+	observe := func(now time.Time, round uint64) {
+		at := now.Sub(t0).Round(time.Millisecond)
+		if round != lastRound {
+			gap := now.Sub(roundAt) / time.Duration(round-lastRound)
+			for r := lastRound; r < round; r++ {
+				samples = append(samples, sample{r, gap, lastKnown})
+			}
+			lastRound, roundAt, lastKnown = round, now, known(round)
+		}
+		if !lastKnown && round != lastEdge && known(round+1) && !unknownFrom.IsZero() {
+			lastEdge = round
+			t.Logf("round %d at %s: its leader unknown, the next known", round, at)
+			counters("that round's start")
+		}
+		if !lastKnown && unknownFrom.IsZero() {
+			unknownFrom, unknownRound, commitAtUnknown = now, round, committed()
+			t.Logf("first unknown round %d at %s, %d rounds after the stop", unknownRound, at, unknownRound-startRound)
+			counters("the first unknown round")
+		}
+		if lastKnown && !unknownFrom.IsZero() && firstKnownAfter.IsZero() {
+			firstKnownAfter, firstKnownRound = now, round
+			t.Logf("first known round after that %d at %s: unknown window total %s over %d rounds", firstKnownRound, at, now.Sub(unknownFrom).Round(time.Millisecond), firstKnownRound-unknownRound)
+			counters("the first known round")
+		}
+		if !unknownFrom.IsZero() && now.After(unknownFrom) && commitAt.IsZero() && committed() != commitAtUnknown {
+			commitAt, commitRound = now, round
+			committedAfterUnknown.Store(true)
+			t.Logf("first commit after that at round %d, %s: unknown-to-commit %s over %d rounds", commitRound, at, now.Sub(unknownFrom).Round(time.Millisecond), commitRound-unknownRound)
+			counters("the first commit")
+		}
+		if larger && !rescueMiss && !unknownFrom.IsZero() && commitAt.IsZero() && now.Sub(unknownFrom) >= 75*time.Second {
+			rescueMiss = true
+			t.Logf("75 s elapsed since the first unknown leader at round %d; no commit by round %d", unknownRound, round)
+		}
+	}
+	stopObserving := func() {}
+	if larger {
+		// Sample the round and committed head while shard proofs are being built.
+		// The submission loop only reads the atomic progress flag until the observer joins.
+		t0 = time.Now()
+		beginObservation()
+		clock := startRoundClock(m(watch))
+		stop, done, ready := make(chan struct{}), make(chan struct{}), make(chan struct{})
+		go func() {
+			defer close(done)
+			ticker := time.NewTicker(5 * time.Millisecond)
+			defer ticker.Stop()
+			close(ready)
+			for {
+				select {
+				case <-stop:
+					return
+				case <-ticker.C:
+					observe(time.Now(), m(watch).pacemaker.GetCurrentRound())
+				}
+			}
+		}()
+		<-ready
+		stopObserving = sync.OnceFunc(func() {
+			close(stop)
+			<-done
+			reportTimingUnknown(t, clock.halt())
+		})
+		defer stopObserving()
+	}
 	for _, name := range dead {
 		c.stop(name)
 		if transport != nil {
@@ -374,15 +469,9 @@ func gate9RescueTrace(t *testing.T, members int) {
 	if !larger {
 		t0 = time.Now() // keep the original four-root trace's time origin
 	}
-	since := func() time.Duration { return time.Since(t0).Round(time.Millisecond) }
 	forwardsMu.Lock()
-	currentRound = func() uint64 { return m(watch).pacemaker.GetCurrentRound() }
+	currentRound = m(watch).pacemaker.GetCurrentRound
 	forwardsMu.Unlock()
-	counters := func(label string) {
-		if traceCounters != nil {
-			t.Logf("counters at %s: %s", label, traceCounters())
-		}
-	}
 	for _, s := range shards {
 		proof := shardRequest(t, c.nodes[c.idx(watch)].r, s, false, false)
 		require.NotNil(t, proof, s)
@@ -401,24 +490,9 @@ func gate9RescueTrace(t *testing.T, members int) {
 	for _, s := range shards {
 		established[s.String()] = shardHash(m(watch), s)
 	}
-	startRound, startCommit := c.state(watch).Round, c.committedRound(watch)
-	t.Logf("T=%s, block rate %s, topology %s, shards %v, start round %d, committed %d, stopped %v, returned %v", T, blockRate, topology, shards, startRound, startCommit, dead, returning)
-	var clock *roundClock
-	if larger {
-		clock = startRoundClock(m(watch))
-		defer func() { reportTimingUnknown(t, clock.halt()) }()
+	if !larger {
+		beginObservation()
 	}
-
-	type sample struct {
-		round uint64
-		d     time.Duration
-		known bool
-	}
-	var samples []sample
-	lastRound, roundAt, lastKnown := startRound, t0, known(startRound)
-	var unknownFrom, firstKnownAfter, commitAt time.Time
-	var lastEdge uint64
-	var unknownRound, firstKnownRound, commitRound, commitAtUnknown uint64
 	sentUnder := map[string]uint64{}
 	sendRounds := map[string][]uint64{}
 	certAt := map[string]time.Duration{}
@@ -436,37 +510,13 @@ func gate9RescueTrace(t *testing.T, members int) {
 	}
 	deadline := t0.Add(40 * time.Minute)
 	progressAt := t0
-	var certificateMiss, rescueMiss bool
+	var certificateMiss bool
 	for len(certAt) < len(shards) {
 		require.True(t, time.Now().Before(deadline), "%d of %d certified in 40 minutes", len(certAt), len(shards))
 		now := time.Now()
-		st := c.state(watch)
-		if st.Round != lastRound {
-			gap := now.Sub(roundAt) / time.Duration(st.Round-lastRound)
-			for r := lastRound; r < st.Round; r++ {
-				samples = append(samples, sample{r, gap, lastKnown})
-			}
-			lastRound, roundAt, lastKnown = st.Round, now, known(st.Round)
-		}
-		if !lastKnown && st.Round != lastEdge && known(st.Round+1) && !unknownFrom.IsZero() {
-			lastEdge = st.Round
-			t.Logf("round %d at %s: its leader unknown, the next known", st.Round, since())
-			counters("that round's start")
-		}
-		if !lastKnown && unknownFrom.IsZero() {
-			unknownFrom, unknownRound, commitAtUnknown = now, st.Round, c.committedRound(watch)
-			t.Logf("first unknown round %d at %s, %d rounds after the stop", unknownRound, since(), unknownRound-startRound)
-			counters("the first unknown round")
-		}
-		if lastKnown && !unknownFrom.IsZero() && firstKnownAfter.IsZero() {
-			firstKnownAfter, firstKnownRound = now, st.Round
-			t.Logf("first known round after that %d at %s: unknown window total %s over %d rounds", firstKnownRound, since(), now.Sub(unknownFrom).Round(time.Millisecond), firstKnownRound-unknownRound)
-			counters("the first known round")
-		}
-		if !unknownFrom.IsZero() && commitAt.IsZero() && c.committedRound(watch) != commitAtUnknown {
-			commitAt, commitRound = now, st.Round
-			t.Logf("first commit after that at round %d, %s: unknown-to-commit %s over %d rounds", commitRound, since(), now.Sub(unknownFrom).Round(time.Millisecond), commitRound-unknownRound)
-			counters("the first commit")
+		round := m(watch).pacemaker.GetCurrentRound()
+		if !larger {
+			observe(now, round)
 		}
 		for _, p := range shards {
 			if _, done := certAt[p.String()]; done {
@@ -477,29 +527,24 @@ func gate9RescueTrace(t *testing.T, members int) {
 				continue
 			}
 			if (larger || !unknownFrom.IsZero()) && (len(sendRounds[p.String()]) == 0 || seal(p) != sentUnder[p.String()]) {
-				send(p, st.Round)
+				send(p, round)
 			}
 		}
-		if larger {
-			if !certificateMiss && now.Sub(t0) >= 360*time.Second && len(certAt) < len(shards) {
-				certificateMiss = true
-				t.Logf("360 s elapsed at round %d; fresh certificates recorded for %d/%d shards at the watched root", st.Round, len(certAt), len(shards))
-			}
-			if !rescueMiss && !unknownFrom.IsZero() && commitAt.IsZero() && now.Sub(unknownFrom) >= 75*time.Second {
-				rescueMiss = true
-				t.Logf("75 s elapsed since the first unknown leader at round %d; no commit by round %d", unknownRound, st.Round)
-			}
+		if larger && !certificateMiss && now.Sub(t0) >= 360*time.Second && len(certAt) < len(shards) {
+			certificateMiss = true
+			t.Logf("360 s elapsed at round %d; fresh certificates recorded for %d/%d shards at the watched root", round, len(certAt), len(shards))
 		}
-		if !commitAt.IsZero() && time.Since(progressAt) > 30*time.Second {
+		if committedAfterUnknown.Load() && time.Since(progressAt) > 30*time.Second {
 			progressAt = time.Now()
 			for _, p := range shards {
 				_, done := certAt[p.String()]
-				t.Logf("progress %s at round %d: %s certified %v, seal %d, sent under %d, sends at rounds %v", since(), st.Round, p, done, seal(p), sentUnder[p.String()], sendRounds[p.String()])
+				t.Logf("progress %s at round %d: %s certified %v, seal %d, sent under %d, sends at rounds %v", since(), round, p, done, seal(p), sentUnder[p.String()], sendRounds[p.String()])
 			}
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
 	end := time.Now()
+	stopObserving()
 	counters("the last certificate")
 	if transport != nil {
 		transport.reportDelivery(t0, "the stop", shards, func(s liveShard) []byte { return shardHash(m(watch), s) })

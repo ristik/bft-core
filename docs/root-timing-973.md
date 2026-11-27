@@ -11,7 +11,7 @@ The laptop runs use the in-memory network. Integration advanced to
 round accessor. The fixture patch combines cleanly with that tip, and
 the timings refer to the measured revision above.
 
-The weighted row uses stakes (3,2,2,2,2) in sorted NodeID order. The returner
+The weighted runs use stakes (3,2,2,2,2) in sorted NodeID order. The returner
 is the next light member after the stopped member. The warm committee has
 stake 9 and the responsive committee after the stop has stake 8 or 9, with
 full-committee quorum 8. The test reuses gate 7's single authenticated repeat,
@@ -35,23 +35,28 @@ The larger rows reuse gate 9's EVM shard and three RSMT shards, with 1,000
 new leaves per default proof batch. One-stage time starts when the fixture
 begins stopping the outgoing roots. On libp2p the endpoint is the first
 validator receipt of the fresh certificate for each shard. In memory the
-endpoint is the watched root's durable certificate. The rescue timer starts
-with the first unknown-leader round and ends at the next observed root
-commit. The selector is checked for every recovery-run owner through one
-cycle and at its repeat. Observed outage windows cover the selected stop
-and subsequent certificates.
+endpoint is the watched root's durable certificate. Rescue time runs from
+the first observed unknown-leader round to the next observed commit at the
+watched root. In the recorded runs, both round observers started after the
+stops, returns and proof diagnostics, and the rescue poll ran in the proof
+submission loop. The recorded rescue observations cover that post-setup
+window through fresh certification. The current fixture starts both
+observers before the first stop and polls for rescue independently of proof
+submission. The selector is checked for every recovery-run owner through
+one cycle and at its repeat.
 
 ## Weighted five-root results
 
 The recovery cycle is 1,280 rounds on every run. D is the stopped member, X
-the returner. The two-stage comparison uses `46T + 8rho + 822tau + R` from
+the returner. Each placement has one run per transport. The two-stage
+comparison uses `46T + 8rho + 822tau + R` from
 the four-root gate 7 evidence in #886. The table substitutes each sample's
 maximum observed known certified round (rho), maximum observed unknown round
 (tau), and scripted resubmission delay (R). An observed pass against this
 comparison does not establish the expression as a bound for arbitrary
 weighted committees. [Gate 7 and gate 9 evidence](https://github.com/ristik/bft-core/issues/886#issuecomment-6720964789)
 
-| Transport and stop | Stages in rounds | Held to certified | X returned to certified | rho max | tau p95 / max | R | Comparison | Observed verdict |
+| Transport and stop | Rounds from X's return to repeat commit + fresh submission to certificate | Held to certified | X returned to certified | rho max | tau p95 / max | R | Comparison | Observed verdict |
 |---|---:|---:|---:|---:|---:|---:|---:|---|
 | Libp2p, heavy (index 0) | 505 + 2 | 95.623 s | 281.678 s | 0.510 s | 64.22 / 165.53 ms | 65 ms | 600.210 s | Pass |
 | Libp2p, light (index 1) | 250 + 4 | 42.115 s | 249.975 s | 0.503 s | 53.81 / 76.90 ms | 33 ms | 527.272 s | Pass |
@@ -60,8 +65,10 @@ weighted committees. [Gate 7 and gate 9 evidence](https://github.com/ristik/bft-
 
 The heavy stop crossed D's run at round 283 and committed the repeat in X's
 run starting at 539. The light stop reached a live run at 283. The
-comparisons use the unrounded timing observations. Both host samples
-exceeded the original 50 ms tau premise at p95.
+comparisons use the unrounded timing observations. Held-to-certified
+headroom against the sampled comparison was 504.587 s, 485.157 s, 884.696 s
+and 1,340.663 s in table order. Both host samples exceeded the original
+50 ms tau premise at p95.
 
 | Transport and stop | Unknown-leader intervals, half-open round ranges |
 |---|---|
@@ -72,18 +79,19 @@ exceeded the original 50 ms tau premise at p95.
 
 ## Larger equal-stake committees
 
-The one-stage comparison takes the slowest of the four shards' first
-fresh certificates. The rescue measurement includes dead recovery runs
-between unknown intervals.
+Each row is one run. The one-stage comparison takes the slowest of the
+four shards' first fresh certificates. Rescue includes dead recovery runs
+between unknown intervals. “Unexercised” means the poll saw no
+unknown-leader round during the recorded post-setup window.
 
-| Transport and roots | Quorum before and after the stop | Recovery cycle | First fresh certificate per shard, slowest (≤ 360 s) | First unknown to next commit (≤ 75 s) |
+| Transport and roots | Quorum before and after the stop | Recovery cycle | First fresh certificate per shard, slowest (≤ 360 s) | First observed unknown to next observed commit (≤ 75 s) |
 |---|---|---:|---|---|
-| Libp2p, 7 | 6 → 5 online, quorum 5 | 1,792 rounds | 285.452 s, pass | 67.362 s, pass |
-| In memory, 7 | 6 → 5 online, quorum 5 | 1,792 rounds | 91.215 s, pass | Unexercised |
-| Libp2p, 16 | 15 → 11 online, quorum 11 | 4,096 rounds | 354.793 s, pass | Unexercised |
-| In memory, 16 | 15 → 11 online, quorum 11 | 4,096 rounds | 106.162 s, pass | Unexercised |
+| Libp2p, 7 | 6 → 5 online, quorum 5 | 1,792 rounds | 285.452 s, pass by 74.548 s | 67.362 s, pass by 7.638 s |
+| In memory, 7 | 6 → 5 online, quorum 5 | 1,792 rounds | 91.215 s, pass by 268.785 s | Unexercised |
+| Libp2p, 16 | 15 → 11 online, quorum 11 | 4,096 rounds | 354.793 s, pass by 5.207 s | Unexercised |
+| In memory, 16 | 15 → 11 online, quorum 11 | 4,096 rounds | 106.162 s, pass by 253.838 s | Unexercised |
 | Libp2p, 16, exact old quorum | 11 → 11 online, quorum 11 | 4,096 rounds | 746.732 s, **fail** | 117.008 s, **fail** |
-| Libp2p, 32 | 30 → 22 online, quorum 22 | 8,192 rounds | 221.341 s, pass | Unexercised |
+| Libp2p, 32 | 30 → 22 online, quorum 22 | 8,192 rounds | 221.341 s, pass by 138.659 s | Unexercised |
 | Libp2p, 32, exact old quorum | 22 → 22 online, quorum 22 | 8,192 rounds | 1,509.208 s, **fail** | 260.157 s, **fail** |
 
 | Transport and roots | Unknown-leader intervals, half-open round ranges |
@@ -98,27 +106,28 @@ between unknown intervals.
 
 The seven-root libp2p sample had 25 full timers (252.284 s) and 455
 unknown rounds (about 26.2 s, p95 76.74 ms by the 5 ms polling trace).
-The first unknown round arrived 218.083 s after the stop. The laptop's
-corresponding placement certified during the covered stretch, showing that
-one placement can encounter different committed voter samples. The two runs
-also differ in host and transport. The first 16-root libp2p placement
-certified with 5.207 s to spare. It spent 343.090 s in 34 full-timer rounds
-before the certificates. The first 32-root placement spent 217.181 s in
-21 full-timer rounds and certified after 27 observed rounds.
+The first observed unknown round was 218.083 s after the stop. The laptop's
+corresponding run certified during its post-setup window. The two runs
+differ in host, transport and certificate endpoint. The spare-voter
+16-root libp2p run spent 343.090 s in
+34 full-timer rounds before the certificates. The spare-voter 32-root
+libp2p run spent 217.181 s in 21 full-timer rounds and certified after
+27 observed rounds.
 
-The exact-quorum 16-root run reached its first unknown round 629.738 s
+The first observed unknown round in the exact-quorum 16-root run was 629.738 s
 after the stop. It logged 65 full timers (666.925 s in all) and 421
 unknown rounds (p95 261.76 ms). The rescue crossed the four-round run of
 the stopped first recovery owner before reaching the next owner. The
 360 s target was already missed before the rescue began.
 
-The exact-quorum 32-root run reached its first unknown round 1,249.098 s
+The first observed unknown round in the exact-quorum 32-root run was 1,249.098 s
 after the stop. It logged 123 full timers (1,281.733 s in all) and 357
 unknown rounds (p95 910.96 ms). Both exact-quorum runs certified on the
-first live recovery run after the stopped first owner. The one-stage
-and rescue targets hold in the sampled seven-root libp2p run and fail in
-both exact-quorum larger runs. At 16 and 32 roots with spare old voters,
-certification met its target before any unknown-leader window arose.
+first live recovery run after the stopped first owner. The seven-root
+libp2p run was the only observed rescue pass above five roots. The single
+spare-voter libp2p run at each of 7, 16 and 32 roots met the one-stage target
+with the margins shown above. The 16- and 32-root spare-voter runs had no
+observed unknown-leader interval in the post-setup window.
 
 ## Scope of the timings
 
@@ -149,7 +158,9 @@ has a separate 16-member ceiling.
 Both test entry points are opt-in. On the dev server, reserve one private
 lane slot before the libp2p runs. Use a directory on the disk being measured
 for `TMPDIR`. Repeat the weighted command with dead index 1, and the larger
-command with sizes 16 and 32. The in-memory rows omit
+command with sizes 16 and 32. The exact old-quorum command covers the
+32-root run recorded at 34m35s. Set `BFT_973_MEMBERS=16` for the other
+exact old-quorum row. The in-memory rows omit
 `BFT_TRACE_TRANSPORT`. The measurement fixtures report deadline misses
 and continue until certification or the test timeout. A Go test PASS
 records fixture completion. The timing verdicts are in the tables above.
@@ -163,6 +174,11 @@ CARGO_BUILD_JOBS=4 GOMAXPROCS=4 BFT_TRACE_TRANSPORT=libp2p \
 CARGO_BUILD_JOBS=4 GOMAXPROCS=4 BFT_TRACE_TRANSPORT=libp2p \
   BFT_973_LARGER=1 BFT_973_MEMBERS=7 \
   go test -p 4 -v -count=1 -timeout=30m ./rootchain/consensus \
+  -run '^TestLargerCommitteeRescueTiming$'
+
+CARGO_BUILD_JOBS=4 GOMAXPROCS=4 BFT_TRACE_TRANSPORT=libp2p \
+  BFT_973_LARGER=1 BFT_973_MEMBERS=32 BFT_973_EXACT_QUORUM=1 \
+  go test -p 4 -v -count=1 -timeout=38m ./rootchain/consensus \
   -run '^TestLargerCommitteeRescueTiming$'
 ```
 
