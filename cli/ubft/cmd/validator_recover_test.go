@@ -542,7 +542,7 @@ func TestValidatorRecoverAConfirmedPairSendsAndSignsNothing(t *testing.T) {
 
 // sol's round 3 on #1328: the head moves between two reads of one state snapshot. Block 1 holds only the matching delegation, block 2
 // only the matching VR binding. The snapshot reads both contracts at one block hash, so recover never sees a "matching pair" that did not
-// coexist: it does not report "nothing to do", and it ends (if it succeeds) with both the binding and the delegation the new words.
+// coexist: it does not report "nothing to do", and it ends with both the binding and the delegation the new words.
 func TestValidatorRecoverReadsOneBlockPerSnapshot(t *testing.T) {
 	f := newRecoverFixture(t)
 	delegationCalls := 0
@@ -564,10 +564,25 @@ func TestValidatorRecoverReadsOneBlockPerSnapshot(t *testing.T) {
 		}
 	})
 	out, err := f.recover(t)
+	require.NoError(t, err, out)
 	require.NotContains(t, out, "nothing to do", "a binding and a delegation of two blocks are no pair")
 	require.GreaterOrEqual(t, delegationCalls, 2, "the probe moved the head inside the snapshot")
-	if err == nil {
-		require.True(t, sameDelegation(f.delegation(), delegationOf(f.want)), out)
-		require.Equal(t, f.want.EvmKey, f.chain.Identity(f.id).Staged.EvmKey, out)
-	}
+	require.True(t, sameDelegation(f.delegation(), delegationOf(f.want)), out)
+	require.Equal(t, f.want.EvmKey, f.chain.Identity(f.id).Staged.EvmKey, out)
+}
+
+func TestValidatorRecoverUsesCanonicalSnapshots(t *testing.T) {
+	f := newRecoverFixture(t)
+	f.chain.With(func(c *vrfake.Chain) {
+		c.FinalizedDelegations = map[[2]uint64]*vrfake.Delegated{
+			{f.id, 1}: {Binding: delegationOf(f.old), NextNonce: 1},
+		}
+	})
+	// The fake rejects a hash selector without requireCanonical on any read.
+	// Successful recovery exercises the finalized preflight and every latest
+	// snapshot through the confirmation of both writes.
+	out, err := f.recover(t)
+	require.NoError(t, err, out)
+	require.Equal(t, 2, f.chain.Sends(), out)
+	require.Contains(t, out, "equal to VR's binding", out)
 }
