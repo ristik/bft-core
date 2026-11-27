@@ -279,19 +279,26 @@ func gate9RescueTrace(t *testing.T, members int) {
 	slices.SortFunc(names, func(a, b string) int { return strings.Compare(c.id(a).String(), c.id(b).String()) })
 	d, x := names[deadAt%members], names[(deadAt+1)%members]
 	dead, returning := []string{d}, []string{x}
+	exactQuorum := larger && os.Getenv("BFT_973_EXACT_QUORUM") == "1"
 	if larger {
-		// Leave exactly 3b old voters, then stop every third one. That old
-		// table has no three consecutive surviving leaders after the stop.
 		b := (members - 1) / 3
-		returning = names[3*b:]
+		oldVoters := 3 * b
+		if exactQuorum {
+			// Every old QC must carry this whole set, so a collector
+			// cannot select a different quorum subset with a live triple.
+			oldVoters = int(c.nodes[0].r.f.Body.RootThreshold)
+		}
+		returning = names[oldVoters:]
 		dead = nil
-		for i := 0; i < 3*b; i += 3 {
-			dead = append(dead, names[i])
+		// Spread the b stops so the complete old voter table has at
+		// most two consecutive survivors, including across its wrap.
+		for i := 0; i < b; i++ {
+			dead = append(dead, names[i*oldVoters/b])
 		}
 		d = dead[0]
 		requireTimingQuorum(t, c, c.except(returning...))
 		requireTimingQuorum(t, c, c.except(dead...))
-		t.Logf("NodeID order %v, unit weights", names)
+		t.Logf("NodeID order %v, unit weights, exact old quorum %v", names, exactQuorum)
 	}
 	// every forward of a retained request, by the round the watched node is in: the delivery premise of a recovery run is that a request reaches its leader before the run
 	var forwardsMu sync.Mutex
@@ -498,7 +505,7 @@ func gate9RescueTrace(t *testing.T, members int) {
 		transport.reportDelivery(t0, "the stop", shards, func(s liveShard) []byte { return shardHash(m(watch), s) })
 	}
 	if unknownFrom.IsZero() {
-		require.True(t, larger, "no unknown round")
+		require.True(t, larger && !exactQuorum, "no unknown round")
 		t.Log("no unknown-leader window before the fresh certificates")
 	} else {
 		require.False(t, commitAt.IsZero(), "no commit")
