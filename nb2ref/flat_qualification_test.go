@@ -91,8 +91,22 @@ func TestFlatJointNativeQualification(t *testing.T) {
 		t.Logf("child certificate bytes=%d signatures=16 shard siblings=256 unicity steps=32", len(proof.UC))
 	}
 
-	const name = "joint-native-qualification"
-	flatLargeCombinedWitnesses(t, w, v, registry, deposit, predecessor, fullPath, name)
+	const name = "packed-joint-native-qualification"
+	flatLargeCombinedWitnesses(t, w, v, registry, flatLargeWitnessOptions{
+		name: name, deposit: deposit, predecessor: predecessor, resumePages: 32,
+		prepareChild: func(draft *Draft) {
+			for i := range 14 {
+				key := Key(fmt.Sprintf("qualification/owner/%d", i))
+				draft.Transfer(sigPred(key), key)
+			}
+		},
+		extendChild: func(child *Token) {
+			fullPath(&child.MintProof)
+			for i := range 7 {
+				flatFixtureExpandRSMT(t, w, &child.Proofs[i], 256)
+			}
+		},
+	})
 	if dir := os.Getenv("NB2_FLAT_VECTOR_OUT"); dir != "" {
 		generation := FlatHash("GEN", v.deployment.Salt[:], v.domain[:])
 		for file, data := range map[string][]byte{
