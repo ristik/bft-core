@@ -142,9 +142,10 @@ existing UCT build inputs above. Also set:
   the ERC20 production artifacts in `out`.
 - `NB2_ERC20_PLUGIN` to the clean #99 merge checkout `43c4535de` after
   `npm ci` and `npm run build`.
-- `NB2_ERC20_ORACLE_SOURCE` to the clean #1338 merge checkout and
-  `NB2_ERC20_ORACLE_REV` to its full merge commit. Run the Go oracle from
-  this checkout before starting the lane.
+- `NB2_ERC20_ORACLE_SOURCE` to the clean #1338 checkout and
+  `NB2_ERC20_ORACLE_REV` to its full revision. Use the landed merge when
+  available. Run the Go oracle from the selected checkout before starting
+  the lane.
 
 After the UCT control the runner deploys two disposable tokens with separate
 vaults. Both use authenticated activation evidence and the TypeScript wallet.
