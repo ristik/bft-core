@@ -621,6 +621,25 @@ async function completeRecovery(b: Burn, name = 'run', restore?: Checkpoint, sav
   const authority = new RecoveryAuthority(b.trust, async (next) => writeFileSync(join(evidenceDir, 'authority.cbor'), await next.history.toBundle()));
   const session = await RecoverySession.create(gamma, b.evidence, authority, PRODUCTION_PARAMS,
     { salt, recovery: bytes(recovery), runtimeHash: recoveryHash, pins, vaultRuntimeHash: vaultHash });
+  const admissionCheck = erc20 && process.env.NB2_ERC20_ADMISSION === '1';
+  const plan = admissionCheck ? await (async () => {
+    const { ERC20_RESUME_OPERATIONS, quoteRecovery } = await import('./sdk/nb2/recovery-cost.js');
+    const limits = { chainId: BigInt(chain), signedBytes: 524_288, calldataBytes: 393_216, gas: 24_000_000n,
+      maxNonce: 256n, maxFeePerGas: 2_000_000_000n, maxPriorityFeePerGas: 1_000_000_000n,
+      balance: 10n ** 18n, feeBudget: 10n ** 18n, worstCaseEnvelope: true };
+    const range = (operations: number, minReceiptBytes: number, receiptBytes: number) => ({
+      minReceiptBytes, execution: 14_000_000n,
+      max: { entry: 'run' as const, operations, pages: 32, calldataBytes: 393_216, receiptBytes, gaps: 0, openingBytes: 393_216 },
+    });
+    // Trial bounds for this workload. Start ends after one operation so
+    // we can restore its certified checkpoint through the alternate archive.
+    const calibration = { pins, runtimeHash: recoveryHash, vaultRuntimeHash: vaultHash,
+      ranges: [range(1, 0, 0), ...Array.from({ length: 16 }, (_, i) => range(i + 1, 1, 65_536))] };
+    const calls = session.planRuns(calibration, limits);
+    if (!restore) json('admission-run-plan.json', { scope: 'trial bounds for disposable test value', calls });
+    if (erc20Mode === 'fee') assert(calls.slice(1).some((call) => call.shape.operations === ERC20_RESUME_OPERATIONS));
+    return { calls, limits, calibration, quoteRecovery };
+  })() : undefined;
   let trust = b.trust;
   let prior: { seq: bigint; receipt: Uint8Array } | undefined;
   let from = 0;
@@ -636,21 +655,28 @@ async function completeRecovery(b: Burn, name = 'run', restore?: Checkpoint, sav
       restoreTx: restore.receipt.transactionHash, segment: (await reader.vaultState(c.vault)).segment });
   }
   while (from < session.operationCount) {
-    let count = Math.min(maxOperations, session.operationCount - from);
+    const seq = (prior?.seq ?? 0n) + 1n;
+    const planned = plan?.calls[Number(seq - 1n)];
+    let count = planned?.shape.operations ?? Math.min(maxOperations, session.operationCount - from);
+    if (plan && !planned) throw new Error('missing cut in admitted schedule');
     let packet;
     for (;;) {
       try {
         packet = await session.run(from, count, trust, prior);
         break;
       } catch (e) {
-        if (count === 1 || !(e instanceof Nb2Error && e.rule === 'InputTooLarge'
+        if (planned || count === 1 || !(e instanceof Nb2Error && e.rule === 'InputTooLarge'
           && ['run pages', 'cold calldata'].includes(e.detail ?? ''))) throw e;
         --count;
       }
     }
-    const seq = (prior?.seq ?? 0n) + 1n;
+    if (plan && planned) {
+      const exact = plan.quoteRecovery(packet.shape, plan.calibration, plan.limits, true);
+      assert(exact && exact.gas <= planned.gas && exact.signedBytes <= planned.signedBytes);
+      assert(packet.shape.receiptBytes <= planned.shape.receiptBytes && packet.shape.openingBytes <= planned.shape.openingBytes);
+    }
     const label = name + '-' + seq;
-    const mined = await send(label, recovery, packet.calldata, 0n, '0x1', signer, 24_000_000n, packet.requiredSignerEpoch);
+    const mined = await send(label, recovery, packet.calldata, 0n, '0x1', signer, planned?.gas ?? 24_000_000n, packet.requiredSignerEpoch);
     const cert = await certifyReceipt(label, mined, bytes(recovery), packet.event);
     await session.verifyEvent(cert.trust, cert.encoded, packet.event);
     if (packet.state) writeFileSync(join(evidenceDir, label + '.state'), packet.state);
