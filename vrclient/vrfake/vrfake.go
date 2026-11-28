@@ -93,7 +93,64 @@ type Chain struct {
 	FailSyncing bool
 	// FailActivations makes activationCount fail.
 	FailActivations bool
+	// FinalizedDelegations, when set, are the election's delegations as the finalized block (eth_getBlockByNumber "finalized") reads
+	// them: a certified view that lags the latest one. Reads at any other block see Pos.Delegations.
+	FinalizedDelegations map[[2]uint64]*Delegated
+	atFinalized          bool
+	// AfterSend, when set, runs under Mu after each accepted transaction with its calldata: a concurrent change landing in the same block.
+	AfterSend func(c *Chain, data []byte)
+	// AfterCall, when set, runs under Mu after each eth_call with its target, calldata and pinned block hash (MoveHeadLocked in it lands a block between two
+	// reads of one caller).
+	AfterCall func(c *Chain, to ethcommon.Address, data []byte, blockHash ethcommon.Hash)
+	// history keeps the identities and the P85 state of the blocks MoveHeadLocked left behind, by block hash: an eth_call that names
+	// one (EIP-1898) reads that block's state, as a node does.
+	history map[ethcommon.Hash]*blockState
 }
+
+type blockState struct {
+	identities  map[uint64]*Identity
+	positions   map[uint64]*Position
+	delegations map[[2]uint64]*Delegated
+}
+
+// headHash is the hash eth_getBlockByNumber reports for the head.
+func (c *Chain) headHash() ethcommon.Hash {
+	return ethcommon.BigToHash(new(big.Int).SetUint64(c.Head + 1))
+}
+
+// MoveHeadLocked mines an empty block that applies mutate, keeping the old head's state readable by its hash. The caller holds Mu (it is
+// meant for AfterCall and AfterSend).
+func (c *Chain) MoveHeadLocked(mutate func(c *Chain)) {
+	st := &blockState{identities: map[uint64]*Identity{}, positions: map[uint64]*Position{}, delegations: map[[2]uint64]*Delegated{}}
+	for id, idn := range c.Identities {
+		cp := *idn
+		if idn.Staged != nil {
+			staged := *idn.Staged
+			cp.Staged = &staged
+		}
+		st.identities[id] = &cp
+	}
+	if c.Pos != nil {
+		for id, p := range c.Pos.Positions {
+			cp := *p
+			st.positions[id] = &cp
+		}
+		for k, d := range c.Pos.Delegations {
+			cp := *d
+			st.delegations[k] = &cp
+		}
+	}
+	if c.history == nil {
+		c.history = map[ethcommon.Hash]*blockState{}
+	}
+	c.history[c.headHash()] = st
+	c.Head++
+	c.HeadTime += 2
+	mutate(c)
+}
+
+// finalizedHash is the finalized block's hash while FinalizedDelegations is set.
+var finalizedHash = ethcommon.HexToHash("0xf1")
 
 // New returns a chain with VR at 0xff..03, PoaElection at 0xff..07 and the SealRegistry at 0xff..02, chain id 3, no identities.
 func New() *Chain {
@@ -233,6 +290,11 @@ func (c *Chain) dispatch(req request) (any, *rpcError) {
 		}
 		return false, nil
 	case "eth_getBlockByNumber":
+		var tag string
+		_ = json.Unmarshal(req.Params[0], &tag)
+		if tag == "finalized" && c.FinalizedDelegations != nil {
+			return map[string]any{"number": hexutil.Uint64(c.Head - 1), "hash": finalizedHash, "timestamp": hexutil.Uint64(c.HeadTime), "baseFeePerGas": (*hexutil.Big)(c.BaseFee)}, nil
+		}
 		return map[string]any{"number": hexutil.Uint64(c.Head), "hash": ethcommon.BigToHash(new(big.Int).SetUint64(c.Head + 1)),
 			"timestamp": hexutil.Uint64(c.HeadTime), "baseFeePerGas": (*hexutil.Big)(c.BaseFee)}, nil
 	case "eth_getCode":
@@ -258,7 +320,35 @@ func (c *Chain) dispatch(req request) (any, *rpcError) {
 		if a.From != nil {
 			from = *a.From
 		}
-		ret, rerr := c.exec(from, a.To, a.Data, false)
+		var blockHash ethcommon.Hash
+		if len(req.Params) > 1 && bytes.HasPrefix(bytes.TrimSpace(req.Params[1]), []byte("{")) {
+			var selector map[string]json.RawMessage
+			if err := json.Unmarshal(req.Params[1], &selector); err != nil ||
+				len(selector) != 2 || !bytes.Equal(selector["requireCanonical"], []byte("true")) ||
+				json.Unmarshal(selector["blockHash"], &blockHash) != nil || blockHash == (ethcommon.Hash{}) {
+				return nil, &rpcError{Code: -32602, Message: "expected a blockHash selector with requireCanonical: true"}
+			}
+			if blockHash != c.headHash() && c.history[blockHash] == nil &&
+				!(c.FinalizedDelegations != nil && blockHash == finalizedHash) {
+				return nil, &rpcError{Code: -32000, Message: "unknown canonical block"}
+			}
+		}
+		c.atFinalized = c.FinalizedDelegations != nil && blockHash == finalizedHash
+		var ret []byte
+		var rerr *rpcError
+		if old := c.history[blockHash]; old != nil && c.Pos != nil && !c.atFinalized {
+			// a block MoveHeadLocked left behind: read its state
+			idns, pos, dels := c.Identities, c.Pos.Positions, c.Pos.Delegations
+			c.Identities, c.Pos.Positions, c.Pos.Delegations = old.identities, old.positions, old.delegations
+			ret, rerr = c.exec(from, a.To, a.Data, false)
+			c.Identities, c.Pos.Positions, c.Pos.Delegations = idns, pos, dels
+		} else {
+			ret, rerr = c.exec(from, a.To, a.Data, false)
+		}
+		c.atFinalized = false
+		if c.AfterCall != nil && req.Method == "eth_call" {
+			c.AfterCall(c, a.To, a.Data, blockHash)
+		}
 		if rerr != nil {
 			return nil, rerr
 		}
@@ -294,6 +384,9 @@ func (c *Chain) dispatch(req request) (any, *rpcError) {
 			c.Logs = c.Logs[:start]
 		} else {
 			c.Sent = append(c.Sent, tx.Data())
+			if c.AfterSend != nil {
+				c.AfterSend(c, tx.Data())
+			}
 		}
 		c.Receipts[tx.Hash()] = map[string]any{"status": status, "blockNumber": hexutil.Uint64(c.Head), "gasUsed": hexutil.Uint64(150_000),
 			"logs": append([]map[string]any(nil), c.Logs[start:]...)}
@@ -559,15 +652,26 @@ func (c *Chain) custody(from ethcommon.Address, data []byte, write bool) ([]byte
 		}
 		return pack(a, "positions", identity.Owner, identity.Owner, [32]byte{}, [32]byte{}, identity.Generation,
 			uint64(0), uint32(len(c.ClaimLots)), uint32(len(c.ClaimLots)), true), nil
+	case "register":
+		if c.Pos != nil {
+			return c.registerCustody(from, in, write)
+		}
 	case "bond":
-		// custody.bond: a retired generation with no open lots opens the next one (StakeCustody.bond); the first bond keeps generation 1
-		if p := c.posOf(in[0].(uint64)); p != nil && write {
-			if p.RetirementRequested {
-				p.Generation++
-				p.RetirementRequested = false
+		// A retired generation opens the next one only after every old lot is closed.
+		if p := c.posOf(in[0].(uint64)); p != nil {
+			if p.RetirementRequested && p.OpenLots != 0 {
+				return nil, revert(vrclient.PosErrorsABI, "GenerationClosing")
 			}
-			p.OpenLots++
-			c.Pos.Order = append(c.Pos.Order, "bond")
+			if write {
+				if p.RetirementRequested {
+					p.Generation++
+					p.RetirementRequested = false
+					p.LotCount = 0
+				}
+				p.LotCount = max(p.LotCount, p.OpenLots) + 1
+				p.OpenLots++
+				c.Pos.Order = append(c.Pos.Order, "bond")
+			}
 		}
 	case "generationLots":
 		return pack(a, "generationLots", c.ClaimLots), nil

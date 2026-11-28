@@ -2,12 +2,15 @@ import hashlib
 import importlib.util
 import io
 import json
+import re
+import subprocess
+from contextlib import redirect_stderr
 from pathlib import Path
 import tarfile
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import generate
 import handoff_ops
@@ -25,6 +28,8 @@ def module(name):
 
 validator = module('validator')
 loader = module('load')
+with patch.dict('sys.modules', {'load': loader}):
+    packer = module('pack')
 
 
 class ValidatorContainer(unittest.TestCase):
@@ -46,6 +51,35 @@ class ValidatorContainer(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'authenticated image pin'):
                 validator.bootstrap(settings, {'sha256sums':hashlib.sha256(b'expected').hexdigest()})
             tool.assert_not_called()
+
+    def test_pack_refuses_a_release_that_differs_from_the_image_lock(self):
+        image = {'Os': 'linux', 'Architecture': 'amd64', 'Id': 'sha256:' + 'a'*64,
+                 'Config': {'Labels': {'org.unicity.handoff-ubft.revision': 'b'*40,
+                                       'org.unicity.handoff-ubft.sha256': hashlib.sha256(b'ubft').hexdigest()}}}
+        tag = 'validator:current'
+        lock = {'sha256sums': hashlib.sha256(b'pinned sums').hexdigest(), 'utb_genesis_id': '0xpinned'}
+        with tempfile.TemporaryDirectory() as d:
+            release = Path(d)
+            bundle = release/'bundle'
+            for name in ('root-peers.txt', 'shard-peers.txt'):
+                (release/name).touch()
+            for checksums, genesis in ((b'other sums', '0xpinned'), (b'pinned sums', '0xother')):
+                with self.subTest(checksums=checksums, genesis=genesis):
+                    (release/'SHA256SUMS').write_bytes(checksums)
+                    (release/'utb-genesis.id').write_text(genesis + '\n')
+                    stderr = io.StringIO()
+                    with patch('sys.argv', ['pack.py', tag, d, d, str(bundle)]), redirect_stderr(stderr), \
+                            patch.object(packer.subprocess, 'check_output', side_effect=[
+                                json.dumps([image]).encode(), json.dumps(lock).encode()]) as docker, \
+                            patch.object(packer.subprocess, 'run') as extract, \
+                            patch.object(packer.subprocess, 'Popen') as export:
+                        with self.assertRaises(SystemExit):
+                            packer.main()
+                        self.assertIn('release differs from the validator image lock', stderr.getvalue())
+                        self.assertEqual(docker.call_args.args[0][-2:], [image['Id'], '/opt/validator/release-lock.json'])
+                        extract.assert_not_called()
+                        export.assert_not_called()
+                        self.assertFalse(bundle.exists())
 
     def test_the_release_ships_the_retired_root_keys_to_the_home_apply_reads(self):
         """#1297/#1309: a release that lists retired-root-keys.json gets it into /data/release, where `ubft validator apply` and `rotate`
@@ -215,9 +249,13 @@ class ValidatorContainer(unittest.TestCase):
                 if args[:2] == ('q3', 'shard-conf'):
                     Path(args[args.index('--out') + 1]).write_text(json.dumps({'epoch':2, 'validators':[{'nodeId':'16Uiu2new', 'sigKey':'0x02ab'}]}))
                 return SimpleNamespace(stdout='{}', returncode=0)
+            def verified_cli(binary, *args, **options):
+                self.assertEqual(binary, 'handoff-ubft')
+                return tool(*args, **options)
             status = {'signingKeyFingerprint':'new', 'enrollmentComplete':False}
             advanced = []
             patches = [*self.patched(home, calls), patch.object(validator, 'ubft', tool),
+                       patch.object(validator, 'command', verified_cli),
                        patch.object(validator, 'RELEASE', home/'release'),
                        patch.object(validator, 'authority_status', return_value=status),
                        patch.object(validator, 'root_status', return_value={'activeEpoch':3}),
@@ -234,6 +272,10 @@ class ValidatorContainer(unittest.TestCase):
             rec, = [c for c in calls if c[:2] == ['validator', 'recover']]
             self.assertEqual(rec[rec.index('--old-authority-home') + 1], 'authority')
             self.assertEqual(rec[rec.index('--new-evm-authority-socket') + 1], 'authority-2/operator.sock')
+            # #1222: recover pins the fresh authority after VR's binding confirms; nothing pins it before
+            template = Path(rec[rec.index('--pin-pos-policy') + 1])
+            self.assertEqual(json.loads(template.read_text()), {'network':'0x' + '00'*32, 'chainId':7, 'election':'0x' + '22'*20})
+            self.assertFalse(any(c[:2] == ['signing-authority', 'pos-policy'] for c in calls), 'recover pins the authority itself')
             init, = [c for c in calls if c[:2] == ['validator', 'init']]
             self.assertEqual(init[init.index('--evm-authority-socket') + 1], 'authority-2/operator.sock')
             self.assertEqual(init[init.index('--id') + 1], '3')
@@ -255,6 +297,75 @@ class ValidatorContainer(unittest.TestCase):
                 self.assertEqual(shard[shard.index('--signing-authority-socket') + 1], str(home/'authority-2/client.sock'))
                 self.assertEqual(shard[shard.index('--archive-store') + 1], str(home/'evm-2/archive'))
 
+
+    def test_recover_resumes_an_older_journal_at_the_transactions_phase(self):
+        """sol's review of #1328: a journal that reached `transactions` under the pin-first container (pos-policy.json, no template)
+        resumes: the template is written at the transactions entry and passed to recover."""
+        with tempfile.TemporaryDirectory() as path:
+            home, calls = self.volume(path), []
+            (home/'authority-2').mkdir()
+            (home/'evm-2').mkdir()
+            (home/'network.json').write_text(json.dumps({'ports':[1, 2, 3]}))
+            (home/'authority-2/pos-policy.json').write_text(json.dumps({'ids':[3]}))
+            (home/'authority-2/fingerprint').write_text('new')   # the authority phase stamped it
+            (home/'authority-2/node-info.json').write_text(json.dumps({'nodeId':'16Uiu2new', 'sigKey':'0x02AB'}))
+            (home/'recover.json').write_text(json.dumps({'phase':'transactions', 'id':3, 'old':1, 'new':2,
+                                                          'scope':{'rootEpoch':2, 'shardEpoch':2}}))
+            info = {'nodeId':'16Uiu2new', 'sigKey':'0x02AB'}
+            def tool(*args, **_):
+                calls.append([str(a) for a in args])
+                if 'node-info' in args:
+                    (home/'authority-2/node-info.json').write_text(json.dumps(info))
+                if args[:2] == ('q3', 'shard-conf'):
+                    Path(args[args.index('--out') + 1]).write_text(json.dumps({'epoch':2, 'validators':[{'nodeId':'16Uiu2new', 'sigKey':'0x02ab'}]}))
+                return SimpleNamespace(stdout='{}', returncode=0)
+            def verified_cli(binary, *args, **options):
+                self.assertEqual(binary, 'handoff-ubft')
+                return tool(*args, **options)
+            status = {'signingKeyFingerprint':'new', 'enrollmentComplete':False}
+            advanced = []
+            patches = [*self.patched(home, calls), patch.object(validator, 'ubft', tool),
+                       patch.object(validator, 'command', verified_cli),
+                       patch.object(validator, 'RELEASE', home/'release'),
+                       patch.object(validator, 'authority_status', return_value=status),
+                       patch.object(validator, 'root_status', return_value={'activeEpoch':3}),
+                       patch.object(validator, 'advance', side_effect=lambda target: advanced.append((target, validator.auth_dir().name))),
+                       patch.object(validator, 'local_status', return_value=SimpleNamespace(stdout='{"member":true}')),
+                       patch.object(validator, 'show_status')]
+            (home/'release').mkdir()
+            for name, doc in (('manifest.json', {'chain_id':7}), ('vr-deployment.json', {'networkWord':'0x' + '00'*32}),
+                              ('deployment.json', {'election':'0x' + '22'*20})):
+                (home/'release'/name).write_text(json.dumps(doc))
+            self.assertEqual(self.run_patched(patches, validator.recover, self.settings(), {}), 0)
+            order = [c[:2] for c in calls if c[0] == 'validator']
+            self.assertEqual(order, [['validator', 'recover'], ['validator', 'init']])   # the transactions before the relink
+            rec, = [c for c in calls if c[:2] == ['validator', 'recover']]
+            self.assertEqual(rec[rec.index('--old-authority-home') + 1], 'authority')
+            self.assertEqual(rec[rec.index('--new-evm-authority-socket') + 1], 'authority-2/operator.sock')
+            # #1222: recover pins the fresh authority after VR's binding confirms; nothing pins it before
+            template = Path(rec[rec.index('--pin-pos-policy') + 1])
+            self.assertEqual(json.loads(template.read_text()), {'network':'0x' + '00'*32, 'chainId':7, 'election':'0x' + '22'*20})
+            self.assertFalse(any(c[:2] == ['signing-authority', 'pos-policy'] for c in calls), 'recover pins the authority itself')
+            init, = [c for c in calls if c[:2] == ['validator', 'init']]
+            self.assertEqual(init[init.index('--evm-authority-socket') + 1], 'authority-2/operator.sock')
+            self.assertEqual(init[init.index('--id') + 1], '3')
+            self.assertIn(['signing-authority', 'complete-enrollment', '--shard-conf', str(home/'authority-2/activated-shard.json'),
+                           '--operator-socket', str(home/'authority-2/operator.sock'), '--operator-credential', str(home/'authority-2/operator.cred')], calls)
+            self.assertEqual(advanced, [(3, 'authority-2')])
+            self.assertEqual((home/'authority-2/fingerprint').read_text(), 'new')
+            self.assertEqual(json.loads((home/'recover.json').read_text())['phase'], 'activated')
+            self.assertEqual((home/'authority/lifetime').read_text(), 'fail-stop\n')
+            with patch.object(validator, 'HOME', home), patch.object(validator, 'RELEASE', home/'release'):
+                self.assertEqual((validator.slot(), validator.auth_dir().name, validator.evm_dir().name, validator.ureth_dir().name,
+                                  validator.active_file().name), (2, 'authority-2', 'evm-2', 'ureth-2', 'shard-active-2.json'))
+                (home/'release/fee-collector.txt').write_text('0x' + '33'*20)
+                (home/'bootstrap.json').write_text('{"body":"0x01"}')
+                with patch.object(validator, 'peers', return_value=['/ip4/1/tcp/1/p2p/a', '/ip4/1/tcp/2/p2p/b']):
+                    shard = [str(x) for x in validator.shard_command({'ports':[1, 2, 3], 'announce':None}, {'utb_genesis_id':'0x01'}, 2)]
+                self.assertEqual(shard[1:3], ['shard-node', 'restore'])   # the fresh node joins from the seed, staging-only
+                self.assertEqual(shard[shard.index('--home') + 1], str(home/'evm-2'))
+                self.assertEqual(shard[shard.index('--signing-authority-socket') + 1], str(home/'authority-2/client.sock'))
+                self.assertEqual(shard[shard.index('--archive-store') + 1], str(home/'evm-2/archive'))
     def test_an_activation_that_does_not_name_the_fresh_key_is_refused(self):
         info = {'nodeId':'16Uiu2new', 'sigKey':'0x02ab'}
         validator.check_activated_conf({'validators':[{'nodeId':'16Uiu2new', 'sigKey':'0x02AB'}]}, info)
@@ -466,6 +577,14 @@ class VRRecoverStage(unittest.TestCase):
         self.assertEqual(out['0xr'], {'finalizeCandidate': 3, 'finalizeReverted': 2, 'VR.publish': 2, 'publishReverted': 0,
                                       'gas': 1951, 'wastedGas': 951})
 
+    def test_finalizer_after_run_ignores_previous_result_transactions(self):
+        import vr_late_joiner
+        old = {'result': '0xold', 'kind': 'VR.publish', 'status': '0x0', 'gasUsed': 80}
+        fresh = {'result': '0xnew', 'kind': 'VR.publish', 'status': '0x1', 'gasUsed': 100}
+        summary = vr_late_joiner.publication_summary([old, fresh], exclude={'0xold'})
+        self.assertEqual(set(summary), {'0xnew'})
+        self.assertEqual(summary['0xnew']['wastedGas'], 0)
+
 # The execution client's arguments that are the node's own: its data directory, key, JWT and listeners, and the local RPC surface. Every
 # other argument binds it to the chain and must be the genesis ureths' (#1321).
 LOCAL_URETH_FLAGS = frozenset({'--chain', '--datadir', '--p2p-secret-key', '--authrpc.jwtsecret', '--authrpc.addr', '--authrpc.port',
@@ -660,7 +779,7 @@ class LeavingValidator(unittest.TestCase):
 
 
 class JoinInOneRun(unittest.TestCase):
-    """#1323: `join` registers, bonds and delegates in one `validator apply`, and says so when an election passed its authority over."""
+    """Join applies once and refreshes a pending authority if an earlier result excluded it."""
 
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
@@ -689,7 +808,8 @@ class JoinInOneRun(unittest.TestCase):
     def test_apply_runs_once_with_the_pin_template(self):
         calls = []
 
-        def ubft(*args, **kw):
+        def command(binary, *args, **kw):
+            self.assertEqual(binary, 'handoff-ubft')
             calls.append(args)
             if args[:2] == ('validator', 'apply'):
                 template = json.loads(Path(args[args.index('--pin-pos-policy') + 1]).read_text())
@@ -700,7 +820,7 @@ class JoinInOneRun(unittest.TestCase):
 
         class Stop(Exception):
             pass
-        with patch.object(validator, 'ubft', ubft), patch.object(validator, 'authority_status', return_value={'enrollmentComplete': False}), \
+        with patch.object(validator, 'command', command), patch.object(validator, 'authority_status', return_value={'enrollmentComplete': False}), \
                 patch.object(validator, 'wait_for', side_effect=Stop):
             with self.assertRaises(Stop):
                 validator.join(SimpleNamespace(yes=True), {})
@@ -709,18 +829,185 @@ class JoinInOneRun(unittest.TestCase):
         self.assertEqual(json.loads((self.home/'join.json').read_text()), {'phase': 'electing', 'id': 5})
         self.assertFalse(any(c[:2] == ('signing-authority', 'pos-policy') for c in calls), 'apply pins the policy itself')
 
-    def test_a_scope_activated_without_this_node_names_recover(self):
+    def test_a_lagging_joiner_follower_installs_one_epoch_at_a_time(self):
+        (self.home/'join.json').write_text(json.dumps({'phase': 'electing', 'id': 5}))
+        with patch.object(validator, 'root_status') as root, patch.object(validator, 'registry_root_epoch') as registry:
+            root.return_value = {'activeEpoch': 3, 'follower': True}
+            registry.return_value = 5
+            self.assertEqual(validator.joiner_root_catchup_epoch(), 4)
+            registry.return_value = 3
+            self.assertIsNone(validator.joiner_root_catchup_epoch())
+            registry.reset_mock()
+            root.return_value = {'activeEpoch': 3, 'follower': False}
+            self.assertIsNone(validator.joiner_root_catchup_epoch())
+            registry.assert_not_called()
+            root.side_effect = [{'activeEpoch': 3, 'follower': True}, {'activeEpoch': 4, 'follower': False}]
+            registry.return_value = 4
+            self.assertIsNone(validator.joiner_root_catchup_epoch())
+
+    def test_unavailable_hinted_activation_backs_off_without_stopping_other_services(self):
+        self.check_hinted_activation_exit(delay_exit=False)
+
+    def test_hinted_root_exits_between_former_recovery_and_child_exit_polls(self):
+        self.check_hinted_activation_exit(delay_exit=True)
+
+    def check_hinted_activation_exit(self, *, delay_exit):
+        (self.home/'network.json').write_text(json.dumps({'rpc': 'http://127.0.0.1:8545'}))
+        (self.home/'authority/fingerprint').touch()
+        launched = []
+        now = [0]
+        recovery_time = 2 if delay_exit else 1
+        root_args = ['ubft', 'root-node', 'run', '--home', str(self.home/'root')]
+
+        class EndOfTest(Exception):
+            pass
+
+        def popen(args, **kwargs):
+            proc = Mock()
+            proc.poll.return_value = None
+            proc.returncode = None
+            launched.append((args, proc))
+            return proc
+
+        def check_running():
+            for index in (0, 1, 3):  # RPC, execution and shard
+                launched[index][1].terminate.assert_not_called()
+
+        def root_exit(proc):
+            proc.returncode = 1
+            return proc.returncode
+
+        def health_request():
+            if now[0] == 0:
+                self.assertEqual(launched[-1][0][-2:], ['--install-handoff-epoch', '4'])
+                proc = launched[-1][1]
+                if delay_exit:
+                    # The first observation sees a live root. The next poll finds it has exited.
+                    def poll():
+                        proc.poll.side_effect = lambda: root_exit(proc)
+                        return None
+                    proc.poll.side_effect = poll
+                else:
+                    proc.poll.return_value = root_exit(proc)
+                now[0] = 1
+            elif now[0] < recovery_time:
+                self.assertEqual(len(launched), 5)
+                check_running()
+                now[0] = recovery_time
+            elif now[0] == recovery_time:
+                self.assertEqual(launched[-1][0], launched[2][0], 'reopen the same root home without the install flag')
+                check_running()
+                now[0] = recovery_time + 59
+            elif now[0] == recovery_time + 59:
+                self.assertEqual(len(launched), 6, 'no retry during the backoff')
+                check_running()
+                now[0] = recovery_time + 60
+            else:
+                self.assertEqual(launched[-1][0][-2:], ['--install-handoff-epoch', '4'])
+                self.assertEqual(len(launched), 7)
+                check_running()
+                raise EndOfTest
+
+        health = Mock()
+        health.__enter__ = Mock(return_value=health)
+        health.__exit__ = Mock(return_value=False)
+        health.handle_request.side_effect = health_request
+        with patch.object(validator, 'bootstrap'), patch.object(validator, 'link_authority'), \
+                patch.object(validator, 'wait_for'), patch.object(validator, 'root_command', return_value=root_args), \
+                patch.object(validator, 'shard_command', return_value=['ubft', 'shard']), \
+                patch.object(validator, 'ureth_command', return_value=['ureth']), patch.object(validator, 'HTTPServer', return_value=health), \
+                patch.object(validator.threading, 'Thread'), patch.object(validator.signal, 'signal'), \
+                patch.object(validator.time, 'monotonic', side_effect=lambda: now[0]), \
+                patch.object(validator.subprocess, 'Popen', side_effect=popen), \
+                patch.object(validator, 'joiner_root_catchup_epoch', return_value=4):
+            with self.assertRaises(EndOfTest):
+                validator.node(None, {})
+
+    def test_handbook_enrolls_at_root_epoch_two(self):
+        handbook = (Path(__file__).resolve().parents[2]/'docs/operations/validator-handbook.md').read_text()
+        refresh = re.search(r'^advance_authority_from_local_root\(\) \(.*?^\)', handbook, re.M | re.S).group()
+        enroll = re.search(r'^install_authority_scope\(\) \(.*?^\)', handbook, re.M | re.S).group()
+        shell = r"""
+set -e
+ACTIVATED_ROOT_EPOCH=2
+ACTIVATED_SHARD_EPOCH=1
+HANDOFF_MODE=enroll
+HANDOFF_UBFT=handoff_ubft
+AUTH=()
+ubft() {
+  if [[ "$1 $2" == "q3 proof-envelope" ]]; then
+    [[ "$6" == 2 ]] || return 1
+    echo "proof $6"
+  else
+    printf '{"epoch":1}\n' >"${@: -1}"
+  fi
+}
+handoff_ubft() {
+  case "$2" in
+    status) printf '{"lineageEpoch":1}\n' ;;
+    complete-enrollment) echo complete ;;
+    advance-with-proof) echo advance ;;
+    *) return 1 ;;
+  esac
+}
+"""
+        # A stub jq keeps the doctest independent of system package installation.
+        shell += '\njq() { local text; if [[ "${@: -1}" == *.json ]]; then test -s "${@: -1}"; else cat >/dev/null; echo 1; fi; }\n'
+        with tempfile.TemporaryDirectory() as d:
+            done = subprocess.run(['bash', '-c', f'UBFT_HOME="$1"\n{shell}\n{refresh}\n{enroll}\ninstall_authority_scope',
+                                   'handbook', d], text=True, capture_output=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stdout.splitlines(), ['complete', 'proof 2', 'advance'])
+
+    def test_join_refreshes_the_same_authority_after_a_missed_activation(self):
+        path = self.home/'join.json'
+        path.write_text(json.dumps({'phase': 'electing', 'id': 5}))
+        config = self.home/'validator.json'
+        config.write_text(json.dumps({**json.loads(config.read_text()), 'id': 5}))
+        state = {'rootEpoch': 3, 'shardEpoch': 4, 'lineageEpoch': 3, 'enrollmentComplete': False}
+        calls = []
+
         def ubft(*args, **kw):
+            calls.append(args)
             out = Path(args[args.index('--out') + 1])
-            out.write_text(json.dumps({'epoch': 4, 'validators': [{'nodeId': 'other', 'sigKey': '0xcd'}]}))
+            epoch = args[args.index('--epoch') + 1]
+            if args[:2] == ('q3', 'proof-envelope'):
+                self.assertEqual(epoch, 4)
+                out.write_bytes(b'activation four')
+            else:
+                names = [{'nodeId': 'other', 'sigKey': '0xcd'}]
+                if epoch == 5:
+                    names.append({'nodeId': 'evm-node', 'sigKey': '0xAB'})
+                out.write_text(json.dumps({'epoch': epoch, 'validators': names}))
             return SimpleNamespace(returncode=0, stdout='', stderr='')
-        info = {'nodeId': 'evm-node', 'sigKey': '0xAB'}
-        with patch.object(validator, 'ubft', ubft):
-            with self.assertRaises(RuntimeError) as raised:
-                validator.missed_scope(4, info)
-        self.assertIn('shard epoch 4', str(raised.exception))
-        self.assertIn('recover --yes', str(raised.exception))
-        self.assertTrue(validator.names_node({'validators': [{'nodeId': 'evm-node', 'sigKey': '0xab'}]}, info))
-        self.assertFalse(validator.names_node({'validators': [{'nodeId': 'evm-node', 'sigKey': '0xcd'}]}, info))
-        with patch.object(validator, 'ubft', return_value=SimpleNamespace(returncode=1, stdout='', stderr='unknown epoch')):
-            validator.missed_scope(4, info)   # not activated yet: nothing to say
+
+        def authority(*args, **kw):
+            calls.append(args)
+            if args[0] == 'advance-with-proof':
+                self.assertEqual(kw['binary'], 'handoff-ubft')
+                self.assertEqual(args[1:3], ('--scope-only', '--proof'))
+                self.assertEqual(args[3].read_bytes(), b'activation four')
+                state.update(rootEpoch=4, shardEpoch=5, lineageEpoch=4)
+                return SimpleNamespace(returncode=0, stdout=json.dumps(state), stderr='')
+            self.assertEqual(args[0], 'complete-enrollment')
+            self.assertEqual(json.loads(args[2].read_text())['epoch'], 5)
+            state['enrollmentComplete'] = True
+
+        def wait_for(description, probe, **kw):
+            if description == 'activated root epoch naming this authority':
+                self.assertIsNone(probe(), 'the previously expected shard epoch names only incumbents')
+                return probe()
+            self.assertEqual(description, 'committee membership')
+            return probe()
+
+        with patch.object(validator, 'ubft', ubft), patch.object(validator, 'authority', authority), \
+                patch.object(validator, 'authority_status', side_effect=lambda: dict(state)), \
+                patch.object(validator, 'root_status', side_effect=[{'activeEpoch': 4, 'follower': True},
+                                                                    {'activeEpoch': 5, 'follower': False}]), \
+                patch.object(validator, 'wait_for', wait_for), patch.object(validator, 'advance') as advance, \
+                patch.object(validator, 'local_status', return_value=SimpleNamespace(stdout='{"member":true}')), \
+                patch.object(validator, 'show_status'):
+            self.assertEqual(validator.join(SimpleNamespace(yes=True), {}), 0)
+        advance.assert_called_once_with(5)
+        self.assertEqual(json.loads(path.read_text()), {'phase': 'activated', 'id': 5, 'rootEpoch': 5})
+        self.assertEqual([c[0] for c in calls], ['q3', 'q3', 'advance-with-proof', 'q3', 'complete-enrollment'])

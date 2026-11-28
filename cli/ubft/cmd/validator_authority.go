@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -189,13 +190,30 @@ func readRegistrationPolicy(path string) (signingauthority.RegistrationPolicy, e
 	return p, nil
 }
 
+// posPinWait bounds how long apply waits for the authority to verify a pin it cannot verify yet: its execution client may not hold the
+// block that registered the id when apply's endpoint already does.
+var posPinWait = time.Minute
+
 // PinPosPolicy pins the authority's P85 possession scope (the same pin again is a no-op; another is refused for the authority's lifetime).
+// The authority verifies the pin against its own execution client (#1222); a pin it cannot verify yet (signingauthority.ErrPosPending), or
+// one it did not take because it was verifying another (ErrPosBusy), is sent again until it is verified or posPinWait has passed.
 func (a *evmAuthority) PinPosPolicy(ctx context.Context, p signingauthority.PosPolicy) error {
-	err := a.withOperator(ctx, func(ctx context.Context, op *service.OperatorClient) error {
-		return op.SetPosPolicy(ctx, p)
-	})
-	if err != nil {
-		return fmt.Errorf("pinning the signing authority's P85 scope to identities %v: %w", p.IDs, err)
+	deadline := time.Now().Add(posPinWait)
+	for {
+		err := a.withOperator(ctx, func(ctx context.Context, op *service.OperatorClient) error {
+			return op.SetPosPolicy(ctx, p)
+		})
+		if err == nil {
+			return nil
+		}
+		retry := errors.Is(err, signingauthority.ErrPosPending) || errors.Is(err, signingauthority.ErrPosBusy)
+		if !retry || time.Now().Add(posPolicyRetry).After(deadline) {
+			return fmt.Errorf("pinning the signing authority's P85 scope to identities %v: %w", p.IDs, err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(posPolicyRetry):
+		}
 	}
-	return nil
 }

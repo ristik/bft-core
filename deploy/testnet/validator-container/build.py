@@ -4,7 +4,9 @@ import argparse
 import hashlib
 from ipaddress import IPv4Address
 import json
+import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tarfile
@@ -12,6 +14,7 @@ import tempfile
 from urllib.parse import urlsplit
 
 HERE = Path(__file__).resolve().parent
+REPO = HERE.parents[2]
 PUBLIC = {
     'release_url': 'https://pos.staging.unicity.network/release',
     'rpc_url': 'https://pos.staging.unicity.network/rpc',
@@ -25,11 +28,38 @@ def sha(path):
         return hashlib.file_digest(f, 'sha256').hexdigest()
 
 
+def checkout_revision(revision, source):
+    """Export tracked files from the reviewed commit, independent of the builder's working tree."""
+    if not re.fullmatch(r'[0-9a-f]{40}', revision):
+        raise ValueError('--handoff-revision must be the full reviewed commit SHA')
+    if subprocess.check_output(['git', '-C', str(REPO), 'rev-parse', '--verify', revision + '^{commit}'],
+                               text=True).strip() != revision:
+        raise ValueError('--handoff-revision must name a commit')
+    with subprocess.Popen(['git', '-C', str(REPO), 'archive', revision], stdout=subprocess.PIPE) as git:
+        with tarfile.open(fileobj=git.stdout, mode='r|') as tar:
+            tar.extractall(source, filter='data')
+        if git.wait():
+            raise RuntimeError('git archive failed')
+
+
+def build_handoff(source, out):
+    toolchain = json.loads((source/'scripts/ci/lane-pins.json').read_text())['toolchains']['go']
+    # bft-go-base needs libsecp256k1 through CGO. Link the Linux build statically
+    # so the executable runs both on the host and on the image's Debian runtime.
+    subprocess.run(['go', 'build', '-mod=readonly', '-trimpath', '-buildvcs=false',
+                    '-tags', 'netgo,osusergo', '-ldflags', '-linkmode external -extldflags -static',
+                    '-o', str(out), './cli/ubft'],
+                   cwd=source, check=True, env={**os.environ, 'GOENV': 'off', 'GOFLAGS': '', 'GOWORK': 'off',
+                                                'GOOS': 'linux', 'GOARCH': 'amd64', 'GOAMD64': 'v1',
+                                                'CGO_ENABLED': '1', 'GOTOOLCHAIN': 'go' + toolchain})
+
+
 def main():
-    cli = argparse.ArgumentParser(description=__doc__)
+    cli = argparse.ArgumentParser(description=__doc__,
+                                  epilog='Build on Linux amd64 with Go and a C toolchain supporting static linking.')
     cli.add_argument('verified_release', type=Path)
     cli.add_argument('--foundry-archive', required=True, type=Path)
-    cli.add_argument('--handoff-ubft', required=True, type=Path, help='this checkout’s validator publication CLI, built for linux/amd64')
+    cli.add_argument('--handoff-revision', required=True, help='full reviewed commit SHA from which to build the signing and join CLI')
     cli.add_argument('--tag', required=True)
     cli.add_argument('--rehearsal-lock', type=Path, help='independent pins for a private loopback release')
     cli.add_argument('--public-peers', type=Path, help='directory of the verified public peer lists for this release')
@@ -64,17 +94,20 @@ def main():
     if sha(a.foundry_archive) != foundry['sha256']:
         cli.error('Foundry archive differs from the CI pin')
     with tempfile.TemporaryDirectory(prefix='validator-image-') as temp:
-        context = Path(temp)
+        source, context = Path(temp)/'source', Path(temp)/'context'
+        context.mkdir()
+        checkout_revision(a.handoff_revision, source)
+        build_handoff(source, context/'handoff-ubft')
+        package = source/'deploy/testnet/validator-container'
         for name in ('ubft','unicity-reth'):
             shutil.copyfile(release/name, context/name)
             if sha(context/name) != entries[name]:
                 cli.error(f'{name} differs from the pinned release')
-        for path in (HERE/'Dockerfile', HERE/'debian-packages.txt', HERE/'validator.py', HERE.parent/'validator_rpc.py',
-                     HERE.parent/'gateway.py', HERE.parent/'public_relay.py'):
+        for path in (package/'Dockerfile', package/'debian-packages.txt', package/'validator.py', package.parent/'validator_rpc.py',
+                     package.parent/'gateway.py', package.parent/'public_relay.py'):
             shutil.copyfile(path, context/path.name)
-        shutil.copyfile(a.handoff_ubft, context/'handoff-ubft')
         (context/'faucet').mkdir()
-        shutil.copyfile(HERE.parent/'faucet/gateway.py', context/'faucet/gateway.py')
+        shutil.copyfile(package.parent/'faucet/gateway.py', context/'faucet/gateway.py')
         with tarfile.open(a.foundry_archive) as archive:
             member = archive.getmember('cast') if 'cast' in archive.getnames() else archive.getmember('./cast')
             if not member.isfile():
@@ -83,6 +116,8 @@ def main():
                 shutil.copyfileobj(src, dst)
         (context/'release-lock.json').write_text(json.dumps(lock, sort_keys=True)+'\n')
         subprocess.run(['docker','build','--platform','linux/amd64','--provenance=false','--build-arg','SOURCE_DATE_EPOCH=0',
+                        '--label', 'org.unicity.handoff-ubft.revision=' + a.handoff_revision,
+                        '--label', 'org.unicity.handoff-ubft.sha256=' + sha(context/'handoff-ubft'),
                         '--tag',a.tag,str(context)], check=True)
 
 

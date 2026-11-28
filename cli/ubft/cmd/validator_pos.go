@@ -266,6 +266,9 @@ func validatorApplyPoS(cmd *cobra.Command, f *txFlags, pf *posFlags) error {
 				fmt.Fprintf(w, "  pinned the signing authority's P85 scope to identity %d\n", id)
 			}
 			evmSig, err = keys.EVMAuth.DelegationPossession(ctx, signingauthority.DelegationPossessionRequest{Network: network, Chain: chainWord, Election: election, Request: dreq})
+			if f.DryRun && errors.Is(err, signingauthority.ErrPosPolicy) {
+				return nil, fmt.Errorf("the authority refused delegation possession: %w. A dry run cannot set the P85 pin. If the authority is unpinned, run apply with --pin-pos-policy and without --dry-run to pin it before admitting the delegation", err)
+			}
 		} else {
 			evmSig, err = vrclient.SignDigest(evm.Key, digest)
 		}

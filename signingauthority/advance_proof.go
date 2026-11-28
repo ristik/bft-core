@@ -105,12 +105,14 @@ func (a *Authority) AdvanceWithProof(ctx context.Context, bundle []byte) (Advanc
 		return AdvanceResult{}, fmt.Errorf("%w: this authority was enrolled without a lineage pin", ErrLineageUnverified)
 	}
 	enroll, lineage, trust, scope, retired, recovery := a.enroll.clone(), a.lineage, a.trust, a.scopeVersion, a.retired, a.recovery
+	pending := !enroll.complete() && a.pendingJoinScope
+	b1Chain, pos := a.posB1Chain, a.pos
 	pub, err := publicKeyOf(a.signer)
 	a.mu.Unlock()
 	if err != nil {
 		return AdvanceResult{}, err
 	}
-	if !enroll.complete() {
+	if !enroll.complete() && !pending {
 		return AdvanceResult{}, fmt.Errorf("%w: no shard configuration has been stated", ErrEnrollmentIncomplete)
 	}
 	current := *enroll.RootEpoch
@@ -139,6 +141,7 @@ func (a *Authority) AdvanceWithProof(ctx context.Context, bundle []byte) (Advanc
 	}
 	result := AdvanceResult{Epoch: step.Epoch, Replay: step.Replay, Retired: retired}
 	var successor *scopeChange
+	var pendingSuccessor *scopeChange
 	var adopted *types.RootTrustBaseV1 // the lineage's trust of the current epoch, held from now on
 	switch {
 	case step.Replay:
@@ -162,7 +165,11 @@ func (a *Authority) AdvanceWithProof(ctx context.Context, bundle []byte) (Advanc
 		if err := sameTrust(ctx, trust, lineage, current); err != nil {
 			return AdvanceResult{}, err
 		}
-		successor, err = verifySuccessor(lineage, next, step, enroll, pub)
+		if pending {
+			pendingSuccessor, err = verifyPendingJoinSuccessor(lineage, next, step, enroll)
+		} else {
+			successor, err = verifySuccessor(lineage, next, step, enroll, pub)
+		}
 		if err != nil {
 			return AdvanceResult{}, err
 		}
@@ -182,9 +189,19 @@ func (a *Authority) AdvanceWithProof(ctx context.Context, bundle []byte) (Advanc
 	if a.state != healthActive {
 		return AdvanceResult{}, fmt.Errorf("%w: this authority has latched faulted", ErrStateUntrusted)
 	}
-	if a.scopeVersion != scope || a.lineage != lineage || a.retired != retired {
-		// the operator's recovery advance (the only other writer) landed meanwhile: verify again against what is now held
+	if a.scopeVersion != scope || a.lineage != lineage || a.retired != retired || a.enroll.complete() != enroll.complete() ||
+		(pending && (a.pos != pos || a.posB1Chain != b1Chain)) {
+		// Enrollment, provisioning or an operator-trusted advance landed meanwhile. Verify again against what is now held.
 		return AdvanceResult{}, fmt.Errorf("%w: the authority's scope changed while the proof was verified", ErrConflict)
+	}
+	if pendingSuccessor != nil {
+		pendingSuccessor.shardEpoch, err = a.pendingJoinEpochLocked(pendingSuccessor.conf, pub)
+		if err != nil {
+			return AdvanceResult{}, err
+		}
+		if a.joinScopeProved && pendingSuccessor.shardEpoch != enroll.ShardEpoch {
+			return AdvanceResult{}, fmt.Errorf("%w: the pending join authority already proved possession for shard epoch %d", ErrContextMismatch, enroll.ShardEpoch)
+		}
 	}
 	if successor != nil {
 		if a.rec.checkInvariants() != nil || a.generation == math.MaxUint64 || a.scopeVersion == math.MaxUint64 {
@@ -197,6 +214,11 @@ func (a *Authority) AdvanceWithProof(ctx context.Context, bundle []byte) (Advanc
 		a.recovery = nil // eligibility lasts for the immediate successor of the exclusion
 	}
 	switch {
+	case pendingSuccessor != nil:
+		a.enroll.RootEpoch = PinRootEpoch(step.Epoch)
+		a.enroll.ShardEpoch = pendingSuccessor.shardEpoch
+		a.trust = currentTrust{base: pendingSuccessor.trust}
+		result.Advanced = true
 	case successor == nil:
 		if adopted != nil {
 			// the same committee, now with the authenticated boundary: the scope, its version and the session are unchanged
@@ -210,6 +232,11 @@ func (a *Authority) AdvanceWithProof(ctx context.Context, bundle []byte) (Advanc
 		a.sessionIssued = false
 		result.Retired = true
 	default:
+		if successor.conf != nil {
+			if err := a.noteConfLocked(successor.conf); err != nil {
+				return AdvanceResult{}, err
+			}
+		}
 		a.publishScopeLocked(a.enroll, successor.shardEpoch, successor.confHash, successor.trust)
 		a.retired, result.Retired = false, false
 		result.Advanced = true
@@ -234,6 +261,8 @@ type scopeChange struct {
 	shardEpoch uint64
 	confHash   []byte
 	trust      *types.RootTrustBaseV1
+	// conf is the activated configuration of a coupled change (nil for a root-only one): its chain id is checked against the P85 pin
+	conf *types.PartitionDescriptionRecord
 }
 
 // verifySuccessor derives the authority's scope from the activation that follows its epoch, from nothing but the verified step and its
@@ -287,7 +316,7 @@ func scopeForTransition(next *activationproof.Lineage, step activationproof.Step
 			if !bytes.Equal(v.SigKey, pub) {
 				return &scopeChange{retire: true}, nil
 			}
-			return &scopeChange{shardEpoch: conf.Epoch, confHash: hash, trust: trust}, nil
+			return &scopeChange{shardEpoch: conf.Epoch, confHash: hash, trust: trust, conf: conf}, nil
 		}
 	}
 	return &scopeChange{retire: true, recovery: excludedByPrimary(step, enroll, pub, conf.Epoch, hash)}, nil

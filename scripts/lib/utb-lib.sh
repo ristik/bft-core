@@ -421,6 +421,10 @@ utb_import_report() {
 
 # before the V3 handoff: stop the root, let the others go on UTB_IMPORT_GAP rounds, restart it in the genesis epoch with its store, wait for the state import
 utb_step_s1() {
+  lane_with_root_watch_paused utb_restart_and_wait_for_import
+}
+
+utb_restart_and_wait_for_import() {
   local out node ref log gap start now i marker; out="$(utb_dir)/state-import"; mkdir -p "$out"
   node=$(utb_import_root); ref=$(h3_first_root); gap=${UTB_IMPORT_GAP:-12}; log="test-nodes/root$node/debug.log"
   [ "$node" != "$ref" ] || { echo "the root to import state must not be the reference root $ref" >&2; return 1; }

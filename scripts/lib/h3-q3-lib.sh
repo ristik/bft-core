@@ -113,10 +113,14 @@ h3_q3_wait_joiner() { # entity
 
 # After the Commit: the new root (already running as a follower) restarts into the install epoch first, the retained roots follow, the replaced one stops.
 h3_q3_activate_coupled() { # epoch replaced new
+  lane_with_root_watch_paused h3_q3_restart_coupled_roots "$@"
+}
+
+h3_q3_restart_coupled_roots() { # epoch replaced new
   local epoch=$1 replace=$2 new=$3 i oldBoot
   oldBoot=$(m2_root_addr "$replace")
   # the new root is a running follower (a joiner) or a stopped member that returns (the recovery's root): either way it restarts into the install epoch
-  [ ! -f "test-nodes/root$new/pid" ] || stop_pidfile "test-nodes/root$new/pid" 'ubft root-node' || true
+  stop_pidfile "test-nodes/root$new/pid" 'ubft root-node' || return
   for _ in $(seq 1 50); do lsof -nP -iTCP:"$(m2_rpc_port "$new")" -sTCP:LISTEN >/dev/null 2>&1 || break; sleep 0.2; done
   m2_archive_root_state "$new" "$epoch" || return 1
   m2_start_root "$new" "$epoch" "$oldBoot" || return 1
