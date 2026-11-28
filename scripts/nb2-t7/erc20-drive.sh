@@ -2,11 +2,12 @@
 # Sourced by drive.sh so its process and archive cleanup also covers this workload.
 : "${NB2_ERC20_CONTRACTS:?path to built contracts #107 merge checkout}"
 : "${NB2_ERC20_PLUGIN:?path to built plug-ins #99 merge checkout}"
-: "${NB2_ERC20_ORACLE_SOURCE:?path to the bft-core #1338 checkout}"
-: "${NB2_ERC20_ORACLE_REV:?pinned bft-core #1338 revision}"
+: "${NB2_ERC20_ORACLE_SOURCE:?path to the bft-core #1338 merge checkout}"
+: "${NB2_ERC20_ORACLE_REV:?pinned bft-core #1338 merge commit}"
 export NB2_ERC20_ARTIFACTS="$NB2_ERC20_CONTRACTS/out"
 test "$(git -C "$NB2_ERC20_CONTRACTS" rev-parse HEAD)" = de62921f10be506f3cd7a559ae8541bcb644d0f4
 test "$(git -C "$NB2_ERC20_PLUGIN" rev-parse HEAD)" = 43c4535deccee68f45a2400848ec9b28dbec9999
+test "$NB2_ERC20_ORACLE_REV" = 5bf749649d1f61c8ac81c1fc9983019833462115
 test "$(git -C "$NB2_ERC20_ORACLE_SOURCE" rev-parse HEAD)" = "$NB2_ERC20_ORACLE_REV"
 test -f "$NB2_ERC20_ORACLE_SOURCE/nb2ref/erc20_vectors_test.go"
 for checkout in "$NB2_ERC20_CONTRACTS" "$NB2_ERC20_PLUGIN" "$NB2_ERC20_ORACLE_SOURCE"; do

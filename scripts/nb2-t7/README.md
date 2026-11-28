@@ -142,10 +142,9 @@ existing UCT build inputs above. Also set:
   the ERC20 production artifacts in `out`.
 - `NB2_ERC20_PLUGIN` to the clean #99 merge checkout `43c4535de` after
   `npm ci` and `npm run build`.
-- `NB2_ERC20_ORACLE_SOURCE` to the clean #1338 checkout and
-  `NB2_ERC20_ORACLE_REV` to its full revision. Use the landed merge when
-  available. Run the Go oracle from the selected checkout before starting
-  the lane.
+- `NB2_ERC20_ORACLE_SOURCE` to the clean #1338 merge checkout and
+  `NB2_ERC20_ORACLE_REV` to `5bf749649d1f61c8ac81c1fc9983019833462115`.
+  Run the Go oracle from that checkout before starting the lane.
 
 To use slot 3, enter a separate network namespace with only loopback up
 and set its ephemeral port range to 40000–60999. Run the launcher as the
