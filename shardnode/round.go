@@ -567,6 +567,17 @@ func (r *Round) MarkRestored(round uint64) {
 func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) (outErr error) {
 	ph := &phaseTrace{start: time.Now()}
 	defer ph.log(ctx, r, uc, tr)
+	var skipReason string
+	if tr.Leader == r.nodeID {
+		defer func() {
+			if outErr != nil {
+				skipReason = outErr.Error()
+			}
+			if skipReason != "" {
+				r.traceRound(ctx, uc, tr.Round, "leader skip", slog.String("reason", skipReason))
+			}
+		}()
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	ctx = WithProofEvidence(ctx)
@@ -682,6 +693,7 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 	}
 	// THE FOLLOWER BOUNDARY. A non-active node has now observed and executed what is certified; it produces nothing for the next round.
 	if !r.takeLease() {
+		skipReason = nonVotingFollower
 		r.health.updateVoting(false, nonVotingFollower)
 		return nil
 	}
@@ -689,12 +701,14 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		var end func()
 		ctx, end, err = r.activation.work(ctx, uc.GetRootEpoch())
 		if errors.Is(err, ErrRootActivationSuperseded) {
+			skipReason = err.Error()
 			return nil
 		}
 		defer end()
 		defer func() {
 			if errors.Is(outErr, ErrRootActivationSuperseded) ||
 				(errors.Is(outErr, context.Canceled) && errors.Is(context.Cause(ctx), ErrRootActivationSuperseded)) {
+				skipReason = ErrRootActivationSuperseded.Error()
 				if r.log != nil {
 					r.log.Info("speculative work ended at root activation", "rootEpoch", uc.GetRootEpoch(), "round", tr.Round)
 				}
@@ -781,6 +795,7 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 	// what the certificate certifies — but building is not: it would produce a fresh candidate from
 	// whatever the executor holds now. Re-send exactly what was signed for this authorization.
 	if r.completed.authorizes(uc, exp) {
+		skipReason = "authorization already answered"
 		if r.log != nil {
 			r.log.DebugContext(ctx, "re-delivery of an authorization already answered: re-sending the identical signed request",
 				slog.Uint64("round", exp.Round), slog.Uint64("partitionRound", uc.GetRoundNumber()))
@@ -796,6 +811,7 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 	// nothing to re-send; what must not happen is a second candidate for the same round. The round
 	// abstains again with the reason it recorded the first time, and the signer is not asked again.
 	if r.attempted.answers(uc, exp) {
+		skipReason = r.attempted.reason
 		if r.log != nil {
 			r.log.DebugContext(ctx, "re-delivery of an authorization already refused: abstaining again without rebuilding",
 				slog.Uint64("round", exp.Round), slog.Uint64("partitionRound", uc.GetRoundNumber()),
@@ -830,6 +846,7 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 	// node keeps receiving payloads — which is what lets it recover — and does not lead.
 	leader := tr.Leader
 	if identityErr != nil && leader == r.nodeID {
+		skipReason = identityErr.Error()
 		r.metrics.recordIRDivergence(ctx, "identity_declined_leadership")
 		if r.log != nil {
 			r.log.WarnContext(ctx, "declining to lead this round: cannot prove the executor is on the certified block, and building would finalize it",
@@ -845,6 +862,7 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 	// half of the gate. A follower does not build, so a refusal here leaves the follower to verify and
 	// follow and only withholds its signature further down.
 	if identityErr == nil && readinessErr != nil && leader == r.nodeID {
+		skipReason = readinessErr.Error()
 		r.metrics.recordIRDivergence(ctx, metricRecordReadinessDeclinedLeadership)
 		r.health.updateVoting(false, nonVotingRecordReadiness+": "+readinessErr.Error())
 		if r.log != nil {
@@ -859,11 +877,13 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 	}
 	ph.mark("before-produce")
 	if r.leaseLost() {
+		skipReason = nonVotingFollower
 		r.health.updateVoting(false, nonVotingFollower)
 		return nil
 	}
 	block, params, err := r.produceBlock(ctx, head, exp, sealHash, leader, uc, tr, readinessTicket)
 	if err != nil {
+		skipReason = err.Error()
 		if errors.Is(err, ErrFollower) { // the role ended before one of the round's irreversible actions: an abstention, not a failure
 			r.health.updateVoting(false, nonVotingFollower)
 			return nil
@@ -962,6 +982,7 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		// the next attempt; see docs/engine-api-adapter-plan.md §6's
 		// status policy table.
 		r.metrics.recordIRDivergence(ctx, "self_verify_pending_timeout")
+		skipReason = "executor remained " + status.String()
 		if r.log != nil {
 			r.log.WarnContext(ctx, "abstaining from round: executor still reports pending status after the retry deadline",
 				slog.Uint64("round", exp.Round), slog.String("status", status.String()))
@@ -1021,11 +1042,13 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 	// and observed history. A refusal withholds the signature only: the block above was built or
 	// verified and r.pending is recorded, so this node stays a warm follower.
 	if readinessErr != nil {
+		skipReason = readinessErr.Error()
 		r.recordReadinessAbstained(ctx, readinessErr)
 		return nil
 	}
 	if err := r.revalidateUnderFinality(ctx, readinessTicket, uc); err != nil {
 		if errors.Is(err, errReadinessRevoked) {
+			skipReason = err.Error()
 			r.recordReadinessRevoked(ctx, err)
 			return nil
 		}
@@ -1043,6 +1066,7 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 	// scenario with quorum numerically intact. Disseminating a block is not signing a statement
 	// about it, so withholding it buys no safety and costs the shard every round this node leads.
 	if r.abstainRestored(ctx, exp) {
+		skipReason = "restored process cannot sign"
 		return nil
 	}
 
@@ -1081,12 +1105,14 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		return fmt.Errorf("shardnode: execution journal stopped before signature: %s", r.health.Snapshot().ExecutionRecoveryDetail)
 	}
 	if r.leaseLost() { // retired (or re-published) while this round built or verified: no signature
+		skipReason = nonVotingFollower
 		r.health.updateVoting(false, nonVotingFollower)
 		return nil
 	}
 	signed, err := r.certSigner.Sign(ctx, uc, tr, req)
 	if err != nil {
 		reason := signingDeclinedReason(err)
+		skipReason = reason
 		r.attempted.reason = reason
 		r.metrics.recordIRDivergence(ctx, "signing_declined")
 		r.health.updateVoting(false, reason)
@@ -1166,7 +1192,9 @@ func (r *Round) sendUnder(ctx context.Context, uc *types.UnicityCertificate, req
 	ctx = withRequestOrigin(ctx, uc.GetRootEpoch())
 	var err error
 	for attempt := 0; ; attempt++ {
-		if err = r.submitter.Submit(ctx, req); err == nil {
+		err = r.submitter.Submit(ctx, req)
+		r.traceRound(ctx, uc, round, "send", slog.Int("attempt", attempt+1), slog.Any("error", err))
+		if err == nil {
 			return nil
 		}
 		if attempt >= submitRetries || ctx.Err() != nil || neverPending(err) {
@@ -1809,6 +1837,7 @@ func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation
 		}
 		buildStart := time.Now()
 		r.pacer.mark(buildStart)
+		r.traceRound(ctx, held, exp.Round, "leader build")
 		id, err := r.buildFinal(ctx, params, held, ticket)
 		if err != nil {
 			return Block{}, params, fmt.Errorf("build: %w", err)
@@ -1847,6 +1876,7 @@ func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation
 			if err := underRootPublication(ctx, func(sendCtx context.Context) error { return r.disseminator.Publish(sendCtx, exp.Round, block) }); err != nil {
 				return Block{}, params, fmt.Errorf("publishing round %d block: %w", exp.Round, err)
 			}
+			r.traceRound(ctx, held, exp.Round, "leader publish")
 		}
 		return block, params, nil
 	}
@@ -1872,18 +1902,22 @@ func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation
 		defer watch(held, func() { cut(errAwaitSuperseded) })()
 	}
 	waitStart := time.Now()
+	r.traceRound(ctx, held, exp.Round, "follower wait start",
+		slog.String("leader", leader), slog.Duration("budget", budget))
 	block, err := r.disseminator.Await(waitCtx, exp.Round)
-	if r.log != nil {
+	if r.log != nil && r.log.Enabled(ctx, slog.LevelDebug) {
 		outcome := "block"
 		switch {
 		case err != nil && errors.Is(context.Cause(waitCtx), errAwaitSuperseded):
 			outcome = "superseded"
-		case err != nil:
+		case errors.Is(context.Cause(waitCtx), context.DeadlineExceeded):
 			outcome = "timeout"
+		case err != nil:
+			outcome = "error"
 		}
-		r.log.LogAttrs(ctx, slog.LevelDebug, "round: follower wait for the leader's block ended",
-			slog.Uint64("round", exp.Round), slog.Uint64("shardRound", held.GetRoundNumber()), slog.Uint64("rootRound", held.GetRootRoundNumber()),
-			slog.String("outcome", outcome), slog.Duration("waited", time.Since(waitStart)), slog.Duration("budget", budget))
+		r.traceRound(ctx, held, exp.Round, "follower wait end",
+			slog.String("leader", leader), slog.String("outcome", outcome), slog.Any("error", err),
+			slog.Duration("waited", time.Since(waitStart)), slog.Duration("budget", budget))
 	}
 	if err != nil && errors.Is(context.Cause(waitCtx), errAwaitSuperseded) {
 		pollCtx, pollCancel := context.WithTimeout(ctx, redeliveryPoll)
@@ -1952,6 +1986,20 @@ func (p *phaseTrace) mark(name string) {
 	p.last = now
 }
 
+func (r *Round) traceRound(ctx context.Context, uc *types.UnicityCertificate, round uint64, action string, attrs ...slog.Attr) {
+	if r.log == nil || !r.log.Enabled(ctx, slog.LevelDebug) {
+		return
+	}
+	fields := []slog.Attr{
+		slog.String("nodeID", r.nodeID), slog.String("action", action), slog.Uint64("round", round),
+	}
+	if uc != nil {
+		fields = append(fields, slog.Uint64("shardRound", uc.GetRoundNumber()),
+			slog.Uint64("rootRound", uc.GetRootRoundNumber()), slog.Uint64("rootEpoch", uc.GetRootEpoch()))
+	}
+	r.log.LogAttrs(ctx, slog.LevelDebug, "shard round decision", append(fields, attrs...)...)
+}
+
 func (p *phaseTrace) log(ctx context.Context, r *Round, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) {
 	if r.log == nil {
 		return
@@ -1959,6 +2007,7 @@ func (p *phaseTrace) log(ctx context.Context, r *Round, uc *types.UnicityCertifi
 	p.mark("rest")
 	attrs := append([]slog.Attr{
 		slog.Uint64("shardRound", uc.GetRoundNumber()), slog.Uint64("rootRound", uc.GetRootRoundNumber()), slog.Uint64("round", tr.Round),
+		slog.String("nodeID", r.nodeID), slog.String("leader", tr.Leader),
 		slog.Duration("total", time.Since(p.start)),
 	}, p.marks...)
 	r.log.LogAttrs(ctx, slog.LevelDebug, "round: HandleCertificate phases", attrs...)
