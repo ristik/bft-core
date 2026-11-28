@@ -60,8 +60,8 @@
     },
     "contracts": {
       "repository": "https://github.com/ristik/unicity-pos-contracts.git",
-      "commit": "9b02951640877d6b4054df2ab6fce307629d6e61",
-      "note": "contracts main at the merge of contracts#105 (9b029516, bft-core#1319; its sources are 85950b44: record kind 9 PoPMissed in the SealRegistry, VR and custody; ElectionPolicy.parkMissed parks a certified incumbent)",
+      "commit": "de62921f10be506f3cd7a559ae8541bcb644d0f4",
+      "note": "contracts main at the merge of contracts#107 (de62921f, ERC20 NB2 contracts and proof fixtures)",
       "branch": "main"
     },
     "state-transition-sdk-js": {
