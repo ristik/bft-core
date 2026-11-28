@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Sourced by drive.sh so its process and archive cleanup also covers this workload.
-: "${NB2_ERC20_CONTRACTS:?path to built contracts #107 checkout}"
-: "${NB2_ERC20_PLUGIN:?path to built plug-ins #99 checkout}"
-: "${NB2_ERC20_ORACLE_REV:?pinned bft-core #1338 revision}"
+: "${NB2_ERC20_CONTRACTS:?path to built contracts #107 merge checkout}"
+: "${NB2_ERC20_PLUGIN:?path to built plug-ins #99 merge checkout}"
+: "${NB2_ERC20_ORACLE_SOURCE:?path to the merged bft-core #1338 checkout}"
+: "${NB2_ERC20_ORACLE_REV:?bft-core #1338 merge commit}"
 export NB2_ERC20_ARTIFACTS="$NB2_ERC20_CONTRACTS/out"
-test "$(git -C "$NB2_ERC20_CONTRACTS" rev-parse HEAD)" = 821c2501981aff09aa04bdb1daa00150ddac4c6a
-test "$(git -C "$NB2_ERC20_PLUGIN" rev-parse HEAD)" = 539ff23ad9cc36ac26560e76d361caa6094090d6
-test "$NB2_ERC20_ORACLE_REV" = 59bf2c203c693d37fc4ac74986e681309c29ec8c
-for checkout in "$NB2_ERC20_CONTRACTS" "$NB2_ERC20_PLUGIN"; do
+test "$(git -C "$NB2_ERC20_CONTRACTS" rev-parse HEAD)" = de62921f10be506f3cd7a559ae8541bcb644d0f4
+test "$(git -C "$NB2_ERC20_PLUGIN" rev-parse HEAD)" = 43c4535deccee68f45a2400848ec9b28dbec9999
+test "$(git -C "$NB2_ERC20_ORACLE_SOURCE" rev-parse HEAD)" = "$NB2_ERC20_ORACLE_REV"
+test -f "$NB2_ERC20_ORACLE_SOURCE/nb2ref/erc20_vectors_test.go"
+for checkout in "$NB2_ERC20_CONTRACTS" "$NB2_ERC20_PLUGIN" "$NB2_ERC20_ORACLE_SOURCE"; do
   test -z "$(git -C "$checkout" status --porcelain --untracked-files=no)"
 done
 mkdir -p "$scratch/token-build/src"

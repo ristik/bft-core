@@ -138,10 +138,13 @@ Start the same launcher under nohup with `NB2_LANE_SLOT=wait`,
 waits for slot 0 or 2 and claims one before starting the lane. Use the
 existing UCT build inputs above. Also set:
 
-- `NB2_ERC20_CONTRACTS` to a clean #107 checkout with the ERC20 production
-  artifacts in `out`.
-- `NB2_ERC20_PLUGIN` to a clean #99 checkout after `npm ci` and `npm run build`.
-- `NB2_ERC20_ORACLE_REV` to `59bf2c203c693d37fc4ac74986e681309c29ec8c`.
+- `NB2_ERC20_CONTRACTS` to the clean #107 merge checkout `de62921f1` with
+  the ERC20 production artifacts in `out`.
+- `NB2_ERC20_PLUGIN` to the clean #99 merge checkout `43c4535de` after
+  `npm ci` and `npm run build`.
+- `NB2_ERC20_ORACLE_SOURCE` to the clean #1338 merge checkout and
+  `NB2_ERC20_ORACLE_REV` to its full merge commit. Run the Go oracle from
+  this checkout before starting the lane.
 
 After the UCT control the runner deploys two disposable tokens with separate
 vaults. Both use authenticated activation evidence and the TypeScript wallet.
