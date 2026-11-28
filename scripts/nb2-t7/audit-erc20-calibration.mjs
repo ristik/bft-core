@@ -8,8 +8,9 @@ const [, , run, sdk, output] = process.argv;
 assert(run && sdk && output, 'usage: node audit-erc20-calibration.mjs RUN SDK_LIB OUTPUT');
 const load = (name) => import(pathToFileURL(join(sdk, 'nb2', name + '.js')));
 const [{ decodeConfig, domainOf, PRODUCTION_PARAMS }, { decodeDepositProof, verifyReceiptLog, TOPIC },
-  { decodeSignedTx }, { HE }, { checkSegmentLog, genesisHead }, { TrustInput }] = await Promise.all(
-  ['config', 'deposit', 'evm', 'crypto', 'segment', 'trust'].map(load));
+  { decodeSignedTx }, { HE }, { checkSegmentLog, genesisHead }, { TrustInput },
+  { erc20SigningReserve, recoveryCatchUpCalls }] = await Promise.all(
+  ['config', 'deposit', 'evm', 'crypto', 'segment', 'trust', 'recovery-cost'].map(load));
 const read = (path) => readFileSync(join(run, path));
 const json = (path) => JSON.parse(read(path));
 const sha = (value) => createHash('sha256').update(value).digest('hex');
@@ -64,6 +65,7 @@ function signed(prefix, loc, gas, to) {
 
 async function measuredCall(prefix, kind, to, expectedEvent) {
   const { log, loc } = await receipt(prefix);
+  assert.equal(loc.address, to, prefix);
   assert.equal(log.topics[0] && hex(log.topics[0]), expectedEvent, prefix);
   const cost = json(prefix + '.cost.json');
   const bid = json(prefix + '.submitted.json');
@@ -91,7 +93,8 @@ async function measuredCall(prefix, kind, to, expectedEvent) {
     blockTimestamp: Number(log.header.timestamp), payer: hex(from), nonce: Number(request.nonce),
     submittedGas: Number(request.gas), gasUsed: Number(gasUsed), signedBytes: raw.length,
     calldataBytes: request.data.length, includedBaseFeeWei: String(baseFee), tipWei: String(tip),
-    maxFeePerGasWei: String(request.maxFeePerGas), paidFeeWei: cost.paidFee, inclusionBlocks, signingState: state };
+    maxFeePerGasWei: String(request.maxFeePerGas), paidFeeWei: cost.paidFee, inclusionBlocks,
+    inclusionMs: cost.inclusionMs, signingState: state };
 }
 
 const runCalls = [];
@@ -211,6 +214,37 @@ const reserveCeiling = recoveryCeiling === null ? null : BigInt(nonceCount) * pe
 const initial = path[0].signingState;
 const observedPathBlocks = recovered.block - Number(initial.finalizedBlockNumber);
 const fullPathFeeAtFullBlocks = boundBaseFee(BigInt(initial.finalizedBaseFee), observedPathBlocks) + tip;
+const passesCandidate = coversSampledInclusion && reserveCeiling !== null && reserveCeiling <= candidateBudget &&
+  reserveCeiling <= BigInt(initial.pendingBalance) && reserveCeiling <= BigInt(initial.finalizedBalance) &&
+  BigInt(initial.pendingNonce) + BigInt(nonceCount) <= BigInt(candidateMaxNonce + 1);
+let candidateSdkReproduced = false;
+if (observedCatchUp && mostSealsInSampledFinalWindow <= 1 && passesCandidate) {
+  const gas = BigInt(limits.submittedGas);
+  const advanceWindowMs = BigInt(samples.at(-1));
+  const finalInclusionMs = BigInt(Math.max(1, finalEndpointToInclusionSeconds * 1000));
+  const ordinaryInclusionMs = BigInt(Math.max(1, ordinary.inclusionMs, retry.inclusionMs));
+  const progressWindowMs = BigInt(restored.endMs - checkpoint.startMs) + BigInt(ordinaryAttempts) * ordinaryInclusionMs;
+  const qualifiedForMs = BigInt(n) * advanceWindowMs + finalInclusionMs;
+  const backlog = {
+    signedStart: 0n, observed: BigInt(backlogAtProgressStart), duringProgress: BigInt(duringProgress),
+    peakSeals: BigInt(peakSeals30s), elapsedMs: 30_000n, receiptP99Ms: BigInt(tauP99Ms),
+    advancePeakSeals: BigInt(b), finalInclusionMs, finalPeakSeals: BigInt(mostSealsInSampledFinalWindow), qualifiedForMs,
+  };
+  const policy = {
+    ...limits, gas, chainId: cfg.chainId, maxNonce: BigInt(candidateMaxNonce), feeBudget: candidateBudget,
+    balance: BigInt(initial.pendingBalance), maxFeePerGas: candidateFee, maxPriorityFeePerGas: tip,
+  };
+  const trialBounds = {
+    feeWindowMs: progressWindowMs + qualifiedForMs, progressWindowMs, advanceWindowMs, maxRunCalls: runCalls.length,
+    ordinary: { gas, calldataBytes: ordinary.calldataBytes, attemptsBeforeFallback: BigInt(ordinaryAttempts), inclusionMs: ordinaryInclusionMs },
+  };
+  assert.equal(recoveryCatchUpCalls(q, backlog), BigInt(n));
+  const quote = (feeBudget) => erc20SigningReserve(
+    recoveryCeiling, runCalls.length, BigInt(n), backlog, { ...policy, feeBudget }, trialBounds);
+  assert.equal(quote(candidateBudget).totalFee, reserveCeiling);
+  assert.throws(() => quote(reserveCeiling - 1n), /insufficient authorized fee budget/);
+  candidateSdkReproduced = true;
+}
 
 writeFileSync(output, JSON.stringify({
   scope: 'Private lane observations and candidate reserve arithmetic',
@@ -224,7 +258,8 @@ writeFileSync(output, JSON.stringify({
     payer: hex(failed.from), gasUsed: Number(BigInt(fail.gasUsed)), signedBytes: failed.raw.length,
     calldataBytes: failed.request.data.length, submittedGas: Number(failed.request.gas), separatePayer: true,
   } },
-  arrivals: { seals, initialBacklog: result.initialBacklog, q, b, tauP99Ms, sampleCount: samples.length,
+  arrivals: { seals, elapsedBetweenFirstAndLastSealSeconds: sealTimes.at(-1) - sealTimes[0],
+    initialBacklog: result.initialBacklog, q, b, tauP99Ms, sampleCount: samples.length,
     peakSeals30s, peakSealsPerSecond, duringProgress, finalEndpointToInclusionSeconds, mostSealsInSampledFinalWindow, final,
     observedCatchUp, exercisedReserve, allAdvancesShrankBacklog, backlogAtProgressStart,
     run: runCalls.map((call) => window(call.prefix.split('/').at(-1))),
@@ -237,7 +272,5 @@ writeFileSync(output, JSON.stringify({
     recoveryCeilingWei: recoveryCeiling?.toString() ?? null, ordinaryCeilingWei: String(ordinaryCeiling),
     reserveCeilingWei: reserveCeiling?.toString() ?? null,
     replacementCeilingPerNonceWei: String(perCall),
-    passesCandidate: coversSampledInclusion && reserveCeiling !== null && reserveCeiling <= candidateBudget &&
-      reserveCeiling <= BigInt(initial.pendingBalance) && reserveCeiling <= BigInt(initial.finalizedBalance) &&
-      BigInt(initial.pendingNonce) + BigInt(nonceCount) <= BigInt(candidateMaxNonce + 1) },
+    passesCandidate, candidateSdkReproduced },
 }, null, 2) + '\n');
