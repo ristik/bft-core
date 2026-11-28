@@ -204,6 +204,13 @@ archive restoration, Resume and three-gap catch-up. The driver records the
 actual packet shapes, the observed segment interval around each phase and
 the payer's finalized and pending state at each signing attempt.
 
+The calibration waits for 64 published seal proofs before starting Advance.
+It then measures consecutive usable proofs over this queued prefix. Each
+Advance window starts when its last required seal is observed available,
+before reading proofs, authenticating them and assembling calldata. It ends
+when the relayer verifies the returned proof. The consecutive measurement
+includes overhead between calls and reports the segment-64 checkpoint separately.
+
 After teardown, authenticate the measured calls and seal chain with the
 built release SDK. Replay the candidate batch and terminal suffixes separately
 against the native execution and contract pins from the #1038 fixtures.
@@ -224,6 +231,11 @@ seal and expensive token calls. The recovered cases use the archived
 wide certified predecessor and the full gap witnesses. The live audit
 reports observed proof timing, arrivals, funding and nonce usage, and
 recomputes a candidate reserve using the sampled inclusion windows.
+The audit authenticates successful receipt logs and certified header
+timestamps. It matches signed bytes to archive locators and uses the
+recorded transaction gas, signing balances, and timing observations.
+The live driver verifies failed receipts at capture, and the audit checks
+the archived failure status and verification flag.
 The native replay uses synthetic authority and seeded custody. Both sets
 of measurements leave real-value qualification closed pending release-wide
 shape, timing and funding bounds.

@@ -144,7 +144,20 @@ for (let i = 0; i < seals; i++) {
 assert.equal(hex(head), archive.head);
 assert.equal(hex(head), result.head);
 assert.equal(result.finalBacklog, 0);
-const exercisedReserve = seals >= result.initialBacklog + 64;
+const crossed64SegmentCheckpoint = result.advanceCalls.some((call) => call.verifiedThrough === '64');
+const queuedProofsAtStart = result.queuedProofsAtStart;
+assert(Number.isSafeInteger(queuedProofsAtStart) && queuedProofsAtStart >= 64);
+const queued = result.advanceCalls.filter((call) => Number(call.verifiedThrough) <= queuedProofsAtStart);
+const lastQueued = queued.at(-1);
+assert(queued.length > 1 && Number(lastQueued.verifiedThrough) >= 64);
+assert(BigInt(queued[0].beforeBacklog) >= BigInt(queuedProofsAtStart));
+for (const [index, call] of result.advanceCalls.entries()) {
+  assert(Number.isSafeInteger(call.inputsAvailableAtMs) && Number.isSafeInteger(call.usableProofAtMs));
+  assert.equal(call.proofMs, call.usableProofAtMs - call.inputsAvailableAtMs);
+  assert(call.proofMs >= 0 && (index === 0 || call.inputsAvailableAtMs >= result.advanceCalls[index - 1].usableProofAtMs));
+}
+const queuedElapsedMs = lastQueued.usableProofAtMs - queued[0].inputsAvailableAtMs;
+assert(queuedElapsedMs > 0);
 
 const window = (prefix) => {
   const row = json('fee/recovered/' + prefix + '.window.json');
@@ -253,6 +266,12 @@ if (observedCatchUp && mostSealsInSampledFinalWindow <= 1 && passesCandidate) {
 
 writeFileSync(output, JSON.stringify({
   scope: 'Private lane observations and candidate reserve arithmetic',
+  evidenceBasis: {
+    authenticated: 'Successful receipt logs, certified header timestamps and seal chain',
+    checkedAgainstArchive: 'Signed bytes and decoded bids matched to the recorded transaction locators',
+    recorded: 'Per-transaction gas, signing balances, timing and observed segment snapshots',
+    failedReceipt: 'Verified by the driver at capture; the offline audit checks its recorded status and verification flag',
+  },
   fundingQualified: false,
   chainId: String(cfg.chainId), executionGenesis: hex(cfg.executionGenesis), rootPin: hex(root), deployment,
   build: json('descriptors/erc20-build-index.json'), harnessRevision: read('builds.txt').toString().split('\n')[0],
@@ -266,7 +285,10 @@ writeFileSync(output, JSON.stringify({
   arrivals: { seals, elapsedBetweenFirstAndLastSealSeconds: sealTimes.at(-1) - sealTimes[0],
     initialBacklog: result.initialBacklog, q, b, tauP99Ms, sampleCount: samples.length,
     peakSeals30s, peakSealsPerSecond, duringProgress, finalEndpointToInclusionSeconds, mostSealsInSampledFinalWindow, final,
-    observedCatchUp, exercisedReserve, allAdvancesShrankBacklog, backlogAtProgressStart,
+    observedCatchUp, crossed64SegmentCheckpoint, allAdvancesShrankBacklog, backlogAtProgressStart,
+    advanceTiming: 'Observed input seal availability through the verified usable Advance proof',
+    queuedSeries: { queuedProofsAtStart, calls: queued.length, verifiedGaps: Number(lastQueued.verifiedThrough),
+      elapsedMs: queuedElapsedMs, gapsPerSecond: Number(lastQueued.verifiedThrough) * 1000 / queuedElapsedMs },
     run: runCalls.map((call) => window(call.prefix.split('/').at(-1))),
     restore: window('restore'), checkpoint, resumed: restored, ordinaryBeforeFallbackExercised: false },
   funding: { payer, observedMaximumSignedExposureWei: String(exposure), candidateFeeWei: String(candidateFee),

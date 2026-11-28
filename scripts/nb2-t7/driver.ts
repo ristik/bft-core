@@ -1402,13 +1402,13 @@ async function runOfflineRelayer(stage: string) {
   }
   const checkpoint: Checkpoint = JSON.parse(readFileSync(join(evidenceDir, 'offline-checkpoint.json'), 'utf8'));
   assert(checkpoint.from >= saveAt, 'checkpoint has too few consumed source operations');
-  async function awaitLoadFile(name: string) {
+  async function awaitLoadFile(name: string, timeoutMs = 600_000) {
     const path = join(load, name);
-    for (let i = 0; i < 1200; ++i) {
-      if (existsSync(path)) return;
+    const deadline = Date.now() + timeoutMs;
+    while (!existsSync(path) && Date.now() < deadline) {
       await delay(500);
     }
-    throw new Error(`archive did not publish ${name}`);
+    assert(existsSync(path), `archive did not publish ${name}`);
   }
   if (peakRestore) {
     assert(archiveSegments >= 6 && archiveSegments < 1026, 'use a finite peak restore window');
@@ -1423,10 +1423,18 @@ async function runOfflineRelayer(stage: string) {
   const advanceCalls = [];
   const started = Date.now();
   const stride = peakRestore ? 3 : 1024;
+  const queuedProofsAtStart = releaseCalibration ? 64 : undefined;
+  if (queuedProofsAtStart !== undefined) {
+    assert(archiveSegments >= queuedProofsAtStart, 'calibration needs 64 queued seal proofs');
+    await awaitLoadFile(`seal-${queuedProofsAtStart - 1}.locator.json`, 3_600_000);
+  }
   for (let index = 0; index < archiveSegments;) {
     const reserveBoundary = erc20 && index < 64 ? 64 - index : Infinity;
     const count = Math.min(stride, archiveSegments - index, reserveBoundary);
     if (peakRestore) await awaitLoadFile('seal-' + (index + count - 1) + '.locator.json');
+    // Start when the last input is available, before reading, authenticating or packing it.
+    const before = Date.now();
+    const beforeSegment = (await reader.vaultState(c.vault)).segment;
     const proofs = Array.from({ length: count }, (_, i) => readFileSync(join(load, 'seal-' + (index + i) + '.cbor')));
     const gapTrust = await trustFor(proofs.map(proof => decodeDepositProof(proof).uc));
     const gaps = await completed.session.certifiedGaps(gapTrust, cursor.next, cursor.head, proofs);
@@ -1437,14 +1445,14 @@ async function runOfflineRelayer(stage: string) {
       { seq: cursor.seq, cursor: opened }, gaps, opened ? undefined : cursor.head);
     assert.equal(advance.next, cursor.next + BigInt(count));
     const label = 'offline-advance-' + index;
-    const beforeSegment = (await reader.vaultState(c.vault)).segment;
-    const before = Date.now();
     const gap = await certifyReceipt(label, await send(label, recovery, advance.calldata,
       0n, '0x1', signer, 24_000_000n, advance.requiredSignerEpoch), bytes(recovery), advance.event!);
     await completed.session.verifyEvent(gap.trust, gap.encoded, advance.event!);
+    const usableProofAtMs = Date.now();
     const afterSegment = (await reader.vaultState(c.vault)).segment;
     if (releaseCalibration) json(label + '.shape.json', advance.shape);
-    advanceCalls.push({ verifiedGaps: count, verifiedThrough: String(advance.next), label, proofMs: Date.now() - before, arrivedDuringCall: afterSegment - beforeSegment,
+    advanceCalls.push({ verifiedGaps: count, verifiedThrough: String(advance.next), label,
+      inputsAvailableAtMs: before, usableProofAtMs, proofMs: usableProofAtMs - before, arrivedDuringCall: afterSegment - beforeSegment,
       beforeBacklog: beforeSegment - cursor.next, afterBacklog: afterSegment - advance.next });
     cursor = { receipt: gap.encoded, seq: cursor.seq + 1n, next: advance.next, head: advance.head!, trust: gap.trust };
     index += count;
@@ -1482,7 +1490,7 @@ async function runOfflineRelayer(stage: string) {
     relayerOS: process.platform,
     consumedOperationsAtRestore: checkpoint.from, session: hex(completed.session.id), progressCalls: completed.prior.seq,
     amount, liability: final.outstanding, head: hex(final.head), segment: final.segment,
-    verifiedGapCount: ordinaryGaps.length, certifiedAdvanceMs: Date.now() - started, advanceCalls,
+    verifiedGapCount: ordinaryGaps.length, certifiedAdvanceMs: Date.now() - started, advanceCalls, queuedProofsAtStart,
     signedOrdinaryBytes, initialBacklog, finalBacklog: Number(final.segment - cursor.next) });
   if (erc20) {
     const after = await custodySnapshot();
