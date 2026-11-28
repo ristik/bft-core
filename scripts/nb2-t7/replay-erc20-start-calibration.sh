@@ -58,6 +58,9 @@ if narrow:
         require.NoError(t, err)
         require.LessOrEqual(t, len(proof.Nodes[len(proof.Nodes)-1]), 4096)
         require.LessOrEqual(t, len(receipt), 26489)''', 1)
+    old = 't.Logf("complete packet %d bytes with 256 allocation steps, 256 RSMT siblings and a %d-byte predecessor", len(trace[1].Payload), len(trace[0].ResultReceipt))'
+    assert s.count(old) == 1
+    s = s.replace(old, 't.Logf("%d one-operation cuts, first checkpoint receipt proof %d bytes", len(trace), len(trace[0].ResultReceipt))')
     assert 'cut := records[i:i+1]' in s and 'len(receipt), 26489)' in s
 else:
     s = s.replace(old, 'records[:16], records[16:]')
