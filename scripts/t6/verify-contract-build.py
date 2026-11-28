@@ -51,6 +51,14 @@ def normalized_layout(layout):
     }
 
 
+def immutable_offsets(references):
+    # Solidity keys the groups by AST node ID, which moves when other source files are added.
+    return sorted(
+        sorted((ref["start"], ref["length"]) for ref in group)
+        for group in (references or {}).values()
+    )
+
+
 def compare(name: str, published: dict, compiled: dict) -> None:
     if published.get("abi") != compiled.get("abi"):
         fail(f"{name}: ABI differs from the pinned Solidity rebuild")
@@ -58,8 +66,8 @@ def compare(name: str, published: dict, compiled: dict) -> None:
         fail(f"{name}: creation bytecode differs from the pinned Solidity rebuild")
     if norm_hex(published.get("runtime")) != norm_hex(compiled.get("deployedBytecode", {}).get("object")):
         fail(f"{name}: runtime bytecode differs from the pinned Solidity rebuild")
-    published_immutables = published.get("immutableReferences") or {}
-    compiled_immutables = compiled.get("deployedBytecode", {}).get("immutableReferences") or {}
+    published_immutables = immutable_offsets(published.get("immutableReferences"))
+    compiled_immutables = immutable_offsets(compiled.get("deployedBytecode", {}).get("immutableReferences"))
     if published_immutables != compiled_immutables:
         fail(f"{name}: immutable references differ from the pinned Solidity rebuild")
     if normalized_layout(published.get("storageLayout")) != normalized_layout(compiled.get("storageLayout")):
@@ -71,7 +79,8 @@ def main() -> int:
     parser.add_argument("--manifest", required=True, type=Path)
     parser.add_argument("--bft-root", required=True, type=Path)
     parser.add_argument("--contracts-root", required=True, type=Path)
-    parser.add_argument("--contracts-commit", required=True)
+    parser.add_argument("--contracts-commit", required=True,
+                        help="historical source commit recorded for each published artifact in the manifest")
     parser.add_argument("--registry-layout", type=int, choices=(1, 2), default=2,
                         help="SealRegistry artifact (registrygenesis/seal-registry-v<N>.json) the genesis embeds")
     mode = parser.add_mutually_exclusive_group()
