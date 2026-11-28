@@ -30,7 +30,7 @@ export async function firstAvailableReceipt<T>(
       const unavailable = e instanceof BlockReceiptsTooLarge
         || (e instanceof WalletError && ['CompanionUnknown', 'EvidenceMissing'].includes(e.reason))
         || (e instanceof Nb2Error && e.rule === 'EvidencePruned')
-        || (e instanceof RpcError && (e.status === 429 || e.status >= 500))
+        || (e instanceof RpcError && ((e.status === 0 && e.code === 0) || e.status === 429 || e.status >= 500))
         || (e instanceof TypeError && e.message === 'fetch failed')
         || (e instanceof Error && e.name === 'AbortError');
       if (!unavailable) throw e;

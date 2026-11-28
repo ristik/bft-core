@@ -7,7 +7,7 @@ MongoDB it owns and releases the slot. The launcher requires a fresh checkout
 without `test-nodes`. Keep the run's output outside that checkout.
 
 Use [pins.json](pins.json) for the release inputs. Clone the pinned contracts,
-plug-in and aggregator repositories separately. Use Linux, Go, Node 22, Forge
+plug-in, Ureth and aggregator repositories separately. Use Linux, Go, Node 22, Forge
 and Cast 1.8.1, and solc 0.8.37. Build at most four jobs in parallel.
 
 ```sh
@@ -25,6 +25,7 @@ cargo build --locked --release -j 4 -p unicity-reth
 GOFLAGS=-p=4 make build
 go build -p 4 -o build/utb-evidence ./scripts/utb-evidence
 NB2_CONTRACTS=/path/to/contracts NB2_PLUGIN=/path/to/plug-ins \
+NB2_URETH_SOURCE=/path/to/ureth-source NB2_LANE_SLOT=2 \
 AGG_BIN=/path/to/bin/aggregator URETH_BIN=/path/to/ureth \
 NB2_OUT=/path/to/new/smoke-evidence scripts/nb2-t7/run.sh
 ```
@@ -33,6 +34,12 @@ The launcher builds the plug-in from a Git archive of the pinned commit in a
 fresh directory before acquiring a slot. It installs from the tracked lockfile,
 records the generated files in `plugin-lib.sha256`, and removes the build tree
 after the lane stops.
+
+Use a free private slot 0 or 2. The launcher defaults to slot 2 and takes its
+claim before starting MongoDB. The driver authenticates UTB history under the
+deployed genesis pin and waits for finalized B1 import of every required signer
+epoch before broadcasting a return. The resulting descriptors bind the
+imported-tip verifier and the wallet build.
 
 The smoke lane deploys the full production graph at K=64/B=16. It checks the T3/T4
 artifact hashes and the registry runtime, then binds the deployed runtime hashes in
@@ -68,7 +75,7 @@ arguments after the pinned contracts deploy. It starts with a fresh vault and
 can drive the load generator and separate signer, relayer and archive processes.
 The built-in smoke is the default scenario.
 
-The driver uses the local paired validator as its origin authority. The T7
+The driver checks the finalized imported tip through the local paired validator. The T7
 launcher enables replicated shard archives so long runs can pass the default
 256-block live journal bound. It retains the full execution proof sources.
 
@@ -81,6 +88,26 @@ Use the same setup and a new output directory per generation.
 | `NB2_QUALIFY_COSTS=1` | Exercise all three application-sized lineages through payout. Use `NB2_QUALIFY_CASE=transfer-600`, `transfer-600-split-1` or `split-20` to run one. |
 | `NB2_QUALIFY_CUSTODY=1` | Pay 129 one-wei returns across two rotations, refuse the first payment on both routes, authenticate the mined failed retry, and race independently funded ordinary and recovered bidders for the last payment. |
 | `NB2_QUALIFY_OFFLINE=1 NB2_QUALIFY_CASE=transfer-600-split-1 NB2_PACKET_OPERATIONS=16` | Stop the wallet after persisting its signed burn. Certify it in a relayer, checkpoint after 336 operations and stop the preferred archive. Seal two real segments, restore Progress from a second validator and settle the recovered burn after folding those seals. |
+
+On the offline workload, set `NB2_ARCHIVE_SEGMENTS` for the number of real
+seals and `NB2_ARCHIVE_WINDOW` for the number of segments prepared in each
+window. Each new window uses the previously certified head for its burn
+anchors. Use `NB2_QUALIFY_CASE=archive-only` for the short-lineage control.
+At 1,026 segments or more the runner checks that both eligible ordinary
+transactions exceed the signed-byte cap before payout. Use at least 2,080
+segments for the short-lineage control at the 524,288-byte cap. Set
+`NB2_OFFLINE_PEAK=1 NB2_ARCHIVE_SEGMENTS=12 NB2_LOAD_SKEW=1` to restore
+from the late checkpoint during a concentrated load window. It uses separate
+load and relayer payers and records seal arrivals and backlog during each
+advance.
+
+Set `NB2_OFFLINE_EXTERNAL=1` to run settlement from another device over
+loopback forwarding. After the holder exits and the preferred archive stops,
+the launcher writes `.offline-handoff` with the private scratch path. The
+device needs the signed burn backup, its certified bytes, the deployment and
+checkpoint evidence, and a funded relayer key. Omit the holder's spending key.
+Run the driver with `NB2_RESUME_STAGE=settle` and the alternate archive. Copy
+the resulting settlement evidence back before removing the handoff marker.
 
 Set `NB2_LOAD_SEGMENTS=12 NB2_LOAD_SKEW=1` on the custody workload for
 concentrated bucket traffic and simultaneous gap advancement. Set
@@ -99,7 +126,7 @@ identity, graph and proof settings on all four validators, then reads that raw
 transaction by block hash and index through the public relay. Pass a mined
 failed receipt path to exercise the failed-retry read.
 
-`check-qualification.py --repo BFT_CORE --ureth URETH --artifacts FORGE_OUT
+`check-qualification.py --repo BFT_CORE --ureth URETH --artifacts FORGE_OUT --plugin PLUGIN --ureth-bin URETH_BIN
 --output MANIFEST RUN...` rederives artifact, domain and pin digests and indexes
 the public evidence. It records test measurements. Fundable fee and peak-window
 envelopes need measured bounds for the combined qualification workloads.

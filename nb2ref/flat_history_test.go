@@ -21,12 +21,20 @@ type flatHistory struct {
 
 func newFlatHistory(t *testing.T, domain, eta [32]byte, k, count uint64) flatHistory {
 	t.Helper()
+	return buildFlatHistory(t, domain, eta, k, count, false)
+}
+
+func buildFlatHistory(t *testing.T, domain, eta [32]byte, k, count uint64, concentrate bool) flatHistory {
+	t.Helper()
 	h := flatHistory{heads: [][32]byte{expectedGenesisHead(domain, k)}}
 	seen := map[[32]byte]bool{eta: true}
 	for index := range count {
 		var seg flatHistorySegment
 		for slot := range k {
 			id := expectedKeccak([]byte("flat-gap/neighbor"), flatU64(index), flatU64(slot))
+			if concentrate {
+				id[0] = id[0]&0x0f | eta[0]&0xf0
+			}
 			require.False(t, seen[id], "eta or paid ID reused at segment %d, slot %d", index, slot)
 			seen[id] = true
 			seg.ids = append(seg.ids, id)

@@ -29,7 +29,8 @@ class LaneTests(unittest.TestCase):
                         TRACE=str(self.root / 'trace'), ALLOW_EXIT=str(self.root / 'allow-exit'),
                         NB2_OUT=str(self.root / 'output'), NB2_CONTRACTS=str(self.root / 'contracts'),
                         NB2_PLUGIN=str(self.root / 'plugin'), AGG_BIN=str(self.root / 'agg'),
-                        URETH_BIN=str(self.root / 'bin/ureth'), UTB_VERIFIER=str(self.root / 'bin/utb'))
+                        URETH_BIN=str(self.root / 'bin/ureth'), UTB_VERIFIER=str(self.root / 'bin/utb'),
+                        NB2_URETH_SOURCE=str(self.root / 'ureth'), NB2_LANE_SLOT='0')
         for name in ('run.sh', 'drive.sh', 'driver.ts', 'receipt.ts'):
             shutil.copy(SCRIPTS / name, self.root / 'scripts/nb2-t7')
         for name in ('build/ubft', 'build/utb-evidence', 'agg', 'bin/utb', 'bin/cast'):
@@ -86,9 +87,9 @@ touch "$3/packages/native-bridge-plugin/lib/index.js"
         self.executable('scripts/reth-paired-devnet.sh', CHILD)
         self.executable('scripts/lane-slot.sh', '''#!/bin/sh
 case "$1" in
-  acquire) test "$6" = --token && test -n "$7" || exit 1
+  acquire) test "$6" = --token && test -n "$7" && test "$8 $9" = "--slot 0" || exit 1
            printf '%s\\n' "$7" > acquired-token
-           echo "1 $7";;
+           echo "0 $7";;
   release) test "$*" = "release --owner nb2-t7 --token $(cat acquired-token)" || exit 1
            echo release-our-token >>"$TRACE";;
 esac
@@ -134,6 +135,7 @@ while [ ! -e "$ALLOW_EXIT" ]; do /bin/sleep .05; done
 
     def test_repeated_signals_remove_driver_scratch(self):
         self.executable('plugin/node_modules/.bin/tsx', CHILD)
+        (self.root / 'scripts/nb2-t7/descriptors.py').write_text('')
         (self.root / 'plugin/package-lock.json').touch()
         (self.root / 'output').mkdir()
         for path in ('pins.json', 'plugin-lib.sha256'):

@@ -315,6 +315,55 @@ func TestFlatSettlementBoundsAndSealRollback(t *testing.T) {
 	})
 }
 
+func TestFlatConcentratedSettlementQualification(t *testing.T) {
+	w, v, registry := flatFixtureVerifier(t)
+	if dir := os.Getenv("NB2_FLAT_QUALIFICATION_GRAPH"); dir != "" {
+		gamma := supplementRead(t, dir, "gamma.bin")
+		w, v, registry = flatFixtureVerifierFor(t, gamma, readFlatFixtureDeployment(t, dir))
+	}
+	levels := flatFixtureLineage(t, w, v, 0, 0, false)
+	deposit, err := DecodeReceiptBacking(levels[0].token.Mint.Justification)
+	require.NoError(t, err)
+	raw, records := flatFixtureEncode(t, levels)
+	trace, complete := flatFixtureRun(t, w, v, raw, records, 2)
+	flatFixtureExports(t, "qualification-settlement-root", w, v, registry, raw, complete.Verdict.ABI(), trace)
+	h := mustFlatEvidence(t, raw).Header()
+	eta, a := complete.Verdict.Eta, complete.Verdict.MinSegment
+	require.EqualValues(t, 16, v.cfg.B)
+	require.EqualValues(t, 64, v.cfg.K)
+	receipt := flatCertifiedEvent(t, w, v, complete, ReceiptOpts{
+		Type: 2, TxIndex: 127, Rotated: true, FillerLogs: 1,
+		MutReceipt: func(r *RawReceipt) { r.Logs[0].Data = bytes.Repeat([]byte{0xa5}, 48_000) },
+	})
+	require.Greater(t, len(receipt), 48_000)
+	history := buildFlatHistory(t, v.domain, eta, v.cfg.K, a+1026, true)
+	for _, count := range []int{64, 1024} {
+		// End at c-1 so the payout scans both tag buffers before sealing.
+		c := a + uint64(count) + 1
+		s, err := NewFlatVault(v, w.Env())
+		require.NoError(t, err)
+		require.NoError(t, s.Deposit(big.NewInt(100), FirstOwner(Key("flat-root")), Rho(v.domain, deposit.R)))
+		before := history.reach(t, s, complete.Verdict, c, v.cfg.K-1)
+		packet := FlatGapPacket{Header: h, Kind: FlatCompleteEvent, Receipt: receipt,
+			StartHead: &history.heads[a], Proofs: history.proofs(a, count)}
+		wire, err := packet.Calldata(FlatRedeemRecovered, v.cfg.K)
+		require.NoError(t, err)
+		_, err = s.RedeemRecovered(wire, RecipientReverts)
+		require.ErrorIs(t, err, ErrPayoutFailed)
+		require.Equal(t, before, flatCustodyState(s, complete.Verdict.Recipient))
+		_, err = s.RedeemRecovered(wire, RecipientAccepts)
+		require.NoError(t, err)
+		after := expectedSettlement(before, complete.Verdict, int(v.cfg.K))
+		require.Equal(t, c+1, after.Segment)
+		require.Equal(t, after, flatCustodyState(s, complete.Verdict.Recipient))
+		_, err = s.RedeemRecovered(wire, RecipientAccepts)
+		require.ErrorIs(t, err, ErrStaleEndpoint)
+		flatExportCold(t, fmt.Sprintf("qualification-settle-seal-concentrated-%d", count), wire, struct {
+			Before, After flatCustodyFixture
+		}{before, after})
+	}
+}
+
 // Build the negative calldata directly so the public decoder, rather than
 // the test-side packet encoder, is the admission boundary under test.
 func uncheckedColdWire(t *testing.T, entry FlatEntry, p FlatGapPacket) []byte {

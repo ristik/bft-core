@@ -7,6 +7,10 @@ cd "$(dirname "$0")/../.."
 : "${NB2_PLUGIN:?pinned plug-in source checkout}"
 : "${AGG_BIN:?pinned aggregator executable}"
 : "${URETH_BIN:?pinned ureth executable}"
+: "${NB2_URETH_SOURCE:?checkout containing the pinned Ureth source}"
+NB2_LANE_SLOT=${NB2_LANE_SLOT:-2}
+[[ "$NB2_LANE_SLOT" = 0 || "$NB2_LANE_SLOT" = 2 ]] ||
+  { echo "NB2 T7 requires private slot 0 or 2" >&2; exit 2; }
 [[ "$NB2_OUT" = /* && ! -e "$NB2_OUT" && ! -e test-nodes ]] ||
   { echo "T7 requires a new absolute evidence path and a fresh checkout" >&2; exit 2; }
 if [[ -n "${NB2_SCENARIO_DRIVER:-}" ]]; then
@@ -23,7 +27,7 @@ done
 [[ "$(go version -m "$AGG_BIN" | sed -n 's/.*vcs.modified=//p')" = false ]]
 [[ "$("$URETH_BIN" --version | awk '/Commit SHA/ {print $3}')" = "$(jq -r .ureth "$pins")" ]]
 [[ -x build/ubft && -x build/utb-evidence ]]
-[[ "$(go version -m build/ubft | sed -n 's/.*vcs.revision=//p')" = "$(git rev-parse HEAD)" ]]
+[[ "$(go version -m build/ubft | sed -n 's/.*vcs.revision=//p')" = "$(git -C "$PWD" rev-parse HEAD)" ]]
 mkdir -m 700 "$NB2_OUT"
 cp "$pins" "$NB2_OUT/pins.json"
 cp build/utb-evidence "$NB2_OUT/utb-evidence"
@@ -63,7 +67,7 @@ lane_token=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen)
 # Let the helper finish even when the terminal signals the whole process group.
 claim=$(
   trap '' TERM HUP INT
-  scripts/lane-slot.sh acquire --owner nb2-t7 --profile paired-default --token "$lane_token"
+  scripts/lane-slot.sh acquire --owner nb2-t7 --profile paired-default --token "$lane_token" --slot "$NB2_LANE_SLOT"
 )
 read -r LANE_SLOT _ <<<"$claim"
 export LANE_SLOT

@@ -38,6 +38,11 @@ func flatFixtureVerifierFor(t *testing.T, gamma []byte, deployment FlatDeploymen
 	t.Helper()
 	w, err := NewWorld(64, 16, 2)
 	require.NoError(t, err)
+	return flatFixtureVerifierWithWorld(t, w, gamma, deployment)
+}
+
+func flatFixtureVerifierWithWorld(t *testing.T, w *World, gamma []byte, deployment FlatDeployment) (*World, *FlatVerifier, b1ref.Words) {
+	t.Helper()
 	cfg, err := DecodeFlatConfig(gamma)
 	require.NoError(t, err)
 	require.Equal(t, w.Trust.ID(), cfg.RootGenesis)
