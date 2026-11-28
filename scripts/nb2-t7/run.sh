@@ -9,7 +9,7 @@ cd "$(dirname "$0")/../.."
 : "${URETH_BIN:?pinned ureth executable}"
 : "${NB2_URETH_SOURCE:?checkout containing the pinned Ureth source}"
 NB2_LANE_SLOT=${NB2_LANE_SLOT:-2}
-[[ "$NB2_LANE_SLOT" = 0 || "$NB2_LANE_SLOT" = 2 ]] ||
+[[ "$NB2_LANE_SLOT" = 0 || "$NB2_LANE_SLOT" = 2 || "$NB2_LANE_SLOT" = wait ]] ||
   { echo "NB2 T7 requires private slot 0 or 2" >&2; exit 2; }
 [[ "$NB2_OUT" = /* && ! -e "$NB2_OUT" && ! -e test-nodes ]] ||
   { echo "T7 requires a new absolute evidence path and a fresh checkout" >&2; exit 2; }
@@ -36,6 +36,7 @@ export UTB_COMPONENTS="contracts=$(jq -r .contracts "$pins") aggregator-commit=$
 export NB2_T7_LANE=1 M2_PROFILE2=1 Q3_B1=1 UTB_LANE=1 SIGNING=authority DNB_AGG_SHARDS=1
 export M2_RUN_LOG_DIR="$NB2_OUT/paired" UTB_VERIFIER="$NB2_OUT/utb-evidence"
 export CI_MONGO_NAME="nb2-t7-$$"
+lane_owner=${NB2_LANE_OWNER:-nb2-t7}
 lane_token=
 lane_pid=
 mongo_started=
@@ -50,7 +51,7 @@ cleanup() {
     bash scripts/ci/mongo-up.sh down "$NB2_OUT/mongo" || true
   fi
   if [[ -n "$lane_token" ]]; then
-    (unset LANE_SLOT; scripts/lane-slot.sh release --owner nb2-t7 --token "$lane_token") || true
+    (unset LANE_SLOT; scripts/lane-slot.sh release --owner "$lane_owner" --token "$lane_token") || true
   fi
   rm -rf -- "$plugin_build"
 }
@@ -65,10 +66,25 @@ export NB2_PLUGIN="$plugin_build/source"
 lane_token=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen)
 # Bash defers the launcher's signal trap until this foreground acquisition finishes.
 # Let the helper finish even when the terminal signals the whole process group.
-claim=$(
+acquire() (
   trap '' TERM HUP INT
-  scripts/lane-slot.sh acquire --owner nb2-t7 --profile paired-default --token "$lane_token" --slot "$NB2_LANE_SLOT"
+  scripts/lane-slot.sh acquire --owner "$lane_owner" --profile paired-default --token "$lane_token" --slot "$1"
 )
+if [[ "$NB2_LANE_SLOT" = wait ]]; then
+  while :; do
+    for slot in 0 2; do
+      [[ ! -e "${LANE_LOCK_DIR:-$HOME/host-lock}/slot-$slot.txt" ]] || continue
+      if claim=$(acquire "$slot" 2>"$plugin_build/acquire.log"); then break 2; fi
+      if [[ ! -e "${LANE_LOCK_DIR:-$HOME/host-lock}/slot-$slot.txt" ]]; then
+        cat "$plugin_build/acquire.log" >&2
+        exit 1
+      fi
+    done
+    sleep 10
+  done
+else
+  claim=$(acquire "$NB2_LANE_SLOT")
+fi
 read -r LANE_SLOT _ <<<"$claim"
 export LANE_SLOT
 mongo_started=1

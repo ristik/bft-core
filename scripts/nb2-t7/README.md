@@ -131,6 +131,34 @@ failed receipt path to exercise the failed-retry read.
 the public evidence. It records test measurements. Fundable fee and peak-window
 envelopes need measured bounds for the combined qualification workloads.
 
+## Private ERC20 qualification
+
+Start the same launcher under nohup with `NB2_LANE_SLOT=wait`,
+`NB2_LANE_OWNER=nb2-1038-qual` and `NB2_QUALIFY_ERC20=1`. The launcher
+waits for slot 0 or 2 and claims one before starting the lane. Use the
+existing UCT build inputs above. Also set:
+
+- `NB2_ERC20_CONTRACTS` to a clean #107 checkout with the ERC20 production
+  artifacts in `out`.
+- `NB2_ERC20_PLUGIN` to a clean #99 checkout after `npm ci` and `npm run build`.
+- `NB2_ERC20_ORACLE_REV` to `59bf2c203c693d37fc4ac74986e681309c29ec8c`.
+
+After the UCT control the runner deploys two disposable tokens with separate
+vaults. Both use authenticated activation evidence and the TypeScript wallet.
+The wallet input keeps funding qualification false. The private scenario
+authorizes test locks and burns after recording the wallet's admission refusal.
+The fee token charges one unit on a delegated deposit and exercises expensive
+work below the vault's token call caps. Each asset runs two nested splits,
+ordinary and recovered payouts, a recipient block and an independent retry.
+The holder exits before the signed backup is certified. The recovered payout
+restores a Progress receipt after the preferred archive stops.
+
+The fee scenario defaults to 72 real seals, including a checkpoint at 64
+folded gaps. Set `NB2_ERC20_FEE_SEGMENTS=12` for a shorter rehearsal.
+Counters, raw signed transactions, receipts, authenticated log locators,
+costs and backlog observations are written inside the run directory. The
+observed packet sizes and fee schedule do not qualify a general resource bound.
+
 ## Focused regressions
 
 Run these from bft-core on the dev server. They do not acquire a slot or start

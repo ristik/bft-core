@@ -107,6 +107,10 @@ if [[ -e "$NB2_OUT/FlatReceipts.receipt.json" ]]; then
   python3 "$here/probe-qualification.py" "$NB2_OUT" "$PWD" FlatReceipts.receipt.json
 fi
 
+if [[ "${NB2_QUALIFY_ERC20:-0}" = 1 ]]; then
+  source "$here/erc20-drive.sh"
+fi
+
 if [[ -n "${NB2_SCENARIO_DRIVER:-}" ]]; then
   rm -rf -- "$scratch"
   run_driver "$NB2_SCENARIO_DRIVER" "$NB2_OUT" "$rpc" "$agg"
