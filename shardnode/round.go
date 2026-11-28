@@ -1892,6 +1892,7 @@ func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation
 		// here (pacing.go). The budget for a leader that is silent is unchanged on top of that.
 		budget += r.pacer.remaining(time.Now())
 	}
+	traceWait := r.log != nil && r.log.Enabled(ctx, slog.LevelDebug)
 	awaitCtx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 	// Only the wait for the speculative child block is cancelled: a repeat UC replaces the certificate that started it, and is handled next with its own full
@@ -1902,10 +1903,9 @@ func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation
 		defer watch(held, func() { cut(errAwaitSuperseded) })()
 	}
 	waitStart := time.Now()
-	r.traceRound(ctx, held, exp.Round, "follower wait start",
-		slog.String("leader", leader), slog.Duration("budget", budget))
 	block, err := r.disseminator.Await(waitCtx, exp.Round)
-	if r.log != nil && r.log.Enabled(ctx, slog.LevelDebug) {
+	if traceWait {
+		waited := time.Since(waitStart)
 		outcome := "block"
 		switch {
 		case err != nil && errors.Is(context.Cause(waitCtx), errAwaitSuperseded):
@@ -1915,9 +1915,14 @@ func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation
 		case err != nil:
 			outcome = "error"
 		}
-		r.traceRound(ctx, held, exp.Round, "follower wait end",
-			slog.String("leader", leader), slog.String("outcome", outcome), slog.Any("error", err),
-			slog.Duration("waited", time.Since(waitStart)), slog.Duration("budget", budget))
+		// A synchronous log sink must run after both the timed wait and any late-block poll.
+		defer func(waitErr error) {
+			r.traceRound(ctx, held, exp.Round, "follower wait start",
+				slog.String("leader", leader), slog.Time("startedAt", waitStart), slog.Duration("budget", budget))
+			r.traceRound(ctx, held, exp.Round, "follower wait end",
+				slog.String("leader", leader), slog.String("outcome", outcome), slog.Any("error", waitErr),
+				slog.Duration("waited", waited), slog.Duration("budget", budget))
+		}(err)
 	}
 	if err != nil && errors.Is(context.Cause(waitCtx), errAwaitSuperseded) {
 		pollCtx, pollCancel := context.WithTimeout(ctx, redeliveryPoll)

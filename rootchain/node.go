@@ -446,6 +446,18 @@ func (v *Node) traceRequest(ctx context.Context, req *certification.BlockCertifi
 	v.log.LogAttrs(ctx, slog.LevelDebug, "ingress request", append(fields, attrs...)...)
 }
 
+func (v *Node) traceRequestView(ctx context.Context, req *certification.BlockCertificationRequest, view requestAdmission, action string, replay bool) {
+	if !v.log.Enabled(ctx, slog.LevelDebug) {
+		return
+	}
+	expectedRound := view.ExpectedTR().Round
+	v.traceRequest(ctx, req, action, slog.Bool("replay", replay), slog.Uint64("expectedRound", expectedRound))
+	if action == "held" {
+		v.log.DebugContext(ctx, fmt.Sprintf("holding the request of round %d until the commit of round %d applies", req.IRRound(), expectedRound),
+			logger.Shard(req.PartitionID, req.ShardID))
+	}
+}
+
 // freshInRootEpoch applies the activation freshness rule (storage.ShardInfo.FreshInRootEpoch) to a request a view admitted, on the parent
 // certificate the view resolved: the view's own fence covers the continuations it resolves, this one holds whatever the view (#1036). A view
 // that does not name its parent's root epoch is judged on the committed ShardInfo; an unknown shard is the view's to refuse.
@@ -648,14 +660,14 @@ func (v *Node) collectUnderView(ctx context.Context, req *certification.BlockCer
 		}
 		return nil
 	}
-	v.traceRequest(ctx, req, "view", slog.Bool("replay", origin.replay), slog.Uint64("expectedRound", view.ExpectedTR().Round))
+	v.traceRequestView(ctx, req, view, "view", origin.replay)
 	err := view.ValidRequest(req)
 	if err != nil && resolve != nil {
 		// the parent may have been committed, or an activation installed, during the resolution: a context-dependent refusal (stale
 		// continuity, membership, key) is final only under the view in force now
 		if again, rerr := resolve(); rerr == nil && again != nil && viewChanged(view, again) {
 			view = again
-			v.traceRequest(ctx, req, "view refreshed", slog.Bool("replay", origin.replay), slog.Uint64("expectedRound", view.ExpectedTR().Round))
+			v.traceRequestView(ctx, req, view, "view refreshed", origin.replay)
 			err = view.ValidRequest(req)
 		}
 	}
@@ -667,9 +679,7 @@ func (v *Node) collectUnderView(ctx context.Context, req *certification.BlockCer
 		// authentic and exactly one round ahead. It is counted for nothing until it is admitted under the committed context.
 		herr := v.holdNearFuture(req, origin, snapshot, viewAuthority(view))
 		if herr == nil {
-			v.traceRequest(ctx, req, "held", slog.Uint64("expectedRound", view.ExpectedTR().Round))
-			v.log.DebugContext(ctx, fmt.Sprintf("holding the request of round %d until the commit of round %d applies", req.IRRound(), view.ExpectedTR().Round),
-				logger.Shard(req.PartitionID, req.ShardID))
+			v.traceRequestView(ctx, req, view, "held", origin.replay)
 			return nil
 		}
 		err = errors.Join(err, herr)
