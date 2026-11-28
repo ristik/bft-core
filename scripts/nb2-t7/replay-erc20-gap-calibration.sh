@@ -75,7 +75,7 @@ key[31] = 1;
 const signer = new LocalKeySigner(key);
 const log = readFileSync(join(out, 'replay.log'), 'utf8');
 for (const [label, name, count, target, file] of [
-  ['advance-3', 'AdvanceGaps', 3, graph.RecoveryAddress, 'advance-calldata'],
+  ...[1, 2, 3].map(count => ['advance-' + count, 'AdvanceGaps', count, graph.RecoveryAddress, 'advance-calldata']),
   ...[0, 1, 2].flatMap(count => [
     ['qualification-settle-seal-concentrated-' + count, 'recovered settlement', count, graph.VaultAddress, 'calldata'],
     ['ordinary-seal-concentrated-' + count, 'ordinary settlement', count, graph.VaultAddress, 'ordinary-calldata'],

@@ -215,8 +215,9 @@ const fullPathFeeAtFullBlocks = boundBaseFee(BigInt(initial.finalizedBaseFee), o
 writeFileSync(output, JSON.stringify({
   scope: 'Private lane observations and candidate reserve arithmetic',
   fundingQualified: false,
-  executionGenesis: hex(cfg.executionGenesis), rootPin: hex(root), deployment,
+  chainId: String(cfg.chainId), executionGenesis: hex(cfg.executionGenesis), rootPin: hex(root), deployment,
   build: json('descriptors/erc20-build-index.json'), harnessRevision: read('builds.txt').toString().split('\n')[0],
+  lanePins: json('pins.json'),
   releaseProfileSha256: sha(read('descriptors/semantic-profile-erc20.json')),
   slot: Number(read('slot.txt').toString()), limits,
   calls: { run: runCalls, advances, recovered, ordinary, retry, failed: {
