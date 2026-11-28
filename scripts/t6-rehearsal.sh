@@ -263,7 +263,8 @@ build_pinned_contracts() {
   git -C "$FRESH_CONTRACTS" submodule update --init --recursive >>"$EVIDENCE_DIR/contracts-clone.log" 2>&1 || return 1
   [ "$(git -C "$FRESH_CONTRACTS" rev-parse HEAD)" = "$T6_CONTRACTS_COMMIT" ] || return 1
   (cd "$FRESH_CONTRACTS" && forge build --force)
-  python3 "$FRESH_REPO/scripts/t6/verify-contract-build.py" \
+  # Use the harness's normalized comparison against the pinned clone's published artifacts.
+  python3 "$SOURCE_ROOT/scripts/t6/verify-contract-build.py" \
     --manifest "$FRESH_REPO/registrygenesis/testdata/allocation-build-v1.example.json" \
     --bft-root "$FRESH_REPO" --contracts-root "$FRESH_CONTRACTS" \
     --contracts-commit "$T6_ARTIFACT_SOURCE_COMMIT" --skip-registry | tee "$EVIDENCE_DIR/contracts-rebuild.log"
