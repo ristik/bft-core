@@ -47,11 +47,18 @@ for kind in plain fee; do
   run_driver "${erc20_driver[@]}"
   rm -- "$scratch/holder-key"
   rm -rf -- "$scratch/app-wallet"
+  if [[ "$kind" = fee && "${NB2_ERC20_CALIBRATE:-0}" = 1 ]]; then
+    # Keep the same sealer running through Start, archive failover and Resume.
+    NB2_RESUME_STAGE=load "${erc20_driver[@]}" &
+    load_pid=$!
+  fi
   NB2_RESUME_STAGE=checkpoint run_driver "${erc20_driver[@]}"
   stop_archive
   if [[ "$NB2_OFFLINE_PEAK" = 1 ]]; then
-    NB2_RESUME_STAGE=load "${erc20_driver[@]}" &
-    load_pid=$!
+    if [[ -z "$load_pid" ]]; then
+      NB2_RESUME_STAGE=load "${erc20_driver[@]}" &
+      load_pid=$!
+    fi
     NB2_RESUME_STAGE=settle run_driver "${erc20_driver[@]}"
     wait "$load_pid"
     load_pid=
