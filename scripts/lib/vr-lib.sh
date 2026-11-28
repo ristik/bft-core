@@ -149,8 +149,9 @@ print(f"vr: merged {len(g['alloc'])} accounts (premine of {len(premine)} balance
 PY
 }
 
-vr_ureth_vector() { # the paired ureth's certified argument vector, exactly as the lane passes it (urethPinUnicityFlags)
-  urethPinUnicityFlags | tr '\n' ' ' | sed 's/  */ /g'
+vr_ureth_vector() { # the paired ureth's certified argument vector, including the lane's builder gas limit
+  urethPinUnicityFlags &&
+    printf -- '--builder.gaslimit=%s\n' "${URETH_BUILDER_GASLIMIT:-30000000}"
 }
 
 vr_verify() { # <finalized genesis> <full shard conf>
