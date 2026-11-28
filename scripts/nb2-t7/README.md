@@ -147,6 +147,15 @@ existing UCT build inputs above. Also set:
   available. Run the Go oracle from the selected checkout before starting
   the lane.
 
+To use slot 3, enter a separate network namespace with only loopback up
+and set its ephemeral port range to 40000–60999. Run the launcher as the
+lane user with `NB2_LANE_SLOT=3` and `NB2_HOST_NETNS` set to the original
+namespace identity from `readlink /proc/self/ns/net`. Stage the pinned
+MongoDB image's `mongod` and `mongosh` binaries and its image reference
+in `NB2_MONGO_BIN_DIR`. Populate the npm cache before entering the
+namespace and set `npm_config_offline=true` inside it. The normal slot
+lock is shared with the host and the listener checks run in the namespace.
+
 After the UCT control the runner deploys two disposable tokens with separate
 vaults. Both use authenticated activation evidence and the TypeScript wallet.
 The wallet input keeps funding qualification false. The private scenario

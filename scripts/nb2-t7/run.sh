@@ -9,8 +9,17 @@ cd "$(dirname "$0")/../.."
 : "${URETH_BIN:?pinned ureth executable}"
 : "${NB2_URETH_SOURCE:?checkout containing the pinned Ureth source}"
 NB2_LANE_SLOT=${NB2_LANE_SLOT:-2}
-[[ "$NB2_LANE_SLOT" = 0 || "$NB2_LANE_SLOT" = 2 || "$NB2_LANE_SLOT" = wait ]] ||
-  { echo "NB2 T7 requires private slot 0 or 2" >&2; exit 2; }
+case "$NB2_LANE_SLOT" in
+  0|2|wait) ;;
+  3)
+    : "${NB2_HOST_NETNS:?host namespace identity required for slot 3}"
+    : "${NB2_MONGO_BIN_DIR:?local MongoDB binaries required for slot 3}"
+    [[ "$(readlink /proc/self/ns/net)" != "$NB2_HOST_NETNS" &&
+       "$(ip -o link show | wc -l)" -eq 1 ]] && ip -o link show dev lo up | grep -q . ||
+      { echo "NB2 slot 3 requires a separate loopback-only namespace" >&2; exit 2; }
+    ;;
+  *) echo "NB2 T7 requires private slot 0, 2 or isolated slot 3" >&2; exit 2 ;;
+esac
 [[ "$NB2_OUT" = /* && ! -e "$NB2_OUT" && ! -e test-nodes ]] ||
   { echo "T7 requires a new absolute evidence path and a fresh checkout" >&2; exit 2; }
 if [[ -n "${NB2_SCENARIO_DRIVER:-}" ]]; then
@@ -40,6 +49,7 @@ lane_owner=${NB2_LANE_OWNER:-nb2-t7}
 lane_token=
 lane_pid=
 mongo_started=
+mongo_pid=
 plugin_build=$(mktemp -d "$NB2_OUT/.plugin.XXXXXX")
 cleanup() {
   trap '' TERM HUP INT
@@ -47,7 +57,10 @@ cleanup() {
     kill -TERM "$lane_pid" 2>/dev/null || true
     wait "$lane_pid" || true
   fi
-  if [[ -n "$mongo_started" ]]; then
+  if [[ -n "$mongo_pid" ]]; then
+    kill -TERM "$mongo_pid" 2>/dev/null || true
+    wait "$mongo_pid" || true
+  elif [[ -n "$mongo_started" ]]; then
     bash scripts/ci/mongo-up.sh down "$NB2_OUT/mongo" || true
   fi
   if [[ -n "$lane_token" ]]; then
@@ -87,8 +100,39 @@ else
 fi
 read -r LANE_SLOT _ <<<"$claim"
 export LANE_SLOT
-mongo_started=1
-bash scripts/ci/mongo-up.sh up "$NB2_OUT/mongo"
+printf '%s\n' "$LANE_SLOT" >"$NB2_OUT/slot.txt"
+if [[ "$LANE_SLOT" = 3 ]]; then
+  readlink /proc/self/ns/net >"$NB2_OUT/network-namespace.txt"
+  cat /proc/sys/net/ipv4/ip_local_port_range >"$NB2_OUT/namespace-port-range.txt"
+  ip -o addr show >"$NB2_OUT/namespace-addresses.txt"
+  ip route show table main >"$NB2_OUT/namespace-routes.txt"
+  source scripts/lib/lane-slot.sh
+  port=$((27117 + LANE_PORT_OFFSET))
+  mkdir -p "$NB2_OUT/mongo" test-nodes-mongo
+  cp "$NB2_MONGO_BIN_DIR/image.txt" "$NB2_OUT/mongo/mongo-image.txt"
+  sha256sum "$NB2_MONGO_BIN_DIR/"{mongod,mongosh} >"$NB2_OUT/mongo/binaries.sha256"
+  "$NB2_MONGO_BIN_DIR/mongod" --dbpath "$PWD/test-nodes-mongo" --replSet rs0 \
+    --bind_ip 127.0.0.1 --port "$port" >"$NB2_OUT/mongo/mongo.log" 2>&1 &
+  mongo_pid=$!
+  mongo_shell=("$NB2_MONGO_BIN_DIR/mongosh" --quiet --port "$port")
+  for _ in $(seq 1 60); do
+    kill -0 "$mongo_pid"
+    if "${mongo_shell[@]}" --eval 'db.adminCommand({ping:1}).ok' 2>/dev/null | grep -qx 1; then break; fi
+    sleep 1
+  done
+  "${mongo_shell[@]}" --eval "rs.initiate({_id:'rs0',members:[{_id:0,host:'127.0.0.1:$port'}]})" \
+    >"$NB2_OUT/mongo/rs-initiate.txt" 2>&1
+  for _ in $(seq 1 60); do
+    kill -0 "$mongo_pid"
+    if "${mongo_shell[@]}" --eval 'db.hello().isWritablePrimary' 2>/dev/null | grep -qx true; then break; fi
+    sleep 1
+  done
+  "${mongo_shell[@]}" --eval 'db.hello().isWritablePrimary' | grep -qx true
+  ss -lnt >"$NB2_OUT/loopback-listeners.txt"
+else
+  mongo_started=1
+  bash scripts/ci/mongo-up.sh up "$NB2_OUT/mongo"
+fi
 bash scripts/reth-paired-devnet.sh 4 10 &
 lane_pid=$!
 rc=0
