@@ -50,6 +50,7 @@ lane_token=
 lane_pid=
 mongo_started=
 mongo_pid=
+mongo_data=
 plugin_build=$(mktemp -d "$NB2_OUT/.plugin.XXXXXX")
 cleanup() {
   trap '' TERM HUP INT
@@ -63,6 +64,7 @@ cleanup() {
   elif [[ -n "$mongo_started" ]]; then
     bash scripts/ci/mongo-up.sh down "$NB2_OUT/mongo" || true
   fi
+  if [[ -n "$mongo_data" ]]; then rm -rf -- "$mongo_data"; fi
   if [[ -n "$lane_token" ]]; then
     (unset LANE_SLOT; scripts/lane-slot.sh release --owner "$lane_owner" --token "$lane_token") || true
   fi
@@ -76,6 +78,9 @@ export NB2_PLUGIN="$plugin_build/source"
   cd "$NB2_PLUGIN"
   find packages/native-bridge-plugin/lib -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
 ) >"$NB2_OUT/plugin-lib.sha256"
+if [[ "${NB2_QUALIFY_ERC20:-0}" = 1 ]]; then
+  source scripts/nb2-t7/erc20-build.sh
+fi
 lane_token=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen)
 # Bash defers the launcher's signal trap until this foreground acquisition finishes.
 # Let the helper finish even when the terminal signals the whole process group.
@@ -86,11 +91,14 @@ acquire() (
 if [[ "$NB2_LANE_SLOT" = wait ]]; then
   while :; do
     for slot in 0 2; do
-      [[ ! -e "${LANE_LOCK_DIR:-$HOME/host-lock}/slot-$slot.txt" ]] || continue
-      if claim=$(acquire "$slot" 2>"$plugin_build/acquire.log"); then break 2; fi
-      if [[ ! -e "${LANE_LOCK_DIR:-$HOME/host-lock}/slot-$slot.txt" ]]; then
+      if claim=$(acquire "$slot" 2>"$plugin_build/acquire.log"); then
+        break 2
+      else
+        rc=$?
+      fi
+      if [[ "$rc" != 75 ]]; then
         cat "$plugin_build/acquire.log" >&2
-        exit 1
+        exit "$rc"
       fi
     done
     sleep 10
@@ -108,10 +116,11 @@ if [[ "$LANE_SLOT" = 3 ]]; then
   ip route show table main >"$NB2_OUT/namespace-routes.txt"
   source scripts/lib/lane-slot.sh
   port=$((27117 + LANE_PORT_OFFSET))
-  mkdir -p "$NB2_OUT/mongo" test-nodes-mongo
+  mkdir "$NB2_OUT/mongo"
+  mongo_data=$(mktemp -d "$NB2_OUT/.mongo-data.XXXXXX")
   cp "$NB2_MONGO_BIN_DIR/image.txt" "$NB2_OUT/mongo/mongo-image.txt"
   sha256sum "$NB2_MONGO_BIN_DIR/"{mongod,mongosh} >"$NB2_OUT/mongo/binaries.sha256"
-  "$NB2_MONGO_BIN_DIR/mongod" --dbpath "$PWD/test-nodes-mongo" --replSet rs0 \
+  "$NB2_MONGO_BIN_DIR/mongod" --dbpath "$mongo_data" --replSet rs0 \
     --bind_ip 127.0.0.1 --port "$port" >"$NB2_OUT/mongo/mongo.log" 2>&1 &
   mongo_pid=$!
   mongo_shell=("$NB2_MONGO_BIN_DIR/mongosh" --quiet --port "$port")

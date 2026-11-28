@@ -56,7 +56,10 @@ python3 "$here/descriptors.py" "$PWD" "$NB2_URETH_SOURCE" "$NB2_PLUGIN" "$URETH_
 } >"$NB2_OUT/builds.txt"
 driver=( "$NB2_PLUGIN/node_modules/.bin/tsx" "$scratch/driver.ts" "$NB2_OUT" "$rpc" "$agg" "$chain"
   "${NB2_ARTIFACTS:-$NB2_CONTRACTS/out}" "$here/create.py" "$scratch" )
-if [[ "${NB2_QUALIFY_OFFLINE:-0}" = 1 ]]; then
+if [[ "${NB2_QUALIFY_ERC20:-0}" = 1 ]]; then
+  NB2_SCENARIO_DRIVER= NB2_QUALIFY_OFFLINE=0 NB2_QUALIFY_COSTS=0 NB2_QUALIFY_CUSTODY=0 \
+    NB2_ROUTE=both NB2_SPLIT_DEPTH=1 run_driver "${driver[@]}"
+elif [[ "${NB2_QUALIFY_OFFLINE:-0}" = 1 ]]; then
   openssl rand -hex 32 >"$scratch/relayer-key"
   openssl rand -hex 32 >"$scratch/load-key"
   python3 "$here/probe-qualification.py" archive "$rpc" "$chain" "$(cat "$NB2_OUT/execution.pin")" \

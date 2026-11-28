@@ -565,7 +565,10 @@ async function runErc20Holder() {
   await send('mint-test-load', tokenAddress!, callData('mint(address,uint256)', hex(loadPayer.address), String(loadAmount)), 0n, '0x1', operator);
   await send('fund-holder', holder, new Uint8Array(), 10n ** 18n, '0x1', operator);
   await send('fund-load', hex(loadPayer.address), new Uint8Array(), 10n ** 18n, '0x1', operator);
-  await send('fund-relayer', hex(relayer.address), new Uint8Array(), 10n ** 18n, '0x1', operator);
+  const relayerFunding = 10n ** 18n;
+  const funding = await send('fund-relayer', hex(relayer.address), new Uint8Array(), relayerFunding, '0x1', operator);
+  assert.equal(await reader.balance(relayer.address), relayerFunding);
+  json('relayer-funding.json', { tx: funding.transactionHash, payer: hex(relayer.address), balance: relayerFunding });
   const plan = await core.planDeposit(wallet, 'root', requested, amount);
   await assert.rejects(core.sendDeposit(wallet, 'root'), e => core.reasonOf(e) === 'CapacityPreflight');
   const firstOwner = firstOwnerOf(wallet.ownerPub(0));
@@ -1356,6 +1359,7 @@ async function runOfflineRelayer(stage: string) {
   }
   const initialBacklog = Number((await reader.vaultState(c.vault)).segment);
   const completed = await completeRecovery({ evidence: certified, trust, paid }, 'offline-run', checkpoint);
+  assert.equal(verdict.minSegment, 0n);
   let cursor = { ...completed.prior, next: 0n, head: genesisHead(domain, c.K), trust: completed.trust };
   const ordinaryGaps: Uint8Array[] = [];
   const advanceCalls = [];
@@ -1368,10 +1372,12 @@ async function runOfflineRelayer(stage: string) {
     const proofs = Array.from({ length: count }, (_, i) => readFileSync(join(load, 'seal-' + (index + i) + '.cbor')));
     const gapTrust = await trustFor(proofs.map(proof => decodeDepositProof(proof).uc));
     const gaps = await completed.session.certifiedGaps(gapTrust, cursor.next, cursor.head, proofs);
+    assert.equal(cursor.next, BigInt(index));
     for (const proof of gaps) ordinaryGaps.push(proof);
     const opened = index ? { next: cursor.next, head: cursor.head } : undefined;
     const advance = await completed.session.gaps('advanceGaps', gapTrust, cursor.receipt,
       { seq: cursor.seq, cursor: opened }, gaps, opened ? undefined : cursor.head);
+    assert.equal(advance.next, cursor.next + BigInt(count));
     const label = 'offline-advance-' + index;
     const beforeSegment = (await reader.vaultState(c.vault)).segment;
     const before = Date.now();
@@ -1421,22 +1427,29 @@ async function runOfflineRelayer(stage: string) {
     assert.equal(after.outstanding - beforePayout!.outstanding, -amount);
     json('offline-paid.custody.json', { before: beforePayout, after, qDelta: -amount,
       recipientBefore: backup.recipientBefore, recipientAfter: await assetBalance(recipient) });
-    const startup = readFileSync(join(out, 'fund-relayer.submitted.json'), 'utf8');
-    const funding = JSON.parse(startup);
-    const relayerCalls = [
-      ...Array.from({ length: Number(completed.prior.seq) }, (_, i) => 'offline-run-' + (i + 1)),
-      ...advanceCalls.filter(a => BigInt(a.verifiedThrough) <= 64n).map(a => a.label),
-      'offline-paid',
-    ];
-    const costs = relayerCalls.map(label => ({
-      limit: JSON.parse(readFileSync(join(evidenceDir, label + '.submitted.json'), 'utf8')),
-      used: JSON.parse(readFileSync(join(evidenceDir, label + '.cost.json'), 'utf8')),
-    }));
-    const observedFees = costs.reduce((total, row) => total + BigInt(row.used.paidFee), 0n);
-    const upperBids = costs.reduce((total, row) => total + BigInt(row.limit.gasLimit) * BigInt(row.limit.maxFeePerGas), 0n);
-    json('reserve-observations.json', { observedFees, upperBids, fundedRelayer: funding.hash,
-      funded: 10n ** 18n, coveredGaps: cursor.next < 64n ? cursor.next : 64n, calls: relayerCalls,
-      wholePathBoundQualified: false });
+    const funding = JSON.parse(readFileSync(join(out, 'relayer-funding.json'), 'utf8'));
+    assert.equal(funding.payer, hex(signer.address));
+    const runCalls = Array.from({ length: Number(completed.prior.seq) }, (_, i) => 'offline-run-' + (i + 1));
+    const path = [...runCalls, ...advanceCalls.map(a => a.label), 'offline-paid'];
+    const costs = path.map((label, index) => {
+      const limit = JSON.parse(readFileSync(join(evidenceDir, label + '.submitted.json'), 'utf8'));
+      const used = JSON.parse(readFileSync(join(evidenceDir, label + '.cost.json'), 'utf8'));
+      assert.equal(limit.hash, used.tx);
+      assert.equal(limit.payer, funding.payer);
+      assert.equal(BigInt(limit.nonce), BigInt(index));
+      return { observedFee: BigInt(used.paidFee), upperBid: BigInt(limit.gasLimit) * BigInt(limit.maxFeePerGas) };
+    });
+    const totals = (count: number, throughGaps: bigint) => ({
+      throughGaps, calls: path.slice(0, count),
+      observedFees: costs.slice(0, count).reduce((total, cost) => total + cost.observedFee, 0n),
+      upperBids: costs.slice(0, count).reduce((total, cost) => total + cost.upperBid, 0n),
+    });
+    const boundary = advanceCalls.findIndex(a => a.verifiedThrough === '64');
+    json('reserve-observations.json', {
+      checkpoint64: boundary < 0 ? null : totals(runCalls.length + boundary + 1, 64n),
+      throughPayout: totals(path.length, cursor.next),
+      fundedRelayer: funding.tx, funded: funding.balance, wholePathBoundQualified: false,
+    });
     await settleErc20Siblings(cursor.next, genesisHead(domain, c.K));
   }
 }

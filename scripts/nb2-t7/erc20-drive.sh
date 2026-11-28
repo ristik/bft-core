@@ -1,17 +1,5 @@
 #!/usr/bin/env bash
 # Sourced by drive.sh so its process and archive cleanup also covers this workload.
-: "${NB2_ERC20_CONTRACTS:?path to built contracts #107 merge checkout}"
-: "${NB2_ERC20_PLUGIN:?path to built plug-ins #99 merge checkout}"
-: "${NB2_ERC20_ORACLE_SOURCE:?path to the bft-core #1338 checkout}"
-: "${NB2_ERC20_ORACLE_REV:?pinned bft-core #1338 revision}"
-export NB2_ERC20_ARTIFACTS="$NB2_ERC20_CONTRACTS/out"
-test "$(git -C "$NB2_ERC20_CONTRACTS" rev-parse HEAD)" = de62921f10be506f3cd7a559ae8541bcb644d0f4
-test "$(git -C "$NB2_ERC20_PLUGIN" rev-parse HEAD)" = 43c4535deccee68f45a2400848ec9b28dbec9999
-test "$(git -C "$NB2_ERC20_ORACLE_SOURCE" rev-parse HEAD)" = "$NB2_ERC20_ORACLE_REV"
-test -f "$NB2_ERC20_ORACLE_SOURCE/nb2ref/erc20_vectors_test.go"
-for checkout in "$NB2_ERC20_CONTRACTS" "$NB2_ERC20_PLUGIN" "$NB2_ERC20_ORACLE_SOURCE"; do
-  test -z "$(git -C "$checkout" status --porcelain --untracked-files=no)"
-done
 mkdir -p "$scratch/token-build/src"
 cp "$here/QualificationToken.sol" "$scratch/token-build/src/"
 forge build --root "$scratch/token-build" --use 0.8.37 --evm-version cancun -j 4
@@ -23,8 +11,8 @@ cp "$NB2_ERC20_PLUGIN/protocol/profile-erc20.json" "$NB2_OUT/descriptors/semanti
   find packages/native-bridge-plugin/lib wallet -type f -print0 |
     LC_ALL=C sort -z | xargs -0 sha256sum
 ) >"$NB2_OUT/erc20-wallet.sha256"
-jq -n --arg contracts "$(git -C "$NB2_ERC20_CONTRACTS" rev-parse HEAD)" \
-  --arg plugin "$(git -C "$NB2_ERC20_PLUGIN" rev-parse HEAD)" --arg oracle "$NB2_ERC20_ORACLE_REV" \
+jq -n --arg contracts "$NB2_ERC20_CONTRACTS_REV" \
+  --arg plugin "$NB2_ERC20_PLUGIN_REV" --arg oracle "$NB2_ERC20_ORACLE_REV" \
   --arg wallet "$(sha256sum "$NB2_OUT/erc20-wallet.sha256" | cut -d' ' -f1)" \
   --arg lock "$(sha256sum "$NB2_ERC20_PLUGIN/package-lock.json" | cut -d' ' -f1)" \
   --arg profile "$(sha256sum "$NB2_OUT/descriptors/semantic-profile-erc20.json" | cut -d' ' -f1)" \
