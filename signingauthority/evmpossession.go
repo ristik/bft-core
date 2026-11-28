@@ -108,6 +108,7 @@ func (a *Authority) SignElectionPoP(req ElectionPoPRequest) (evmassign.EVMPoP, e
 	if err != nil {
 		return evmassign.EVMPoP{}, err
 	}
+	a.noteJoinScopeProof()
 	return evmassign.EVMPoP{ID: id, EVMKey: pub, Signature: sig}, nil
 }
 

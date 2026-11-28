@@ -45,6 +45,7 @@ var CustodyABI = mustABI(`[
 // PosErrorsABI are the custody and election errors a leaving validator's transactions can meet (#1316): the maturity gates of
 // StakeCustody.mature and claim, and ElectionPolicy's refusals of a proof or a finalization. DecodeRevert names them.
 var PosErrorsABI = mustABI(`[
+ {"type":"error","name":"GenerationClosing","inputs":[]},
  {"type":"error","name":"RecordsPending","inputs":[]},
  {"type":"error","name":"LotUnknown","inputs":[]},
  {"type":"error","name":"LotAlreadyReleased","inputs":[]},

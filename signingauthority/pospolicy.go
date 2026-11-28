@@ -364,7 +364,11 @@ func (a *Authority) verifyPos(ctx context.Context, src PosSource, chain uint64, 
 func (a *Authority) noteConfLocked(conf *types.PartitionDescriptionRecord) error {
 	a.confChain, a.confChainKnown = confChainID(conf)
 	a.confSeen = true
-	if a.pos != nil && (!a.confChainKnown || chainWord(a.confChain) != a.pos.ChainID) {
+	return a.checkPosChainLocked(a.confChain, a.confChainKnown)
+}
+
+func (a *Authority) checkPosChainLocked(chain uint64, known bool) error {
+	if a.pos != nil && (!known || chainWord(chain) != a.pos.ChainID) {
 		a.state = healthFaulted
 		return fmt.Errorf("%w: the shard configuration's chain id is not the one the P85 pin was verified for", ErrStateUntrusted)
 	}

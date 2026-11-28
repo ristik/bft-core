@@ -519,6 +519,7 @@ jobs:
           python3 scripts/ci/classify.py selftest
           python3 -m unittest discover -s scripts -p test_root_stall_watch.py
           scripts/ci/gate.sh selftest
+          bash scripts/test-ingress-loss-window.sh
           scripts/ci/check-pins.sh selftest
           scripts/ci/lane-product.sh selftest
           scripts/ci/install-foundry-selftest.sh

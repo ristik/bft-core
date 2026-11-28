@@ -127,6 +127,10 @@ h3_prepare_coupled() { # epoch replaced new
 
 # After H: the new root starts first (it proves H committed), the retained roots restart on the install epoch, the replaced one stops.
 h3_activate_coupled() { # epoch replaced new
+  lane_with_root_watch_paused h3_restart_coupled_roots "$@"
+}
+
+h3_restart_coupled_roots() { # epoch replaced new
   local epoch=$1 replace=$2 new=$3 i oldBoot
   oldBoot=$(m2_root_addr "$replace")
   m2_start_root "$new" "$epoch" "$oldBoot" || return 1
@@ -240,6 +244,10 @@ h3_retry_handoff() { # old epoch, attempt function (builds the assignment and pr
 # is still stopped and archiving; on a slow host that root, the joiner's, started rounds after the switch, recovered by state and never logged the switch, so
 # p85_epoch_switches (every running root must have logged one) failed (ci-lane run 39396698292 and 39433678003). Together, no root can run the switch without the others.
 h3_restart_roots() {
+  lane_with_root_watch_paused h3_restart_roots_into_epoch "$@"
+}
+
+h3_restart_roots_into_epoch() {
   local epoch=$1 i prev boot
   if [ "${H3_RESTART_TOGETHER:-0}" = 1 ]; then
     for i in $H3_ROOTS; do

@@ -3,6 +3,7 @@ package engineapi
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -219,5 +220,58 @@ func TestCheckProfile_UnicityPrecompilesOfAB1Deployment(t *testing.T) {
 	t.Run("a B1 deployment refuses S1 at 0x0103", func(t *testing.T) {
 		_, err := checkProfileWith(withNative(func(p map[string]any) { p["unicity-s1"] = "0x0000000000000000000000000000000000000103" }), 31337, nativeRev2)
 		require.ErrorContains(t, err, "unexpected unicity-s1")
+	})
+}
+
+func TestCheckProfile_UnicityEpochFork(t *testing.T) {
+	scheduled := func() map[string]any {
+		m := loadConfig(t, "eth_config_cancun_at_genesis.json")
+		epoch := current(loadConfig(t, "eth_config_cancun_at_genesis.json"))
+		for name, address := range nativeRev2 {
+			current(m)["precompiles"].(map[string]any)[name] = address
+			epoch["precompiles"].(map[string]any)[name] = address
+		}
+		prague := loadConfig(t, "eth_config_prague_scheduled.json")["next"].(map[string]any)
+		for name, address := range prague["precompiles"].(map[string]any) {
+			epoch["precompiles"].(map[string]any)[name] = address
+		}
+		epoch["activationTime"] = nil
+		epoch["activationRootEpoch"] = 2
+		epoch["notBeforeUcTime"] = 0
+		m["next"], m["last"] = epoch, maps.Clone(epoch)
+		return m
+	}
+	t.Run("scheduled interpreter fork accepted", func(t *testing.T) {
+		_, err := checkProfileWith(mustJSON(t, scheduled()), 31337, nativeRev2)
+		require.NoError(t, err)
+	})
+	t.Run("active interpreter fork accepted", func(t *testing.T) {
+		m := scheduled()
+		m["unicityActive"], m["next"], m["last"] = m["next"], nil, nil
+		_, err := checkProfileWith(mustJSON(t, m), 31337, nativeRev2)
+		require.NoError(t, err)
+	})
+	for _, key := range []string{"next", "last", "unicityActive"} {
+		t.Run(key+" requires explicit null activationTime", func(t *testing.T) {
+			m := scheduled()
+			if key == "unicityActive" {
+				m[key], m["next"], m["last"] = m["next"], nil, nil
+			}
+			delete(m[key].(map[string]any), "activationTime")
+			_, err := checkProfileWith(mustJSON(t, m), 31337, nativeRev2)
+			require.ErrorContains(t, err, `"`+key+`" epoch fork requires explicit null activationTime`)
+		})
+	}
+	t.Run("scheduled fork cannot bypass the check of current", func(t *testing.T) {
+		m := scheduled()
+		current(m)["precompiles"].(map[string]any)["BLS12_G1ADD"] = "0x000000000000000000000000000000000000000b"
+		_, err := checkProfileWith(mustJSON(t, m), 31337, nativeRev2)
+		require.ErrorContains(t, err, "unexpected BLS12_G1ADD")
+	})
+	t.Run("missing scheduled precompile refused", func(t *testing.T) {
+		m := scheduled()
+		delete(m["next"].(map[string]any)["precompiles"].(map[string]any), "BLS12_G1ADD")
+		_, err := checkProfileWith(mustJSON(t, m), 31337, nativeRev2)
+		require.ErrorContains(t, err, "missing BLS12_G1ADD")
 	})
 }

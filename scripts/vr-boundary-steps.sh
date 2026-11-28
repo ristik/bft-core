@@ -76,12 +76,16 @@ vrb_root_epoch2() { # at least 3 of this lane's roots report activeEpoch as the 
 #                         again (byte for byte), and no view was signed twice. Releasing root2 completes the handoff.
 #   VR_RESTART_MEMBER=1   root1 is restarted after the certificate is complete, around the Prepare: its member file is unchanged afterwards.
 vrb_restart_root() { # <n> <description>
-  local node=$1 boot rc
   declare -F m2_start_root >/dev/null || source scripts/lib/m2-handoff-lib.sh || { vrb_log "FAIL: the root restart library"; return 1; }
+  lane_with_root_watch_paused vrb_restart_root_and_wait "$@"
+}
+
+vrb_restart_root_and_wait() {
+  local node=$1 boot
   boot=$(m2_root_addr $((node == 2 ? 3 : 2)))
   stop_pidfile "test-nodes/root$node/pid" 'ubft root-node' || { vrb_log "FAIL: stopping root$node"; return 1; }
-  { m2_start_root "$node" 1 "$boot"; rc=$?; } >/dev/null 2>&1   # its readiness check needs lsof (not on the dev server): the RPC is the check
-  vrb_wait 90 "root$node answers on its RPC $2" curl -sf "http://127.0.0.1:$(m2_rpc_port "$node")/api/v1/roundInfo" || return 1
+  m2_start_root "$node" 1 "$boot" >/dev/null 2>&1 || true   # its readiness check needs lsof (not on the dev server): the RPC is the check
+  vrb_wait 90 "root$node answers on its RPC $2" curl -sf "http://127.0.0.1:$(m2_rpc_port "$node")/api/v1/roundInfo"
 }
 vrb_hold() { # <n>: start root n with the readiness hold
   touch "test-nodes/root$1/vr-member.hold"
@@ -145,12 +149,34 @@ vrb_poa_stall() {
 vrb_poa_shard_paused() { [[ $(ps -o stat= -p "$1") =~ ^[[:space:]]*T ]]; }
 
 vrb_poa_resume() {
-  local pid failed=0
+  local pid failed=()
   for pid in ${vrb_poa_paused_pids[@]+"${vrb_poa_paused_pids[@]}"}; do
-    owned_pid "$pid" 'ubft shard-node run' && kill -CONT "$pid" || failed=1
+    if ! owned_pid "$pid" 'ubft shard-node run' || ! kill -CONT "$pid"; then
+      failed+=("$pid")
+    fi
   done
-  [ "$failed" -eq 0 ] || return 1
-  vrb_poa_paused_pids=()
+  vrb_poa_paused_pids=(${failed[@]+"${failed[@]}"})
+  [ "${#failed[@]}" -eq 0 ]
+}
+
+vrb_poa_resume_on_exit() {
+  vrb_poa_resume && return 0
+
+  local pid retry=()
+  for pid in ${vrb_poa_paused_pids[@]+"${vrb_poa_paused_pids[@]}"}; do
+    if ! kill -0 "$pid" 2>/dev/null && ! ps -p "$pid" >/dev/null 2>&1; then
+      vrb_log "WARN: teardown resume failed for shard PID $pid: process exited"
+      continue
+    fi
+    if owned_pid "$pid" 'ubft shard-node run' && vrb_poa_shard_paused "$pid"; then
+      vrb_log "WARN: teardown resume failed for shard PID $pid: still owned and stopped, retrying"
+    else
+      vrb_log "WARN: teardown resume failed for shard PID $pid: process exists, rechecking ownership"
+    fi
+    retry+=("$pid")
+  done
+  vrb_poa_paused_pids=(${retry[@]+"${retry[@]}"})
+  vrb_poa_resume || vrb_log "WARN: teardown resume retry failed for shard PIDs ${vrb_poa_paused_pids[*]}"
 }
 
 vrb_poa_recovery() {

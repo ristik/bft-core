@@ -44,12 +44,16 @@ type RootPartitionNet interface {
 // tappedNet is the production consensus network. Send also shows the message to the trace; receiving is the production queue itself.
 type tappedNet struct {
 	*network.LibP2PNetwork
-	tap func(any)
+	tap  func(any)
+	drop func(any) bool
 }
 
 func (n *tappedNet) Send(ctx context.Context, msg any, receivers ...peer.ID) error {
 	if n.tap != nil {
 		n.tap(msg)
+	}
+	if n.drop != nil && n.drop(msg) {
+		return nil
 	}
 	return n.LibP2PNetwork.Send(ctx, msg, receivers...)
 }
@@ -81,6 +85,7 @@ type liveTransport struct {
 	t      *testing.T
 	obs    network.Observability
 	tap    func(any)
+	drop   func(peer.ID, any) bool
 	mu     sync.Mutex
 	roots  map[peer.ID]*rootHost
 	shards map[string]*shardHost
@@ -119,6 +124,9 @@ func (x *liveTransport) install(c *q4bLive) {
 				if x.tap != nil {
 					x.tap(msg)
 				}
+			}
+			h.consensus.drop = func(msg any) bool {
+				return x.drop != nil && x.drop(r.id(), msg)
 			}
 			x.roots[r.id()] = h
 			x.t.Cleanup(func() { x.closeRoot(h) })

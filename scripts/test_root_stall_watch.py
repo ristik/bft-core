@@ -1,4 +1,5 @@
 import http.server
+import os
 from pathlib import Path
 import runpy
 import tempfile
@@ -7,7 +8,10 @@ import unittest
 from unittest.mock import patch
 
 
-Root = runpy.run_path(str(Path(__file__).with_name("root-stall-watch.py")))["Root"]
+watchdog = runpy.run_path(str(Path(__file__).with_name("root-stall-watch.py")))
+Root = watchdog["Root"]
+watch = watchdog["watch"]
+PAUSE_MAX_AGE = watchdog["PAUSE_MAX_AGE"]
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -22,6 +26,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if self.server.fail_capture:
                 self.send_error(503)
                 return
+            if self.server.before_stack_reply:
+                self.server.before_stack_reply()
             data = b"goroutine 1 [running]:\n"
         else:
             self.send_error(404)
@@ -47,9 +53,15 @@ class RootStallWatchTest(unittest.TestCase):
         self.server.root_pid = 123
         self.server.stack_requests = []
         self.server.fail_capture = False
+        self.server.before_stack_reply = None
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        home = Path(directory.name)
+        nodes = Path(directory.name)
+        self.pause_marker = nodes / ".stall-watch-pause"
+        self.resumed_marker = nodes / ".stall-watch-resumed"
+        self.failed_marker = nodes / ".stall-watch-failed"
+        home = nodes / "root1"
+        home.mkdir()
         (home / "pid").write_text("123\n")
         self.log = home / "debug.log"
         self.root = Root(home, 123, self.server.server_port, 0)
@@ -85,6 +97,128 @@ class RootStallWatchTest(unittest.TestCase):
         self.server.round_number = 51
         self.sample_at(8)
         self.assertEqual(["123"], self.server.stack_requests)
+
+    def test_marker_suppresses_capture_until_removed_then_rearms(self):
+        self.sample_at(1)
+        self.pause_marker.touch()
+        self.sample_at(6)
+        self.sample_at(20)
+        self.assertEqual([], self.server.stack_requests)
+        self.assertFalse(self.log.exists())
+
+        self.pause_marker.unlink()
+        self.sample_at(21)
+        self.sample_at(25)
+        self.assertEqual([], self.server.stack_requests)
+        self.sample_at(26)
+        self.assertEqual(["123"], self.server.stack_requests)
+        self.assertIn("5.0s without round progress", self.log.read_text())
+
+    def test_stale_marker_allows_capture_even_if_previously_active(self):
+        self.sample_at(1)
+        self.pause_marker.touch()
+        marked_at = self.pause_marker.stat().st_mtime_ns / 1_000_000_000
+        self.sample_at(6)
+        self.assertEqual([], self.server.stack_requests)
+
+        with patch("time.time", return_value=marked_at + PAUSE_MAX_AGE):
+            self.sample_at(7)
+        self.assertEqual(["123"], self.server.stack_requests)
+        self.assertTrue(self.pause_marker.exists())
+        self.assertIn("round 51", self.log.read_text())
+
+    def test_stale_marker_at_start_does_not_pause_watchdog(self):
+        self.pause_marker.touch()
+        os.utime(self.pause_marker, (0, 0))
+        self.sample_at(1)
+        self.sample_at(6)
+        self.assertEqual(["123"], self.server.stack_requests)
+
+    def test_expired_pause_captures_unavailable_round_with_rate_limit_and_pid_check(self):
+        self.sample_at(1)
+        self.pause_marker.touch()
+        expires_at = self.pause_marker.stat().st_mtime_ns / 1_000_000_000 + PAUSE_MAX_AGE
+        self.server.round_number = None
+        self.sample_at(6)
+        self.assertEqual([], self.server.stack_requests)
+
+        pidfile = self.root.home / "pid"
+        self.server.fail_capture = True
+        with patch("time.time", return_value=expires_at):
+            self.sample_at(7)
+            self.sample_at(8)
+            self.assertEqual(["123"], self.server.stack_requests)
+            self.assertFalse(self.log.exists())
+
+            self.server.fail_capture = False
+            pidfile.write_text("124\n")
+            self.sample_at(12)
+            self.assertEqual(["123"], self.server.stack_requests)
+            self.assertFalse(self.log.exists())
+
+            pidfile.write_text("123\n")
+            self.sample_at(17)
+            self.sample_at(22)
+        self.assertEqual(["123", "123"], self.server.stack_requests)
+        self.assertIn("round unavailable, last round 51, pid 123", self.log.read_text())
+
+    def test_failed_restart_allows_capture_before_pause_expiry(self):
+        self.sample_at(1)
+        self.pause_marker.touch()
+        self.server.round_number = None
+        self.sample_at(6)
+        self.assertEqual([], self.server.stack_requests)
+
+        self.pause_marker.replace(self.failed_marker)
+        self.sample_at(7)
+        self.sample_at(12)
+        self.assertEqual(["123"], self.server.stack_requests)
+        self.assertIn("round unavailable, last round 51, pid 123", self.log.read_text())
+
+    def test_teardown_samples_failed_restart_before_the_stall_threshold(self):
+        self.failed_marker.touch()
+        self.server.round_number = None
+        with patch("time.monotonic", return_value=1):
+            watch(self.root.home.parent, self.root.port, 15, lambda: True)
+        self.assertEqual(["123"], self.server.stack_requests)
+        self.assertIn("round unavailable, pid 123", self.log.read_text())
+
+    def sample_expired_pause_during_capture(self, transition):
+        self.sample_at(1)
+        self.server.round_number = None
+        self.pause_marker.touch()
+        os.utime(self.pause_marker, (0, 0))
+        self.server.before_stack_reply = transition
+        self.sample_at(6)
+        self.assertEqual(["123"], self.server.stack_requests)
+
+    def test_expired_pause_rename_during_pprof_keeps_capture(self):
+        self.sample_expired_pause_during_capture(lambda: self.pause_marker.replace(self.resumed_marker))
+        self.assertIn("round unavailable", self.log.read_text())
+
+    def test_expired_pause_removal_during_pprof_keeps_capture(self):
+        self.sample_expired_pause_during_capture(self.pause_marker.unlink)
+        self.assertIn("round unavailable", self.log.read_text())
+
+    def test_replacement_during_expired_pause_rename_discards_stacks(self):
+        def replace_root_and_resume():
+            (self.root.home / "pid").write_text("124\n")
+            self.pause_marker.replace(self.resumed_marker)
+
+        self.sample_expired_pause_during_capture(replace_root_and_resume)
+        self.assertFalse(self.log.exists())
+
+    def test_pause_completed_between_samples_rearms(self):
+        self.sample_at(1)
+        self.pause_marker.touch()
+        self.pause_marker.replace(self.resumed_marker)
+
+        self.sample_at(10)
+        self.sample_at(14)
+        self.assertEqual([], self.server.stack_requests)
+        self.sample_at(15)
+        self.assertEqual(["123"], self.server.stack_requests)
+        self.assertIn("5.0s without round progress", self.log.read_text())
 
     def test_failed_capture_is_rate_limited(self):
         self.sample_at(1)

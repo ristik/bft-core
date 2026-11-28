@@ -15,6 +15,31 @@ p_sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else 
 p_size() { stat -c %s "$1" 2>/dev/null || stat -f %z "$1"; }
 # p_mtime is a file's modification time in seconds since the epoch (GNU, then BSD stat)
 p_mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"; }
+# Rename the marker so the watcher can see a completed pause even between polls.
+lane_finish_root_watch_pause() {
+  local outcome=$1 marker=test-nodes/.stall-watch-pause status
+  [ -f "$marker" ] || return 0
+  mv -f "$marker" "test-nodes/.stall-watch-$outcome" && return 0
+  status=$?
+  rm -f "$marker"
+  return "$status"
+}
+
+lane_resume_root_watch() { lane_finish_root_watch_pause resumed; }
+
+lane_with_root_watch_paused() {
+  local restart_status=0
+  touch test-nodes/.stall-watch-pause || return
+  if rm -f test-nodes/.stall-watch-resumed test-nodes/.stall-watch-failed && "$@"; then
+    lane_resume_root_watch
+  else
+    restart_status=$?
+    lane_finish_root_watch_pause failed || true
+    return "$restart_status"
+  fi
+}
+
+lane_clear_root_watch_markers() { rm -f test-nodes/.stall-watch-{pause,resumed,failed}; }
 # epoch seconds of a UTC time stamp YYYY-MM-DDTHH:MM:SSZ (GNU date -d, else BSD date -j)
 p_epoch() { date -u -d "$1" +%s 2>/dev/null || date -u -j -f %Y-%m-%dT%H:%M:%SZ "$1" +%s; }
 # timeout SECONDS COMMAND...: GNU timeout, Homebrew gtimeout, else the command unbounded (the caller's own deadline then applies)

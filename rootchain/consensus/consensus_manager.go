@@ -1709,6 +1709,13 @@ func (x *ConsensusManager) processQC(ctx context.Context, qc *drctypes.QuorumCer
 		}
 		return fmt.Errorf("QC of round %d not accepted: %w", qc.GetRound(), err)
 	}
+	if x.log.Enabled(ctx, slog.LevelDebug) {
+		for _, cert := range certs {
+			x.log.DebugContext(ctx, "shard certificate committed", logger.Shard(cert.Partition, cert.Shard),
+				slog.Uint64("sealRound", cert.UC.GetRootRoundNumber()), slog.Uint64("nextRound", cert.Technical.Round),
+				slog.String("blockHash", fmt.Sprintf("%x", cert.UC.InputRecord.BlockHash)))
+		}
+	}
 	x.forgetOrderedRetirements()
 	x.forgetResolvedRejections()
 	x.observeVR() // the residence rule's clock starts when this root first holds a committed opening

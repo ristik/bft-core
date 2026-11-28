@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/unicitynetwork/bft-core/signingauthority"
+	"github.com/unicitynetwork/bft-core/vrclient"
 	"github.com/unicitynetwork/bft-core/vrclient/vrfake"
 	"github.com/unicitynetwork/bft-core/vrschema"
 )
@@ -92,7 +93,7 @@ func TestValidatorApplyPoSAdmitsTheDelegationBeforeTheFirstBond(t *testing.T) {
 			p.OpenLots = 0
 		}, []string{"bond"}, 1},
 		"a re-bond after retirement": {func(p *vrfake.Position, _ map[[2]uint64]*vrfake.Delegated, _ uint64) {
-			p.OpenLots, p.RetirementRequested = 0, true
+			p.OpenLots, p.LotCount, p.RetirementRequested = 0, 3, true
 		}, []string{"bond", "admit"}, 2},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -103,7 +104,78 @@ func TestValidatorApplyPoSAdmitsTheDelegationBeforeTheFirstBond(t *testing.T) {
 			f.chain.With(func(ch *vrfake.Chain) {
 				require.Equal(t, c.order, ch.Pos.Order, out)
 				require.Equal(t, c.generation, ch.Pos.Positions[f.id].Generation)
+				require.EqualValues(t, 1, ch.Pos.Positions[f.id].LotCount)
 				require.NotNil(t, ch.Pos.Delegations[[2]uint64{f.id, c.generation}], "the delegation is at the bonded generation")
+			})
+		})
+	}
+}
+
+func TestFreshValidatorApplyPinsAndBondsThroughTheAuthority(t *testing.T) {
+	for _, resumed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("resumed=%t", resumed), func(t *testing.T) {
+			chain, url := fakeNetwork(t)
+			home := initHome(t, url)
+			v, keys := loadHome(t, home)
+			owner := ethcrypto.PubkeyToAddress(keys.Operator.PublicKey)
+			chain.Fund(owner, new(big.Int).Mul(big.NewInt(2), big.NewInt(1e18)))
+			root, err := nodeKeys(keys.Root)
+			require.NoError(t, err)
+			payee, err := v.payee()
+			require.NoError(t, err)
+			custody, election := common.Address{0xc1}, common.Address{0xe1}
+			chain.With(func(c *vrfake.Chain) {
+				c.Tag, c.Custody, c.Election, c.Evidence = vrclient.ModuleTagPoS, custody, election, common.Address{0xe2}
+				c.Pos = vrfake.NewPos()
+			})
+			src := &chainPosSource{chain: chain, view: signingauthority.PosDeploymentView{
+				Network: chain.Network, ChainID: vrschema.U64(3), Election: election,
+			}}
+			socket, cred, info := startAuthority(t, signingauthority.RegistrationPolicy{
+				Deployment: signingauthority.RegistrationDeployment{Network: chain.Network, ChainID: vrschema.U64(3), Registry: chain.Registry},
+				Authorized: []signingauthority.RegistrationAuthorization{
+					{Domain: vrschema.RegisterDomainText, Owner: owner, Payee: payee, RootNodeID: root.NodeID, RootKey: root.Public()},
+				},
+			}, signingauthority.WithPosSource(src, 3), signingauthority.WithRequirePosPolicy())
+			v.cfg.EVMAuthority = &evmAuthorityConfig{Socket: socket, Credential: cred, NodeInfo: info}
+			v.cfg.EVMKeys = ""
+			require.NoError(t, v.save())
+			pin := writePin(t, fmt.Sprintf(`{"network":"0x%x","chainId":3,"election":"%s"}`, chain.Network, election.Hex()))
+
+			if resumed {
+				v, keys := loadHome(t, home)
+				reg, _, _, err := registration(v, keys, 0)
+				require.NoError(t, err)
+				id := chain.AddMember(owner, reg)
+				chain.With(func(c *vrfake.Chain) {
+					c.Pos.Positions[id] = &vrfake.Position{Generation: 1, RootKeyHash: ethcrypto.Keccak256Hash(root.Public())}
+				})
+				v.cfg.ID = id
+				require.NoError(t, v.save())
+
+				for _, args := range [][]string{{"apply", "--dry-run"}, {"apply", "--dry-run", "--pin-pos-policy", pin}} {
+					out, err := runValidator(t, home, args...)
+					require.ErrorContains(t, err, "A dry run cannot set the P85 pin", out)
+				}
+				require.Zero(t, chain.Sends())
+				return
+			}
+
+			out, err := runValidator(t, home, "apply", "--pin-pos-policy", pin)
+			require.NoError(t, err, out)
+			id := readConfig(t, home).ID
+			require.EqualValues(t, 5, id)
+			require.Contains(t, out, "pinned the signing authority's P85 scope to identity 5")
+			require.Equal(t, "e2e-evm-auth", chain.Identity(id).Current.EvmNodeID)
+			chain.With(func(c *vrfake.Chain) {
+				require.Len(t, c.Sent, 4)
+				require.Equal(t, vrclient.VRABI.Methods["register"].ID, selector(c.Sent[0]))
+				require.Equal(t, vrclient.CustodyABI.Methods["register"].ID, selector(c.Sent[1]))
+				require.Equal(t, vrclient.PosElectionABI.Methods["admitDelegation"].ID, selector(c.Sent[2]))
+				require.Equal(t, vrclient.CustodyABI.Methods["bond"].ID, selector(c.Sent[3]))
+				require.EqualValues(t, 1, c.Pos.Positions[id].OpenLots)
+				require.EqualValues(t, 1, c.Pos.Positions[id].LotCount)
+				require.NotNil(t, c.Pos.Delegations[[2]uint64{id, 1}])
 			})
 		})
 	}
