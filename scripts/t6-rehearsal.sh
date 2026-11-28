@@ -9,16 +9,18 @@ AGRE_ROOT=$(lane_agre_root)
 LOCK_SCRIPT=$(lane_lock_script)
 SCRIPT_PATH=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")
 EVIDENCE_DIR=${T6_EVIDENCE_DIR:-$AGRE_ROOT/briefs/devnet-runs/t6-rehearsal-$(date -u +%Y%m%dT%H%M%SZ)}
-T6_BFT_COMMIT=${T6_BFT_COMMIT:-$(git -C "$SOURCE_ROOT" rev-parse HEAD)}
+T6_BFT_COMMIT=${T6_BFT_COMMIT:-$(jq -er .bft "$SOURCE_ROOT/deploy/testnet/pins.json")}
 T6_BFT_REMOTE=${T6_BFT_REMOTE:-$(git -C "$SOURCE_ROOT" remote get-url origin)}
-T6_BFT_REF=${T6_BFT_REF:-t6/rehearsal-harness}
+[[ "$T6_BFT_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "FAIL: T6 requires a full BFT merge commit SHA" >&2; exit 2; }
 # Match the checkout product's execution client in scripts/ci/lane-pins.json.
 # T6_URETH_ATTESTED may supply a build at the same pin.
-T6_URETH_COMMIT=${T6_URETH_COMMIT:-c91535bf306738655d06db0389e44ab0df57014e}
+T6_URETH_COMMIT=${T6_URETH_COMMIT:-fadfe3a14c3df3a4a27ff9ba65f9c918538d39db}
 T6_URETH_REMOTE=${T6_URETH_REMOTE:-https://github.com/ristik/ureth.git}
-T6_CONTRACTS_COMMIT=${T6_CONTRACTS_COMMIT:-e7eb3216549b772a9e1df2b1214976d7dd9e6e62}
-# The four allocation contracts are rebuilt from their e7eb3216 source commit. The registry is not: the fresh-B1 registry (layout 3) is generated in code
-# from the profile, and T6 verifies the deployed genesis against an independent regeneration (b1genesis --verify), not against a contracts rebuild.
+T6_CONTRACTS_COMMIT=${T6_CONTRACTS_COMMIT:-79d8d1e5bb8913774b72d908178099717d9f76c1}
+[[ "$T6_CONTRACTS_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "FAIL: T6 requires a full contracts merge commit SHA" >&2; exit 2; }
+# The allocation manifest records the historical artifact source. The rebuild checks those same artifact bytes at the merge above.
+# T6 verifies the fresh-B1 registry (layout 3) separately against b1genesis --verify.
+T6_ARTIFACT_SOURCE_COMMIT=e7eb3216549b772a9e1df2b1214976d7dd9e6e62
 T6_CONTRACTS_REMOTE=${T6_CONTRACTS_REMOTE:-https://github.com/ristik/unicity-pos-contracts.git}
 T6_RUST_TOOLCHAIN=${T6_RUST_TOOLCHAIN:-1.97.1}
 
@@ -58,7 +60,7 @@ if [ "${T6_LOCKED:-0}" != 1 ]; then
   [ -x "$LOCK_SCRIPT" ] || { echo "FAIL: devnet lock helper missing at $LOCK_SCRIPT" >&2; exit 1; }
   exec "$LOCK_SCRIPT" "T6 placeholder-manifest rehearsal" env \
     T6_LOCKED=1 T6_EVIDENCE_DIR="$EVIDENCE_DIR" T6_BFT_COMMIT="$T6_BFT_COMMIT" \
-    T6_BFT_REMOTE="$T6_BFT_REMOTE" T6_BFT_REF="$T6_BFT_REF" T6_URETH_COMMIT="$T6_URETH_COMMIT" \
+    T6_BFT_REMOTE="$T6_BFT_REMOTE" T6_URETH_COMMIT="$T6_URETH_COMMIT" \
     T6_URETH_REMOTE="$T6_URETH_REMOTE" T6_CONTRACTS_COMMIT="$T6_CONTRACTS_COMMIT" \
     T6_CONTRACTS_REMOTE="$T6_CONTRACTS_REMOTE" T6_RUST_TOOLCHAIN="$T6_RUST_TOOLCHAIN" \
     "$SCRIPT_PATH" "$@"
@@ -186,9 +188,14 @@ new_isolated_checkout() {
     "$ISOLATION_ROOT/cache/cargo" "$ISOLATION_ROOT/cache/rustup" \
     "$ISOLATION_ROOT/cache/xdg" "$ISOLATION_ROOT/cache/foundry" "$ISOLATION_ROOT/bin"
   FRESH_REPO=$ISOLATION_ROOT/bft-core
-  git clone --no-hardlinks --no-tags "$T6_BFT_REMOTE" "$FRESH_REPO" >"$EVIDENCE_DIR/clone.log" 2>&1
-  git -C "$FRESH_REPO" fetch --no-tags origin "$T6_BFT_REF" >>"$EVIDENCE_DIR/clone.log" 2>&1
-  git -C "$FRESH_REPO" checkout --detach "$T6_BFT_COMMIT" >>"$EVIDENCE_DIR/clone.log" 2>&1
+  git -C "$ISOLATION_ROOT" clone --no-hardlinks --no-tags "$T6_BFT_REMOTE" "$FRESH_REPO" >"$EVIDENCE_DIR/clone.log" 2>&1
+  if ! git -C "$FRESH_REPO" cat-file -e "$T6_BFT_COMMIT^{commit}" 2>/dev/null; then
+    git -C "$FRESH_REPO" fetch --no-tags origin "$T6_BFT_COMMIT" >>"$EVIDENCE_DIR/clone.log" 2>&1 || return 1
+  fi
+  git -C "$FRESH_REPO" rev-parse --verify "$T6_BFT_COMMIT^2" >>"$EVIDENCE_DIR/clone.log" 2>&1 || {
+    fail "BFT pin $T6_BFT_COMMIT must be a merge commit"; return 1;
+  }
+  git -C "$FRESH_REPO" checkout --detach "$T6_BFT_COMMIT" >>"$EVIDENCE_DIR/clone.log" 2>&1 || return 1
   [ "$(git -C "$FRESH_REPO" rev-parse HEAD)" = "$T6_BFT_COMMIT" ] || return 1
   [ -z "$(git -C "$FRESH_REPO" status --porcelain)" ] || return 1
   [ ! -e "$FRESH_REPO/build/ubft" ] && [ ! -d "$FRESH_REPO/test-nodes" ] || {
@@ -203,7 +210,7 @@ new_isolated_checkout() {
   export XDG_CACHE_HOME="$ISOLATION_ROOT/cache/xdg"
   export FOUNDRY_CACHE_PATH="$ISOLATION_ROOT/cache/foundry"
   export GOFLAGS=-mod=readonly
-  printf 'fresh BFT commit=%s\nremote=%s\nref=%s\n' "$T6_BFT_COMMIT" "$T6_BFT_REMOTE" "$T6_BFT_REF" >"$EVIDENCE_DIR/source-pin.txt"
+  printf 'fresh BFT commit=%s\nremote=%s\n' "$T6_BFT_COMMIT" "$T6_BFT_REMOTE" >"$EVIDENCE_DIR/source-pin.txt"
   pass "clean BFT clone pinned at $T6_BFT_COMMIT; HOME and Go/Rust/Foundry caches are isolated"
 }
 
@@ -248,16 +255,21 @@ install_pinned_foundry() {
 
 build_pinned_contracts() {
   FRESH_CONTRACTS=$ISOLATION_ROOT/unicity-pos-contracts
-  git clone --no-hardlinks --no-tags "$T6_CONTRACTS_REMOTE" "$FRESH_CONTRACTS" >"$EVIDENCE_DIR/contracts-clone.log" 2>&1
-  git -C "$FRESH_CONTRACTS" checkout --detach "$T6_CONTRACTS_COMMIT" >>"$EVIDENCE_DIR/contracts-clone.log" 2>&1
-  git -C "$FRESH_CONTRACTS" submodule update --init --recursive >>"$EVIDENCE_DIR/contracts-clone.log" 2>&1
+  git -C "$ISOLATION_ROOT" clone --no-hardlinks --no-tags "$T6_CONTRACTS_REMOTE" "$FRESH_CONTRACTS" >"$EVIDENCE_DIR/contracts-clone.log" 2>&1
+  git -C "$FRESH_CONTRACTS" rev-parse --verify "$T6_CONTRACTS_COMMIT^2" >>"$EVIDENCE_DIR/contracts-clone.log" 2>&1 || {
+    fail "contracts pin $T6_CONTRACTS_COMMIT must be a merge commit"; return 1;
+  }
+  git -C "$FRESH_CONTRACTS" checkout --detach "$T6_CONTRACTS_COMMIT" >>"$EVIDENCE_DIR/contracts-clone.log" 2>&1 || return 1
+  git -C "$FRESH_CONTRACTS" submodule update --init --recursive >>"$EVIDENCE_DIR/contracts-clone.log" 2>&1 || return 1
   [ "$(git -C "$FRESH_CONTRACTS" rev-parse HEAD)" = "$T6_CONTRACTS_COMMIT" ] || return 1
   (cd "$FRESH_CONTRACTS" && forge build --force)
-  python3 "$FRESH_REPO/scripts/t6/verify-contract-build.py" \
+  # Use the harness's normalized comparison against the pinned clone's published artifacts.
+  python3 "$SOURCE_ROOT/scripts/t6/verify-contract-build.py" \
     --manifest "$FRESH_REPO/registrygenesis/testdata/allocation-build-v1.example.json" \
     --bft-root "$FRESH_REPO" --contracts-root "$FRESH_CONTRACTS" \
-    --contracts-commit "$T6_CONTRACTS_COMMIT" --skip-registry | tee "$EVIDENCE_DIR/contracts-rebuild.log"
-  printf 'contracts commit=%s\nforge version=%s\n' "$T6_CONTRACTS_COMMIT" "$(forge --version | head -1)" >>"$EVIDENCE_DIR/source-pin.txt"
+    --contracts-commit "$T6_ARTIFACT_SOURCE_COMMIT" --skip-registry | tee "$EVIDENCE_DIR/contracts-rebuild.log"
+  printf 'contracts commit=%s\nmanifest artifact source commit=%s\nforge version=%s\n' \
+    "$T6_CONTRACTS_COMMIT" "$T6_ARTIFACT_SOURCE_COMMIT" "$(forge --version | head -1)" >>"$EVIDENCE_DIR/source-pin.txt"
 }
 
 build_pinned_ureth() {
@@ -477,8 +489,8 @@ write_prerehearsal_pins() {
   local manifest hash
   manifest=registrygenesis/testdata/allocation-build-v1.example.json
   hash=$(sha256 "$manifest")
-  printf 'bft commit=%s\nbft remote=%s\nbft ref=%s\nbft ubft sha256=%s\n' \
-    "$T6_BFT_COMMIT" "$T6_BFT_REMOTE" "$T6_BFT_REF" "$(sha256 build/ubft)" >"$EVIDENCE_DIR/source-pin.txt"
+  printf 'bft commit=%s\nbft remote=%s\nbft ubft sha256=%s\n' \
+    "$T6_BFT_COMMIT" "$T6_BFT_REMOTE" "$(sha256 build/ubft)" >"$EVIDENCE_DIR/source-pin.txt"
   printf 'run mode=%s\n' "$T6_RUN_MODE" >>"$EVIDENCE_DIR/source-pin.txt"
   printf 'f7 extractor sha256=%s\nf7 verifier sha256=%s\nevmtx sha256=%s\n' \
     "$(sha256 build/f7-mintproof-extract)" "$(sha256 build/f7-mintproof-verify)" \
@@ -486,8 +498,8 @@ write_prerehearsal_pins() {
   printf 'ureth commit=%s\nureth binary=%s\nureth binary sha256=%s\n' \
     "$T6_URETH_COMMIT" "$URETH_BIN" "$(sha256 "$URETH_BIN")" >>"$EVIDENCE_DIR/source-pin.txt"
   cat "$EVIDENCE_DIR/ureth-version.txt" >>"$EVIDENCE_DIR/source-pin.txt"
-  printf 'contracts commit=%s\ncontracts manifest sha256=%s\n' \
-    "$(git -C "$FRESH_CONTRACTS" rev-parse HEAD)" "$hash" >>"$EVIDENCE_DIR/source-pin.txt"
+  printf 'contracts commit=%s\nmanifest artifact source commit=%s\ncontracts manifest sha256=%s\n' \
+    "$(git -C "$FRESH_CONTRACTS" rev-parse HEAD)" "$T6_ARTIFACT_SOURCE_COMMIT" "$hash" >>"$EVIDENCE_DIR/source-pin.txt"
   printf 'Foundry forge sha256=%s\n' "$(sha256 "$ISOLATION_ROOT/bin/forge")" >>"$EVIDENCE_DIR/source-pin.txt"
   cat "$EVIDENCE_DIR/compiler-toolchains.txt" >>"$EVIDENCE_DIR/source-pin.txt"
   printf 'Foundry release=v1.8.3\nFoundry macOS asset sha256=1b469229681b31e3c66a07132811b99460b2874a0a48de3b29500234454f47b8\n' \
@@ -501,7 +513,7 @@ run_step "fresh clone and isolated HOME/cache setup" new_isolated_checkout
 run_step "fresh pinned Ureth source build" build_pinned_ureth
 run_step "fresh BFT and F7 tool build" build_bft_tools
 run_step "isolated pinned Foundry release install" install_pinned_foundry
-run_step "contracts e7eb3216 source rebuild and manifest artifact match" build_pinned_contracts
+run_step "contracts merge rebuild and manifest artifact match" build_pinned_contracts
 run_step "source, binary, and manifest pins" write_prerehearsal_pins
 # CI harness-failure test (scripts/ci/run-t6.sh, workflow input inject_failure=in-lane): fail deliberately after the builds so the failure path's diagnostics can be shown.
 # Honoured only on a GitHub runner; it asserts nothing and weakens nothing, it adds a failing step.
