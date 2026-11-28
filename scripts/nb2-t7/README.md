@@ -208,8 +208,10 @@ The calibration waits for 64 published seal proofs before starting Advance.
 It then measures consecutive usable proofs over this queued prefix. Each
 Advance window starts when its last required seal is observed available,
 before reading proofs, authenticating them and assembling calldata. It ends
-when the relayer verifies the returned proof. The consecutive measurement
-includes overhead between calls and reports the segment-64 checkpoint separately.
+when the relayer verifies the returned proof. Finalized segment snapshots
+bracket each call. The consecutive measurement includes overhead between
+calls and reports the segment-64 checkpoint separately. The audit also
+counts seals between consecutive end snapshots, including any wait for load.
 
 After teardown, authenticate the measured calls and seal chain with the
 built release SDK. Replay the candidate batch and terminal suffixes separately
@@ -227,8 +229,9 @@ The native Start uses 16 operations and 32 pages, with the archived wide
 deposit, allocation, and certification witnesses. The terminal replay
 covers a full three-gap advance and both payout routes
 at suffixes zero through two, with a concentrated 127-position scan,
-seal and expensive token calls. The recovered cases use the archived
-wide certified predecessor and the full gap witnesses. The live audit
+seal and expensive token calls. The recovered cases use full gap witnesses
+and a certified predecessor at the 49,152-byte trie-leaf limit, alongside
+a separately certified one-byte-larger leaf that the verifier refuses. The live audit
 reports observed proof timing, arrivals, funding and nonce usage, and
 recomputes a candidate reserve using the sampled inclusion windows.
 The audit authenticates successful receipt logs and certified header

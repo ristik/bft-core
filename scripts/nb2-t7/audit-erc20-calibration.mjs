@@ -63,10 +63,18 @@ function signed(prefix, loc, gas, to) {
   return { from, request, raw };
 }
 
-async function measuredCall(prefix, kind, to, expectedEvent) {
+async function measuredCall(prefix, kind, to, expectedEvent, checkpoint) {
   const { log, loc } = await receipt(prefix);
   assert.equal(loc.address, to, prefix);
   assert.equal(log.topics[0] && hex(log.topics[0]), expectedEvent, prefix);
+  if (checkpoint) {
+    assert.equal(hex(log.topics[1]), result.session, prefix);
+    assert.equal(BigInt(hex(log.data.subarray(0, 32))), BigInt(checkpoint.sequence), prefix);
+    if (checkpoint.end !== undefined) {
+      assert.equal(log.data.length, 288, prefix);
+      assert.equal(BigInt(hex(log.data.subarray(224, 256))), BigInt(checkpoint.end), prefix);
+    }
+  }
   const cost = json(prefix + '.cost.json');
   const bid = json(prefix + '.submitted.json');
   const state = json(prefix + '.signing-state.json');
@@ -102,15 +110,20 @@ const count = Number(result.progressCalls);
 for (let seq = 1; seq <= count; seq++) {
   const prefix = 'fee/recovered/offline-run-' + seq;
   const call = await measuredCall(prefix, seq === 1 ? 'Start' : 'Resume', deployment.recovery,
-    seq === count ? complete : progress);
+    seq === count ? complete : progress, { sequence: seq });
   const shape = json(prefix + '.shape.json');
   assert.equal(shape.calldataBytes, call.calldataBytes);
   runCalls.push({ ...call, shape });
 }
 const advances = [];
-for (const step of result.advanceCalls) {
+let verifiedThrough = 0;
+for (const [index, step] of result.advanceCalls.entries()) {
+  assert.equal(step.label, 'offline-advance-' + verifiedThrough);
+  verifiedThrough += step.verifiedGaps;
+  assert.equal(String(verifiedThrough), step.verifiedThrough);
   const prefix = 'fee/recovered/' + step.label;
-  const call = await measuredCall(prefix, 'AdvanceGaps', deployment.recovery, gap);
+  const call = await measuredCall(prefix, 'AdvanceGaps', deployment.recovery, gap,
+    { sequence: count + index + 1, end: verifiedThrough });
   const shape = json(prefix + '.shape.json');
   assert.equal(shape.gaps, step.verifiedGaps);
   assert.equal(shape.calldataBytes, call.calldataBytes);
@@ -143,6 +156,7 @@ for (let i = 0; i < seals; i++) {
 }
 assert.equal(hex(head), archive.head);
 assert.equal(hex(head), result.head);
+assert.equal(verifiedThrough, seals);
 assert.equal(result.finalBacklog, 0);
 const crossed64SegmentCheckpoint = result.advanceCalls.some((call) => call.verifiedThrough === '64');
 const queuedProofsAtStart = result.queuedProofsAtStart;
@@ -151,10 +165,22 @@ const queued = result.advanceCalls.filter((call) => Number(call.verifiedThrough)
 const lastQueued = queued.at(-1);
 assert(queued.length > 1 && Number(lastQueued.verifiedThrough) >= 64);
 assert(BigInt(queued[0].beforeBacklog) >= BigInt(queuedProofsAtStart));
+let priorAfterSegment;
+let maxSealsBetweenUsableProofSamples = 0;
 for (const [index, call] of result.advanceCalls.entries()) {
   assert(Number.isSafeInteger(call.inputsAvailableAtMs) && Number.isSafeInteger(call.usableProofAtMs));
   assert.equal(call.proofMs, call.usableProofAtMs - call.inputsAvailableAtMs);
   assert(call.proofMs >= 0 && (index === 0 || call.inputsAvailableAtMs >= result.advanceCalls[index - 1].usableProofAtMs));
+  const end = Number(call.verifiedThrough);
+  const beforeSegment = Number(call.beforeBacklog) + end - call.verifiedGaps;
+  const afterSegment = Number(call.afterBacklog) + end;
+  assert(afterSegment >= beforeSegment);
+  assert.equal(Number(call.arrivedDuringCall), afterSegment - beforeSegment);
+  if (priorAfterSegment !== undefined) {
+    assert(beforeSegment >= priorAfterSegment);
+    maxSealsBetweenUsableProofSamples = Math.max(maxSealsBetweenUsableProofSamples, afterSegment - priorAfterSegment);
+  }
+  priorAfterSegment = afterSegment;
 }
 const queuedElapsedMs = lastQueued.usableProofAtMs - queued[0].inputsAvailableAtMs;
 assert(queuedElapsedMs > 0);
@@ -287,6 +313,7 @@ writeFileSync(output, JSON.stringify({
     peakSeals30s, peakSealsPerSecond, duringProgress, finalEndpointToInclusionSeconds, mostSealsInSampledFinalWindow, final,
     observedCatchUp, crossed64SegmentCheckpoint, allAdvancesShrankBacklog, backlogAtProgressStart,
     advanceTiming: 'Observed input seal availability through the verified usable Advance proof',
+    maxSealsBetweenUsableProofSamples,
     queuedSeries: { queuedProofsAtStart, calls: queued.length, verifiedGaps: Number(lastQueued.verifiedThrough),
       elapsedMs: queuedElapsedMs, gapsPerSecond: Number(lastQueued.verifiedThrough) * 1000 / queuedElapsedMs },
     run: runCalls.map((call) => window(call.prefix.split('/').at(-1))),
