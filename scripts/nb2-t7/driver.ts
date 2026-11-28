@@ -26,6 +26,7 @@ import { firstAvailableReceipt, receiptArchive } from './receipt.js';
 const [laneOut, rpc, aggregator, chain, artifacts, createTool, keys] = process.argv.slice(2);
 const erc20Mode = process.env.NB2_ERC20_MODE;
 const erc20 = erc20Mode === 'plain' || erc20Mode === 'fee';
+const releaseCalibration = erc20Mode === 'fee' && process.env.NB2_ERC20_CALIBRATE === '1';
 const out = erc20 ? join(laneOut, erc20Mode) : laneOut;
 const resumeStage = process.env.NB2_RESUME_STAGE;
 const offline = process.env.NB2_QUALIFY_OFFLINE === '1';
@@ -105,12 +106,15 @@ async function send(name: string, target: string, calldata: Uint8Array, value = 
   const started = Date.now();
   const { baseFee, priority } = await reader.fees();
   const nonce = await reader.nonce(payer.address);
+  const signingState = releaseCalibration && /^(offline-|ordinary-paid$|payout-failure$|retry-paid$)/.test(name)
+    ? await payerSigningState(payer.address, baseFee, nonce) : undefined;
   const tx = await signTx(payer, { chainId: BigInt(chain), nonce, maxPriorityFeePerGas: priority,
     maxFeePerGas: baseFee * 2n + priority, gas, to: bytes(target), data: calldata, value });
   assert(tx.raw.length <= 524_288, 'signed transaction cap');
   json(name + '.submitted.json', { hash: hex(tx.hash), nonce, gasLimit: gas, payer: hex(payer.address),
     maxFeePerGas: baseFee * 2n + priority, maxPriorityFeePerGas: priority, importGate,
     estimatedGas: estimate && 'gas' in estimate ? estimate.gas : undefined });
+  if (signingState) json(name + '.signing-state.json', { ...signingState, submittedAtMs: Date.now() });
   assert.equal(hex(await reader.sendRaw(tx.raw)), hex(tx.hash));
   for (let i = 0; i < 120; ++i) {
     const receipt = await reader.receipt(tx.hash) as Receipt | null;
@@ -118,6 +122,27 @@ async function send(name: string, target: string, calldata: Uint8Array, value = 
     await delay(500);
   }
   throw new Error(`no receipt for ${name} ${hex(tx.hash)}`);
+}
+
+async function payerSigningState(payer: Uint8Array, quotedBaseFee: bigint, pendingNonce: bigint) {
+  const block = await reader.rpc.call<{ hash: string; number: string; baseFeePerGas: string }>(
+    'eth_getBlockByNumber', ['finalized', false]);
+  const number = BigInt(block.number);
+  const [finalizedBalance, finalizedNonce, pendingBalance] = await Promise.all([
+    reader.balance(payer, number), reader.nonce(payer, number), reader.balance(payer, 'pending'),
+  ]);
+  return { finalizedBlock: block.hash, finalizedBlockNumber: number, finalizedBaseFee: BigInt(block.baseFeePerGas),
+    finalizedBalance, finalizedNonce, pendingBalance, pendingNonce, quotedBaseFee };
+}
+
+async function startCalibrationWindow() {
+  if (releaseCalibration) return { startMs: Date.now(), startSegment: (await reader.vaultState(c.vault)).segment };
+}
+
+async function finishCalibrationWindow(name: string, start: Awaited<ReturnType<typeof startCalibrationWindow>>) {
+  if (!start) return;
+  const endSegment = (await reader.vaultState(c.vault)).segment;
+  json(name + '.window.json', { ...start, endMs: Date.now(), endSegment });
 }
 
 const pinsFile = JSON.parse(text('pins.json')) as { registryRuntimeKeccak: string; artifactKeccak: Record<string, string[]> };
@@ -631,10 +656,10 @@ async function completeRecovery(b: Burn, name = 'run', restore?: Checkpoint, sav
       minReceiptBytes, execution: 14_000_000n,
       max: { entry: 'run' as const, operations, pages: 32, calldataBytes: 393_216, receiptBytes, gaps: 0, openingBytes: 393_216 },
     });
-    // Trial bounds for this workload. Start ends after one operation so
-    // we can restore its certified checkpoint through the alternate archive.
+    // Trial bounds for the disposable workload. Calibration tries the full Start.
     const calibration = { pins, runtimeHash: recoveryHash, vaultRuntimeHash: vaultHash,
-      ranges: [range(1, 0, 0), ...Array.from({ length: 16 }, (_, i) => range(i + 1, 1, 65_536))] };
+      ranges: [...Array.from({ length: releaseCalibration ? 16 : 1 }, (_, i) => range(i + 1, 0, 0)),
+        ...Array.from({ length: 16 }, (_, i) => range(i + 1, 1, 65_536))] };
     const calls = session.planRuns(calibration, limits);
     if (!restore) json('admission-run-plan.json', { scope: 'trial bounds for disposable test value', calls });
     if (erc20Mode === 'fee') assert(calls.slice(1).some((call) => call.shape.operations === ERC20_RESUME_OPERATIONS));
@@ -644,6 +669,7 @@ async function completeRecovery(b: Burn, name = 'run', restore?: Checkpoint, sav
   let prior: { seq: bigint; receipt: Uint8Array } | undefined;
   let from = 0;
   if (restore) {
+    const restoreWindow = await startCalibrationWindow();
     // Fetch the actual prior Progress from the configured reader list, even
     // though the first relayer also kept a local proof.
     const cert = await certifyReceipt('restored-predecessor', restore.receipt, bytes(recovery),
@@ -653,9 +679,11 @@ async function completeRecovery(b: Burn, name = 'run', restore?: Checkpoint, sav
     trust = cert.trust;
     json('restored.json', { consumedOperations: from, seq: restore.seq,
       restoreTx: restore.receipt.transactionHash, segment: (await reader.vaultState(c.vault)).segment });
+    await finishCalibrationWindow('restore', restoreWindow);
   }
   while (from < session.operationCount) {
     const seq = (prior?.seq ?? 0n) + 1n;
+    const runWindow = await startCalibrationWindow();
     const planned = plan?.calls[Number(seq - 1n)];
     let count = planned?.shape.operations ?? Math.min(maxOperations, session.operationCount - from);
     if (plan && !planned) throw new Error('missing cut in admitted schedule');
@@ -679,6 +707,7 @@ async function completeRecovery(b: Burn, name = 'run', restore?: Checkpoint, sav
     const mined = await send(label, recovery, packet.calldata, 0n, '0x1', signer, planned?.gas ?? 24_000_000n, packet.requiredSignerEpoch);
     const cert = await certifyReceipt(label, mined, bytes(recovery), packet.event);
     await session.verifyEvent(cert.trust, cert.encoded, packet.event);
+    await finishCalibrationWindow(label, runWindow);
     if (packet.state) writeFileSync(join(evidenceDir, label + '.state'), packet.state);
     json(label + '.shape.json', packet.shape);
     prior = { seq, receipt: cert.encoded };
@@ -1349,6 +1378,7 @@ async function runOfflineRelayer(stage: string) {
   }
   const backup = JSON.parse(readFileSync(join(keys, 'offline-burn.private.json'), 'utf8'));
   evidenceDir = join(out, backup.label);
+  const phaseWindow = await startCalibrationWindow();
   const recipient = bytes(backup.recipient);
   const amount = BigInt(backup.amount);
   if (stage === 'checkpoint') {
@@ -1364,20 +1394,21 @@ async function runOfflineRelayer(stage: string) {
   assert.equal(verdict.amount, amount);
   assert.equal(hex(verdict.recipient), hex(recipient));
   const paid = { topics: [TOPIC.Paid, verdict.eta, concat(new Uint8Array(12), recipient)], data: u256(amount) };
-  const saveAt = backup.label === 'archive-only' || erc20 ? 1 : 336;
+  const saveAt = releaseCalibration ? 16 : backup.label === 'archive-only' || erc20 ? 1 : 336;
   if (stage === 'checkpoint') {
     await completeRecovery({ evidence: certified, trust, paid }, 'offline-run', undefined, saveAt, saveAt === 1 ? 1 : packetMax);
+    await finishCalibrationWindow('checkpoint-phase', phaseWindow);
     return;
   }
   const checkpoint: Checkpoint = JSON.parse(readFileSync(join(evidenceDir, 'offline-checkpoint.json'), 'utf8'));
   assert(checkpoint.from >= saveAt, 'checkpoint has too few consumed source operations');
-  async function awaitLoadFile(name: string) {
+  async function awaitLoadFile(name: string, timeoutMs = 600_000) {
     const path = join(load, name);
-    for (let i = 0; i < 1200; ++i) {
-      if (existsSync(path)) return;
+    const deadline = Date.now() + timeoutMs;
+    while (!existsSync(path) && Date.now() < deadline) {
       await delay(500);
     }
-    throw new Error(`archive did not publish ${name}`);
+    assert(existsSync(path), `archive did not publish ${name}`);
   }
   if (peakRestore) {
     assert(archiveSegments >= 6 && archiveSegments < 1026, 'use a finite peak restore window');
@@ -1385,16 +1416,25 @@ async function runOfflineRelayer(stage: string) {
   }
   const initialBacklog = Number((await reader.vaultState(c.vault)).segment);
   const completed = await completeRecovery({ evidence: certified, trust, paid }, 'offline-run', checkpoint);
+  await finishCalibrationWindow('resume-phase', phaseWindow);
   assert.equal(verdict.minSegment, 0n);
   let cursor = { ...completed.prior, next: 0n, head: genesisHead(domain, c.K), trust: completed.trust };
   const ordinaryGaps: Uint8Array[] = [];
   const advanceCalls = [];
   const started = Date.now();
   const stride = peakRestore ? 3 : 1024;
+  const queuedProofsAtStart = releaseCalibration ? 64 : undefined;
+  if (queuedProofsAtStart !== undefined) {
+    assert(archiveSegments >= queuedProofsAtStart, 'calibration needs 64 queued seal proofs');
+    await awaitLoadFile(`seal-${queuedProofsAtStart - 1}.locator.json`, 3_600_000);
+  }
   for (let index = 0; index < archiveSegments;) {
     const reserveBoundary = erc20 && index < 64 ? 64 - index : Infinity;
     const count = Math.min(stride, archiveSegments - index, reserveBoundary);
     if (peakRestore) await awaitLoadFile('seal-' + (index + count - 1) + '.locator.json');
+    // Start when the last input is available, before reading, authenticating or packing it.
+    const before = Date.now();
+    const beforeSegment = (await reader.vaultState(c.vault)).segment;
     const proofs = Array.from({ length: count }, (_, i) => readFileSync(join(load, 'seal-' + (index + i) + '.cbor')));
     const gapTrust = await trustFor(proofs.map(proof => decodeDepositProof(proof).uc));
     const gaps = await completed.session.certifiedGaps(gapTrust, cursor.next, cursor.head, proofs);
@@ -1405,13 +1445,14 @@ async function runOfflineRelayer(stage: string) {
       { seq: cursor.seq, cursor: opened }, gaps, opened ? undefined : cursor.head);
     assert.equal(advance.next, cursor.next + BigInt(count));
     const label = 'offline-advance-' + index;
-    const beforeSegment = (await reader.vaultState(c.vault)).segment;
-    const before = Date.now();
     const gap = await certifyReceipt(label, await send(label, recovery, advance.calldata,
       0n, '0x1', signer, 24_000_000n, advance.requiredSignerEpoch), bytes(recovery), advance.event!);
     await completed.session.verifyEvent(gap.trust, gap.encoded, advance.event!);
+    const usableProofAtMs = Date.now();
     const afterSegment = (await reader.vaultState(c.vault)).segment;
-    advanceCalls.push({ verifiedGaps: count, verifiedThrough: String(advance.next), label, proofMs: Date.now() - before, arrivedDuringCall: afterSegment - beforeSegment,
+    if (releaseCalibration) json(label + '.shape.json', advance.shape);
+    advanceCalls.push({ verifiedGaps: count, verifiedThrough: String(advance.next), label,
+      inputsAvailableAtMs: before, usableProofAtMs, proofMs: usableProofAtMs - before, arrivedDuringCall: afterSegment - beforeSegment,
       beforeBacklog: beforeSegment - cursor.next, afterBacklog: afterSegment - advance.next });
     cursor = { receipt: gap.encoded, seq: cursor.seq + 1n, next: advance.next, head: advance.head!, trust: gap.trust };
     index += count;
@@ -1431,10 +1472,13 @@ async function runOfflineRelayer(stage: string) {
   }
   if (peakRestore) await awaitLoadFile('archive-result.json');
   const beforePayout = erc20 ? await custodySnapshot() : undefined;
+  const finalWindow = await startCalibrationWindow();
   const packet = await completed.session.gaps('redeemRecovered', cursor.trust, cursor.receipt,
     { seq: cursor.seq, cursor: { next: cursor.next, head: cursor.head } }, []);
   await certifyReceipt('offline-paid', await send('offline-paid', vault, packet.calldata, 0n, '0x1', signer, 24_000_000n, packet.requiredSignerEpoch),
     c.vault, paid, 0, 1 + Number(erc20));
+  await finishCalibrationWindow('final-settlement', finalWindow);
+  if (releaseCalibration) json('offline-paid.shape.json', packet.shape);
   const final = await reader.vaultState(c.vault);
   assert.equal(await assetBalance(c.vault), BigInt(backup.initialBalance) + BigInt(backup.value) - amount);
   assert.equal(await assetBalance(recipient), BigInt(backup.recipientBefore) + amount);
@@ -1446,7 +1490,7 @@ async function runOfflineRelayer(stage: string) {
     relayerOS: process.platform,
     consumedOperationsAtRestore: checkpoint.from, session: hex(completed.session.id), progressCalls: completed.prior.seq,
     amount, liability: final.outstanding, head: hex(final.head), segment: final.segment,
-    verifiedGapCount: ordinaryGaps.length, certifiedAdvanceMs: Date.now() - started, advanceCalls,
+    verifiedGapCount: ordinaryGaps.length, certifiedAdvanceMs: Date.now() - started, advanceCalls, queuedProofsAtStart,
     signedOrdinaryBytes, initialBacklog, finalBacklog: Number(final.segment - cursor.next) });
   if (erc20) {
     const after = await custodySnapshot();

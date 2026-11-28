@@ -194,6 +194,57 @@ bash scripts/nb2-t7/replay-erc20-max-resume.sh \
   "$HOME/nb2/1038-qual" "$HOME/evidence/1038-qual/native-width" "$new_evidence_dir"
 ```
 
+### ERC20 release calibration
+
+Set `NB2_ERC20_ADMISSION=1 NB2_ERC20_CALIBRATE=1 NB2_ERC20_FEE_SEGMENTS=72` and
+pin `NB2_ERC20_PLUGIN_REV` to the release being measured. The fee-token lane
+offers up to 16 operations in Start and restores from the matching certified
+checkpoint. Its sealer starts before Start and continues through alternate
+archive restoration, Resume and three-gap catch-up. The driver records the
+actual packet shapes, the observed segment interval around each phase and
+the payer's finalized and pending state at each signing attempt.
+
+The calibration waits for 64 published seal proofs before starting Advance.
+It then measures consecutive usable proofs over this queued prefix. Each
+Advance window starts when its last required seal is observed available,
+before reading proofs, authenticating them and assembling calldata. It ends
+when the relayer verifies the returned proof. Finalized segment snapshots
+bracket each call. The consecutive measurement includes overhead between
+calls and reports the segment-64 checkpoint separately. The audit also
+counts seals between consecutive end snapshots, including any wait for load.
+
+After teardown, authenticate the measured calls and seal chain with the
+built release SDK. Replay the candidate batch and terminal suffixes separately
+against the native execution and contract pins from the #1038 fixtures.
+
+```sh
+node scripts/nb2-t7/audit-erc20-calibration.mjs "$run" "$sdk_lib" "$audit_json"
+bash scripts/nb2-t7/replay-erc20-gap-calibration.sh \
+  "$HOME/nb2/1038-qual" "$HOME/evidence/1038-qual/native-settlement" "$new_evidence_dir" "$sdk_lib"
+bash scripts/nb2-t7/replay-erc20-start-calibration.sh \
+  "$HOME/nb2/1038-qual" "$HOME/evidence/1038-qual/native-width" "$new_start_evidence_dir"
+```
+
+The native Start uses 16 operations and 32 pages, with the archived wide
+deposit, allocation, and certification witnesses. Pass `narrow` as the fourth
+argument to replay the same lineage in one-operation cuts with direct receipt
+shapes and verify each cut against the candidate wire caps. The terminal replay
+covers a full three-gap advance and both payout routes
+at suffixes zero through two, with a concentrated 127-position scan,
+seal and expensive token calls. The recovered cases use full gap witnesses
+and a certified predecessor at the 49,152-byte trie-leaf limit, alongside
+a separately certified one-byte-larger leaf that the verifier refuses. The live audit
+reports observed proof timing, arrivals, funding and nonce usage, and
+recomputes a candidate reserve using the sampled inclusion windows.
+The audit authenticates successful receipt logs and certified header
+timestamps. It matches signed bytes to archive locators and uses the
+recorded transaction gas, signing balances, and timing observations.
+The live driver verifies failed receipts at capture, and the audit checks
+the archived failure status and verification flag.
+The native replay uses synthetic authority and seeded custody. Both sets
+of measurements leave real-value qualification closed pending release-wide
+shape, timing and funding bounds.
+
 ## Focused regressions
 
 Run these from bft-core on the dev server. They do not acquire a slot or start
