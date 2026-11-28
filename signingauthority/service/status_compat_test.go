@@ -16,6 +16,12 @@ import (
 // answerWith serves one fixed status payload on a unix socket, whatever is asked: an authority built before or after the epochs were
 // added to the status, as seen by a client of the other build.
 func answerWith(t *testing.T, payload []byte) Dialer {
+	return statusTestServer(t, func(wireRequest) wireResponse {
+		return wireResponse{Version: protocolVersion, Payload: payload}
+	})
+}
+
+func statusTestServer(t *testing.T, respond func(wireRequest) wireResponse) Dialer {
 	t.Helper()
 	path := filepath.Join(socketDir(t), "fixed.sock")
 	l, err := net.Listen("unix", path)
@@ -34,7 +40,7 @@ func answerWith(t *testing.T, payload []byte) Dialer {
 				if readFrame(conn, &req) != nil {
 					return
 				}
-				_ = writeFrame(conn, wireResponse{Version: protocolVersion, Payload: payload})
+				_ = writeFrame(conn, respond(req))
 			}()
 		}
 	}()
@@ -151,4 +157,31 @@ func TestStatusOverTheWireIsReadOnly(t *testing.T) {
 	require.Equal(t, before, f.authority.Status(), "the status calls changed what the authority holds")
 	require.Equal(t, enrollment, f.authority.Enrollment())
 	require.False(t, f.authority.Status().HasReservation, "a status call must not reserve anything")
+}
+
+func TestPosPolicyStatusOnAnOlderAuthority(t *testing.T) {
+	old, err := types.Cbor.Marshal(oldStatus{Generation: 7})
+	require.NoError(t, err)
+	dial := statusTestServer(t, func(req wireRequest) wireResponse {
+		response := wireResponse{Version: protocolVersion}
+		if op(req.Op) == opStatus {
+			response.Payload = old
+		} else {
+			response.Refusal = errWrongEndpoint.Error()
+		}
+		return response
+	})
+	credential, err := NewCredential()
+	require.NoError(t, err)
+	client, err := NewOperatorClient(ClientConfig{Dial: dial, Credential: credential})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = client.Close() })
+	ctx := t.Context()
+	status, err := client.Status(ctx)
+	require.NoError(t, err)
+	require.EqualValues(t, 7, status.Generation)
+	pin, err := client.PosPolicyStatus(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "unavailable", pin.State)
+	require.Nil(t, pin.Scope)
 }

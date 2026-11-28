@@ -65,6 +65,28 @@ type PosPolicy struct {
 	IDs []uint64
 }
 
+// PosPolicyStatus is the authority's current P85 pin and its scope, if any.
+type PosPolicyStatus struct {
+	State string     `cbor:"state"`
+	Scope *PosPolicy `cbor:"scope,omitempty"`
+}
+
+// PosPolicyStatus reports the pin without starting verification or exposing mutable authority state.
+func (a *Authority) PosPolicyStatus() PosPolicyStatus {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	switch {
+	case a.pos != nil:
+		scope := a.pos.clone()
+		return PosPolicyStatus{State: "verified", Scope: &scope}
+	case a.posWant != nil:
+		scope := a.posWant.clone()
+		return PosPolicyStatus{State: "pending", Scope: &scope}
+	default:
+		return PosPolicyStatus{State: "none"}
+	}
+}
+
 // PosQuery is what the deployment is read for: this authority's EVM node and key, and the ids a pin lists.
 type PosQuery struct {
 	NodeID string

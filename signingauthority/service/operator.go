@@ -325,6 +325,23 @@ func (o *OperatorClient) Status(ctx context.Context) (signingauthority.Status, e
 	}, nil
 }
 
+// PosPolicyStatus reports the pin separately from Status, whose wire layout is also used
+// by the shard node. An older authority can still answer Status.
+func (o *OperatorClient) PosPolicyStatus(ctx context.Context) (signingauthority.PosPolicyStatus, error) {
+	var status signingauthority.PosPolicyStatus
+	answer, err := o.ex.call(ctx, opPosPolicyStatus, nil)
+	if errors.Is(err, ErrWrongEndpoint) {
+		return signingauthority.PosPolicyStatus{State: "unavailable"}, nil
+	}
+	if err != nil {
+		return status, err
+	}
+	if err := types.Cbor.Unmarshal(answer, &status); err != nil {
+		return status, fmt.Errorf("decoding the P85 pin status: %w", err)
+	}
+	return status, nil
+}
+
 // Enrollment reports the immutable scope this authority signs for, and the public half of the key it
 // generated. This is how a deployment learns the key to check responses against: from the authority,
 // through the operator, at provisioning time.

@@ -660,7 +660,7 @@ class JoinerUrethFlags(unittest.TestCase):
 class LeavingValidator(unittest.TestCase):
     """#1316: once the identity left, the node container sends no election transactions and stops advancing its retired authority."""
 
-    def run_participate(self, *, status, publish_out, rounds=3):
+    def run_participate(self, *, status, publish_out, rounds=3, member=False, advance_retired=None):
         halted = SimpleNamespace(n=0)
 
         def wait(_):
@@ -681,7 +681,10 @@ class LeavingValidator(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d, patch.object(validator, 'HOME', Path(d)), \
                 patch.object(validator, 'RELEASE', Path(d)), patch.object(validator, 'command', command), \
                 patch.object(validator, 'rpc', rpc), patch.object(validator, 'authority_status', return_value=status), \
-                patch.object(validator, 'advance') as advance, patch('builtins.print') as printed:
+                patch.object(validator, 'advance', return_value=advance_retired) as advance, \
+                patch.object(validator, 'local_status', return_value=SimpleNamespace(stdout=json.dumps({
+                    'rootEpoch': 5, 'identity': 'found', 'member': member,
+                }))), patch('builtins.print') as printed:
             (Path(d)/'deployment.json').write_text(json.dumps({'election': '0xe1'}))
             (Path(d)/'manifest.json').write_text(json.dumps({'genesis_hash': '0xgen'}))
             (Path(d)/'join.json').write_text(json.dumps({'phase': 'activated'}))
@@ -697,6 +700,23 @@ class LeavingValidator(unittest.TestCase):
         self.assertEqual(len(calls), 3, 'pos-publish still runs each round (the gate is the chain state, read at the certified block)')
         self.assertEqual(said.count(gate), 1, 'an unchanged gate is reported once')
         self.assertEqual(sum('retired this authority' in s for s in said), 1, said)
+
+    def test_an_intended_member_retirement_is_reported_as_an_error_once(self):
+        retired = {'retired': True, 'lineageEpoch': 5, 'rootEpoch': 4, 'sessionIssued': False}
+        _, advance, said = self.run_participate(status=retired, publish_out='', member=True)
+        advance.assert_not_called()
+        self.assertEqual(sum(s.startswith('ERROR:') and 'unexpectedly retired' in s for s in said), 1, said)
+
+    def test_retirement_is_checked_on_the_poll_that_advances(self):
+        active = {'retired': False, 'lineageEpoch': 4, 'rootEpoch': 4, 'sessionIssued': True}
+        _, advance, said = self.run_participate(status=active, publish_out='', rounds=1, member=True, advance_retired=5)
+        advance.assert_called_once()
+        self.assertTrue(any(s.startswith('ERROR:') and 'identity remains in the committee' in s for s in said), said)
+
+    def test_an_unconfirmed_departure_is_reported_loudly(self):
+        retired = {'retired': True, 'lineageEpoch': 5, 'rootEpoch': 4, 'sessionIssued': False}
+        _, _, said = self.run_participate(status=retired, publish_out='', member=None)
+        self.assertEqual(sum(s.startswith('ERROR:') and 'could not confirm' in s for s in said), 1, said)
 
     def test_a_new_epoch_is_verified_once_more(self):
         calls, advance, _ = self.run_participate(status={'retired': True, 'lineageEpoch': 4, 'rootEpoch': 4, 'sessionIssued': False},

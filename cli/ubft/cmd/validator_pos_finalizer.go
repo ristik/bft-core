@@ -9,6 +9,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"slices"
@@ -29,13 +30,15 @@ const (
 	defaultFinalizerStep = 180 * time.Second
 	// finalizerMaxRank bounds the delay: the members from this rank on share the last turn (4 steps, 12 minutes by default).
 	finalizerMaxRank = 4
-	// finalizerLogWindow is the block range the PoPAccepted logs are read in (the public gateway's eth_getLogs limit). A result whose proofs
-	// were not all accepted in it has been ready for longer than every turn: every member may finalize.
+	// finalizerLogWindow is the public gateway's eth_getLogs limit.
 	finalizerLogWindow = 10_000
+	// Reservations are usually recent. Look for the opening event in progressively larger, disjoint ranges.
+	finalizerReservationWindow = 256
 )
 
 // popAcceptedTopic is ElectionPolicy's PoPAccepted(bytes32 indexed resultID, uint64 indexed id, bytes32 signatureHash).
 var popAcceptedTopic = ethcrypto.Keccak256Hash([]byte("PoPAccepted(bytes32,uint64,bytes32)"))
+var electionOpenedTopic = ethcrypto.Keccak256Hash([]byte("ElectionOpened(bytes32,uint64,bytes32,bytes32,bytes32)"))
 
 // finalizerRank is a sender's turn for a result: its position in the frozen roster by ascending identity id; a sender that is no frozen
 // member comes after all of them. Every member computes the same order from the same roster.
@@ -56,12 +59,11 @@ func finalizerDelay(rank int, step time.Duration) time.Duration {
 	return time.Duration(min(rank, finalizerMaxRank)) * step
 }
 
-// finalizerReadiness is when the result became ready, in chain time: the timestamp of the block that accepted its last possession proof
-// (Known false: not found in the log window, so it has been ready for longer than any turn), and the head's timestamp.
+// finalizerReadiness measures from the block that accepted the last proof, or from a later
+// block whose state proves all proofs were already present. Now is the finalized head's time.
 type finalizerReadiness struct {
-	Known   bool
-	ReadyAt uint64 // unix seconds
-	Now     uint64 // unix seconds
+	ReadyAt uint64
+	Now     uint64
 }
 
 // finalizerTurn is one member's decision.
@@ -72,12 +74,10 @@ type finalizerTurn struct {
 	From  uint64 // unix seconds from which this rank finalizes (Known readiness only)
 }
 
-// planFinalizerTurn decides whether the member of this rank finalizes now. Rank 0 always does; a later rank once its delay has passed in chain
-// time, or at once when the readiness is unknown (older than the log window). A zero step lets every member finalize at once (the pre-#1323
-// behavior).
+// planFinalizerTurn lets rank zero and zero-step runs act at once. Later ranks wait in chain time.
 func planFinalizerTurn(rank int, step time.Duration, ready finalizerReadiness) finalizerTurn {
 	t := finalizerTurn{Rank: rank, Delay: finalizerDelay(rank, step)}
-	if t.Delay <= 0 || !ready.Known {
+	if t.Delay <= 0 {
 		t.Due = true
 		return t
 	}
@@ -110,9 +110,9 @@ func awaitFinalizerTurn(ctx context.Context, w io.Writer, o *finalizerOrder, rid
 	}
 	ready, err := o.Clock.Readiness(ctx, rid, len(members))
 	if err != nil {
-		// liveness first: without the order this member acts as before #1323 (the race costs gas, never correctness)
-		fmt.Fprintf(w, "finalizer order unavailable (%v): finalizing now\n", err)
-		return true, nil
+		// The designated finalizer can act without logs. A later rank retries with the next poll.
+		fmt.Fprintf(w, "finalizer order unavailable (%v): identity %d waits for a consistent read\n", err, o.ID)
+		return false, nil
 	}
 	t := planFinalizerTurn(rank, o.Step, ready)
 	if !t.Due {
@@ -120,52 +120,141 @@ func awaitFinalizerTurn(ctx context.Context, w io.Writer, o *finalizerOrder, rid
 			rid, o.ID, rank, time.Unix(int64(t.From), 0).UTC().Format(time.RFC3339))
 		return false, nil
 	}
-	if ready.Known {
-		fmt.Fprintf(w, "result %x: no lower finalizer rank finished within %s; identity %d (rank %d) finalizes\n", rid, t.Delay, o.ID, rank)
-	}
+	fmt.Fprintf(w, "result %x: no lower finalizer rank finished within %s; identity %d (rank %d) finalizes\n", rid, t.Delay, o.ID, rank)
 	return true, nil
 }
 
-// Readiness reads the PoPAccepted logs of the result in the last finalizerLogWindow blocks: the block of the last one is the ready block.
-func (r posPublishReader) Readiness(ctx context.Context, rid [32]byte, members int) (finalizerReadiness, error) {
-	var out finalizerReadiness
-	rpc := r.ch.vr.RPC
-	var head hexutil.Uint64
-	if err := rpc.CallContext(ctx, &head, "eth_blockNumber"); err != nil {
-		return out, err
+type finalizerBlock struct {
+	Hash      common.Hash     `json:"hash"`
+	Number    *hexutil.Uint64 `json:"number"`
+	Timestamp *hexutil.Uint64 `json:"timestamp"`
+}
+
+func (r posPublishReader) finalizerHeader(ctx context.Context, tag string) (finalizerBlock, error) {
+	var b finalizerBlock
+	if err := r.ch.vr.RPC.CallContext(ctx, &b, "eth_getBlockByNumber", tag, false); err != nil {
+		return b, err
 	}
-	stamp := func(n uint64) (uint64, error) {
-		var b struct {
-			Timestamp hexutil.Uint64 `json:"timestamp"`
+	if b.Hash == (common.Hash{}) || b.Number == nil || b.Timestamp == nil || (tag != "finalized" && b.Number.String() != tag) {
+		return b, fmt.Errorf("missing or mismatched finalizer header at %s", tag)
+	}
+	return b, nil
+}
+
+func (r posPublishReader) finalizerLogs(ctx context.Context, rid [32]byte, topic common.Hash, from, to uint64) ([]popLog, error) {
+	var logs []popLog
+	q := map[string]any{"address": r.election, "fromBlock": hexutil.EncodeUint64(from), "toBlock": hexutil.EncodeUint64(to),
+		"topics": []any{topic, common.Hash(rid)}}
+	if err := r.ch.vr.RPC.CallContext(ctx, &logs, "eth_getLogs", q); err != nil {
+		return nil, err
+	}
+	if logs == nil {
+		return nil, errors.New("missing finalizer log response")
+	}
+	for _, log := range logs {
+		if log.Removed || log.Address != r.election || len(log.Topics) < 2 ||
+			log.Topics[0] != topic || log.Topics[1] != common.Hash(rid) ||
+			log.BlockHash == (common.Hash{}) || uint64(log.BlockNumber) < from || uint64(log.BlockNumber) > to {
+			return nil, errors.New("finalizer log does not match the requested range and topics")
 		}
-		if err := rpc.CallContext(ctx, &b, "eth_getBlockByNumber", hexutil.EncodeUint64(n), false); err != nil {
+	}
+	return logs, nil
+}
+
+func (r posPublishReader) reservationStart(ctx context.Context, rid [32]byte, floor, head uint64) (uint64, error) {
+	for end, width := head, uint64(finalizerReservationWindow); ; width *= 2 {
+		start := end - min(end-floor, width-1)
+		logs, err := r.finalizerLogs(ctx, rid, electionOpenedTopic, start, end)
+		if err != nil {
 			return 0, err
 		}
-		return uint64(b.Timestamp), nil
+		if len(logs) == 1 {
+			b, err := r.finalizerHeader(ctx, logs[0].BlockNumber.String())
+			if err != nil {
+				return 0, err
+			}
+			if b.Hash != logs[0].BlockHash {
+				return 0, errors.New("reservation log is from a different block")
+			}
+			return uint64(logs[0].BlockNumber), nil
+		}
+		if len(logs) > 1 {
+			return 0, errors.New("multiple reservation logs for the finalizer result")
+		}
+		if start == floor {
+			return floor, nil
+		}
+		end = start - 1
 	}
-	now, err := stamp(uint64(head))
+}
+
+// Readiness anchors the publication and chain time to the finalized head. The gateway
+// keeps its numeric-range log filter. Validate the last proof's block hash and check the
+// publication with requireCanonical at both the head and the readiness block.
+func (r posPublishReader) Readiness(ctx context.Context, rid [32]byte, members int) (finalizerReadiness, error) {
+	var out finalizerReadiness
+	head, err := r.finalizerHeader(ctx, "finalized")
 	if err != nil {
 		return out, err
 	}
-	out.Now = now
-	from := uint64(0)
-	if uint64(head)+1 > finalizerLogWindow {
-		from = uint64(head) + 1 - finalizerLogWindow
+	requireReady := func(b finalizerBlock) error {
+		c := *r.ch.vr
+		c.BlockHash, c.Canonical = b.Hash.Hex(), true
+		pub, err := c.Publication(ctx, r.election, rid)
+		if err != nil {
+			return err
+		}
+		if pub.Lost || int(pub.PopCount) != members {
+			return errors.New("the publication is not ready at the referenced block")
+		}
+		return nil
 	}
-	var logs []popLog
-	q := map[string]any{"address": r.election, "fromBlock": hexutil.EncodeUint64(from), "toBlock": hexutil.EncodeUint64(uint64(head)),
-		"topics": []any{popAcceptedTopic, common.Hash(rid)}}
-	if err := rpc.CallContext(ctx, &logs, "eth_getLogs", q); err != nil {
+	if err := requireReady(head); err != nil {
 		return out, err
 	}
-	ready, seen := readyBlock(logs, r.election, rid)
-	if seen < members {
-		return out, nil // some proofs were accepted before the window: ready for longer than any turn
-	}
-	if out.ReadyAt, err = stamp(ready); err != nil {
+	height := uint64(*head.Number)
+	floor := height - min(height, finalizerLogWindow-1)
+	from, err := r.reservationStart(ctx, rid, floor, height)
+	if err != nil {
 		return out, err
 	}
-	out.Known = true
+	logs, err := r.finalizerLogs(ctx, rid, popAcceptedTopic, from, height)
+	if err != nil {
+		return out, err
+	}
+	last, seen := readyBlock(logs, r.election, rid)
+	var ready finalizerBlock
+	switch {
+	case seen > members:
+		return out, errors.New("too many members in the finalizer proof history")
+	case seen > 0 && last.BlockNumber == *head.Number:
+		ready = head
+	case seen > 0:
+		// Earlier proofs may fall outside the range. The canonical state at the
+		// last observed proof must contain every proof, including any missing logs.
+		ready, err = r.finalizerHeader(ctx, last.BlockNumber.String())
+	case from == floor && floor > 0:
+		// All proofs may predate the capped range. The state just before the
+		// range can establish an upper bound on the readiness time.
+		ready, err = r.finalizerHeader(ctx, hexutil.EncodeUint64(floor-1))
+	default:
+		return out, errors.New("incomplete finalizer proof history")
+	}
+	if err != nil {
+		return out, err
+	}
+	if seen > 0 && ready.Hash != last.BlockHash {
+		return out, errors.New("the readiness log is from a different block")
+	}
+	if ready.Hash != head.Hash {
+		if err := requireReady(ready); err != nil {
+			return out, err
+		}
+	}
+	out.ReadyAt, out.Now = uint64(*ready.Timestamp), uint64(*head.Timestamp)
+	if out.ReadyAt > out.Now {
+		return finalizerReadiness{}, errors.New("readiness time is after the finalized head")
+	}
 	return out, nil
 }
 
@@ -174,18 +263,21 @@ type popLog struct {
 	Address     common.Address `json:"address"`
 	Topics      []common.Hash  `json:"topics"`
 	BlockNumber hexutil.Uint64 `json:"blockNumber"`
+	BlockHash   common.Hash    `json:"blockHash"`
 	Removed     bool           `json:"removed"`
 }
 
-// readyBlock is the block of the last PoPAccepted log of the result, and how many distinct members' logs there are.
-func readyBlock(logs []popLog, election common.Address, rid [32]byte) (block uint64, members int) {
+// readyBlock is the log of the last proof and the number of distinct members with logs.
+func readyBlock(logs []popLog, election common.Address, rid [32]byte) (last popLog, members int) {
 	ids := map[common.Hash]bool{}
 	for _, l := range logs {
 		if l.Removed || l.Address != election || len(l.Topics) != 3 || l.Topics[0] != popAcceptedTopic || l.Topics[1] != common.Hash(rid) {
 			continue
 		}
 		ids[l.Topics[2]] = true
-		block = max(block, uint64(l.BlockNumber))
+		if l.BlockNumber >= last.BlockNumber {
+			last = l
+		}
 	}
-	return block, len(ids)
+	return last, len(ids)
 }
