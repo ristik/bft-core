@@ -34,7 +34,12 @@ class LaneTests(unittest.TestCase):
             shutil.copy(SCRIPTS / name, self.root / 'scripts/nb2-t7')
         for name in ('build/ubft', 'build/utb-evidence', 'agg', 'bin/utb', 'bin/cast'):
             self.executable(name, '#!/bin/sh\nexit 0\n')
-        self.executable('bin/git', '#!/bin/sh\ncase "$*" in *rev-parse*) echo pinned;; esac\n')
+        self.executable('bin/git', '''#!/bin/sh
+case "$*" in
+  *rev-parse*^2) test "${SINGLE_PARENT:-0}" = 0 ;;
+  *rev-parse*) echo pinned ;;
+esac
+''')
         self.executable('bin/go', "#!/bin/sh\nprintf 'vcs.revision=pinned\\nvcs.modified=false\\n'\n")
         self.executable('bin/ureth', '#!/bin/sh\necho "Commit SHA: pinned"\n')
         (self.root / 'scripts/nb2-t7/pins.json').write_text(json.dumps(
@@ -80,6 +85,13 @@ class LaneTests(unittest.TestCase):
 mkdir -p "$3/packages/native-bridge-plugin/lib"
 touch "$3/packages/native-bridge-plugin/lib/index.js"
 ''')
+
+    def test_refuses_single_parent_bft_checkout_before_creating_evidence(self):
+        run = subprocess.run(['bash', 'scripts/nb2-t7/run.sh'], cwd=self.root,
+                             env={**self.env, 'SINGLE_PARENT': '1'}, capture_output=True, text=True)
+        self.assertEqual(run.returncode, 2, run.stderr)
+        self.assertIn('requires a BFT merge commit', run.stderr)
+        self.assertFalse((self.root / 'output').exists())
 
     def test_repeated_signals_keep_lane_cleanup_order_and_token(self):
         self.stub_launcher_services()

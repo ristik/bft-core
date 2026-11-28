@@ -4,7 +4,7 @@
   "components": {
     "ureth": {
       "repository": "https://github.com/ristik/ureth.git",
-      "commit": "c91535bf306738655d06db0389e44ab0df57014e",
+      "commit": "fadfe3a14c3df3a4a27ff9ba65f9c918538d39db",
       "package": "unicity-reth",
       "cargoArgs": [
         "build",
@@ -14,7 +14,7 @@
         "unicity-reth"
       ],
       "features": "default (jemalloc)",
-      "note": "ureth unicity/main at the merge of ureth#113 (c91535bf, bft-core#1319; it includes #114 5727b53f, the spec activation): record kind 9 PoPMissed in records.rs, the SealRegistry runtime 0x93dae8b0 of contracts 85950b44 and its hook fixtures. Previous: ureth unicity/main at the merge of ureth#112 (dc6763ae, bft-core#1286; tree = caaf5df6): the contracts' #1286 hook fixtures (hook-ack/elect/recovery, vr-hook-pos) as testdata; the binary and crates/unicity/b1 are unchanged. Previous: ureth unicity/main at the merge of ureth#111 (00c059e8, bft-core#1297): the SealRegistry runtime 0x8b3105bf of contracts #99 (the post-term evidence views) and the hook fixtures of contracts 6f73846; 0x0100 unchanged. Previous: bft-core#1294 pairs the checkout with the imported-tip B1 verifier. Previous: ureth#107 (VT-06c) supplies parent-state VR fees and the genesis fee identity fields. Previous pin: ureth unicity/main at the merge of ureth#103 (b8a50547: VT-14 VR batch pins on #102, the VT-02 hook, and #101, VT-15: record kinds 6 to 8 and the SealRegistry pin 0xebbadc64, the runtime this bft-core genesis carries), which includes ureth#97: the protocol 6/7 bridge precompile 0x0105 removed, so engineapi/profile.go no longer requires it (bft-core#1139; a consensus change, a fresh network generation). Before: ureth vt15/lane-pin (7fdc5a32): the lane pin 10552af2 plus the VT-15 commit of ristik/ureth#101, kept off unicity/main while engineapi still required 0x0105. Before: ureth unicity/main at the merge of ureth#94 (10552af2: the snapshots of the resealed corpus) on ureth#93 (870c1d01, the native B1 precompile on the upstream seal rule, 7,200 gas per supplied seal signature, protocol 7, bft-core#920)",
+      "note": "ureth unicity/main at the merge of ureth#117 (fadfe3a14, pending RPC simulation). The #116 merge (e876ffdf) provides consistent pending RPC snapshots. The #115 merge (80b43faf) pairs bound execution and recovery surfaces. This also includes ureth#113 (c91535bf, bft-core#1319; it includes #114 5727b53f, the spec activation): record kind 9 PoPMissed in records.rs, the SealRegistry runtime 0x93dae8b0 of contracts 85950b44 and its hook fixtures. Previous: ureth unicity/main at the merge of ureth#112 (dc6763ae, bft-core#1286; tree = caaf5df6): the contracts' #1286 hook fixtures (hook-ack/elect/recovery, vr-hook-pos) as testdata; the binary and crates/unicity/b1 are unchanged. Previous: ureth unicity/main at the merge of ureth#111 (00c059e8, bft-core#1297): the SealRegistry runtime 0x8b3105bf of contracts #99 (the post-term evidence views) and the hook fixtures of contracts 6f73846; 0x0100 unchanged. Previous: bft-core#1294 pairs the checkout with the imported-tip B1 verifier. Previous: ureth#107 (VT-06c) supplies parent-state VR fees and the genesis fee identity fields. Previous pin: ureth unicity/main at the merge of ureth#103 (b8a50547: VT-14 VR batch pins on #102, the VT-02 hook, and #101, VT-15: record kinds 6 to 8 and the SealRegistry pin 0xebbadc64, the runtime this bft-core genesis carries), which includes ureth#97: the protocol 6/7 bridge precompile 0x0105 removed, so engineapi/profile.go no longer requires it (bft-core#1139; a consensus change, a fresh network generation). Before: ureth vt15/lane-pin (7fdc5a32): the lane pin 10552af2 plus the VT-15 commit of ristik/ureth#101, kept off unicity/main while engineapi still required 0x0105. Before: ureth unicity/main at the merge of ureth#94 (10552af2: the snapshots of the resealed corpus) on ureth#93 (870c1d01, the native B1 precompile on the upstream seal rule, 7,200 gas per supplied seal signature, protocol 7, bft-core#920)",
       "nativePrecompiles": {
         "unicity-b1-cert-batch-v2-tip": "0x0000000000000000000000000000000000000100",
         "unicity-b1-membership": "0x0000000000000000000000000000000000000102",
@@ -55,13 +55,13 @@
     },
     "aggregator-go": {
       "repository": "https://github.com/ristik/aggregator-go.git",
-      "commit": "4c54c8f440e7e33bc53a795556d1391102dc75fb",
+      "commit": "c3ec8b8748dbbf196cc43d1b735e8f6d0470a04f",
       "branch": "integration/enshrined-evm"
     },
     "contracts": {
       "repository": "https://github.com/ristik/unicity-pos-contracts.git",
-      "commit": "9b02951640877d6b4054df2ab6fce307629d6e61",
-      "note": "contracts main at the merge of contracts#105 (9b029516, bft-core#1319; its sources are 85950b44: record kind 9 PoPMissed in the SealRegistry, VR and custody; ElectionPolicy.parkMissed parks a certified incumbent)",
+      "commit": "b1047a32cabc575760eff34d60c31ac7ea7e9b84",
+      "note": "contracts main at the merge of contracts#110 (b1047a3, reciprocal merge pins), including #107 (ERC20 NB2), #109 (reciprocal xrepo pin), #93 (activation-bound tests), #108 (publication fixture repair) and #105 (9b029516, bft-core#1319; its sources are 85950b44: record kind 9 PoPMissed in the SealRegistry, VR and custody; ElectionPolicy.parkMissed parks a certified incumbent)",
       "branch": "main"
     },
     "state-transition-sdk-js": {
@@ -105,9 +105,9 @@
     "evmT2Note": "the EVM shard's T2 in the CI lane (milliseconds; the Mac default stays 5000). After the recovery only 3 of the 4 enrolled validators run, so a round needs all three signatures and its latency is the slowest of three: measured first-UC-to-third-signature up to 14.3 s on a standard runner (bft-core#728, run 39554461091), while T2 = 5 s turned every late round into a permanent livelock. 15 s passed the combined lane with all steps; the margin over the measured tail is small, see #728."
   },
   "t6": {
-    "comment": "T6 pins its own inputs in scripts/t6-rehearsal.sh (its defaults); they differ from the lane's on purpose and are not unified silently. check-pins.sh t6 refuses a script whose defaults differ from this record.",
+    "comment": "T6 uses the package BFT merge or the explicit workflow merge. check-pins.sh t6 verifies the script's rebuild and Foundry defaults against this record.",
     "contracts": {
-      "commit": "e7eb3216549b772a9e1df2b1214976d7dd9e6e62"
+      "commit": "79d8d1e5bb8913774b72d908178099717d9f76c1"
     },
     "foundry": {
       "version": "1.8.3",

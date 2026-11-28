@@ -13,10 +13,10 @@ source scripts/lib/portable.sh
 log() { printf '%s run-t6: %s\n' "$(date -u +%FT%TZ)" "$*" | tee -a "$out/run-lane.log"; }
 die() { log "HARNESS FAILURE: $*"; rc=1; finalize; exit 1; }
 pins=scripts/ci/lane-pins.json
-# T6 builds the commit under test (T6_BFT_COMMIT below), never the pinned product: it runs only with the checkout's dependency set (bft-core#1139)
+# T6 uses the checkout's dependency set (bft-core#1139).
 [ "${LANE_PRODUCT:-checkout}" = checkout ] || { echo "run-t6: T6 does not run the pinned product (LANE_PRODUCT=$LANE_PRODUCT)" >&2; exit 2; }
 inject=${CI_INJECT_FAILURE:-none}; deadline=${T6_DEADLINE_MIN:-105}
-head=$(git rev-parse HEAD)
+checkout_sha=${T6_CI_CHECKOUT_SHA:-}
 export AGRE_ROOT=$work/agre DEVNET_LOCK_DIR=$work/agre/.devnet-lock
 # the devnet's secrets, saved for the value scan of the published pack (see finalize); outside the evidence, never uploaded
 export T6_SECRETS_DIR=$work/t6-secrets; mkdir -p "$T6_SECRETS_DIR"
@@ -51,7 +51,7 @@ finalize() {
 }
 
 host_evidence before "$out/host-before.log.gz"
-log "commit under test $head; inject=$inject; deadline ${deadline} min; artifacts $art"
+log "checkout ${checkout_sha:-local}; inject=$inject; deadline ${deadline} min; artifacts $art"
 
 # ---- 1. the attested ureth (the same verification as run-lane.sh) -------------------------------------------------------------------------------------------
 ur=$art/ureth-linux; [ -f "$ur/unicity-reth" ] || die "no unicity-reth in $ur"
@@ -67,8 +67,14 @@ scripts/ci/prune-runner.sh >/dev/null 2>&1 || true
 [ "$inject" != after-builds ] || die "injected harness failure (inject_failure=after-builds): the ureth is verified, T6 is not started"
 
 # ---- 2. T6 ------------------------------------------------------------------------------------------------------------------------------------------------
-# T6 clones the commit under test into its isolated checkout: from this checkout (no network, and a PR merge commit needs no branch ref)
-export T6_BFT_REMOTE=$repo T6_BFT_REF=HEAD T6_BFT_COMMIT=$head
+# GitHub supplies an immutable merge SHA for PR runs. Campaign branches can be
+# single-parent checkouts, so those runs use the package's reviewed BFT merge.
+if [[ "$checkout_sha" =~ ^[0-9a-f]{40}$ ]] && git -C "$repo" rev-parse --verify "$checkout_sha^2" >/dev/null 2>&1; then
+  export T6_BFT_REMOTE=$repo T6_BFT_COMMIT=$checkout_sha
+  log "T6 will rebuild workflow merge $T6_BFT_COMMIT"
+else
+  log "T6 will rebuild the package BFT merge $(jq -er .bft deploy/testnet/pins.json)"
+fi
 export T6_URETH_ATTESTED=$prov/unicity-reth T6_URETH_ATTESTED_SHA256=$want T6_URETH_ATTESTED_PROVENANCE=$prov T6_URETH_COMMIT=$ureth_commit
 export T6_EVIDENCE_DIR=$AGRE_ROOT/briefs/devnet-runs/t6-rehearsal-$(date -u +%Y%m%dT%H%M%SZ)
 [ "$inject" != in-lane ] || export T6_INJECT_FAIL_AFTER_BUILD=1
