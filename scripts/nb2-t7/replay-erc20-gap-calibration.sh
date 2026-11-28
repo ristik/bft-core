@@ -26,11 +26,43 @@ go_prefix, go = oracle.read_text().split('func TestFlatConcentratedSettlementQua
 assert go.count('[]int{64, 1024}') == 1
 go = go.replace('[]int{64, 1024}', '[]int{0, 1, 2, 3}', 1)
 go = go.replace('a+1026, true)', 'a+5, true)', 1)
+start = go.index('receipt := flatCertifiedEvent(')
+end = go.index('history := buildFlatHistory', start)
+go = go[:start] + '''opts := ReceiptOpts{
+        Type: 2, TxIndex: 127, Rotated: true, FillerLogs: 1,
+    }
+    makeProof := func(filler int) *DepositProof {
+        opts.MutReceipt = func(r *RawReceipt) { r.Logs[0].Data = bytes.Repeat([]byte{0xa5}, filler) }
+        proof, err := w.ReceiptProof(expectedLog(complete, v.deployment.Recovery), opts)
+        require.NoError(t, err)
+        return proof
+    }
+    leafSize := func(proof *DepositProof) int { return len(proof.Nodes[len(proof.Nodes)-1]) }
+    const sampleFiller = 48000
+    filler := MaxReceiptLeafNodeLen - (leafSize(makeProof(sampleFiller)) - sampleFiller)
+    atLimit := makeProof(filler)
+    oversized := makeProof(filler + 1)
+    require.Equal(t, MaxReceiptLeafNodeLen, leafSize(atLimit))
+    require.Equal(t, MaxReceiptLeafNodeLen+1, leafSize(oversized))
+    receipt := atLimit.Bytes()
+    tooLarge := oversized.Bytes()
+    require.LessOrEqual(t, len(tooLarge), FlatMaxReceipt)
+    t.Logf("certified predecessor leaf boundary: %d/%d bytes; proof widths: %d/%d",
+        leafSize(atLimit), leafSize(oversized), len(receipt), len(tooLarge))
+    ''' + go[end:]
 go = go.replace('StartHead: &history.heads[a], Proofs: history.proofs(a, count)}', '''Proofs: history.proofs(a, count)}
         if count != 0 {
             packet.StartHead = &history.heads[a]
         }''', 1)
 go = go.replace('        advance, err := packet.Calldata(FlatAdvanceGaps, v.cfg.K)', '''
+        oversize := packet
+        oversize.Receipt = tooLarge
+        refused, err := oversize.Calldata(FlatRedeemRecovered, v.cfg.K)
+        require.NoError(t, err)
+        _, err = DecodeDepositProof(tooLarge)
+        require.ErrorIs(t, err, ErrInputTooLarge)
+        caseDir := filepath.Join(os.Getenv("NB2_FLAT_VECTOR_OUT"), "cold", fmt.Sprintf("qualification-settle-seal-concentrated-%d", count))
+        require.NoError(t, os.WriteFile(filepath.Join(caseDir, "oversized-calldata.bin"), refused, 0644))
         if count == 0 {
             continue
         }
@@ -44,6 +76,13 @@ rust = rust.replace('for count in [64, 1024]', 'for count in [0, 1, 2, 3]')
 begin = rust.index('        let advance = raw(case.join("advance-calldata.bin"));')
 end = rust.index('        let data = raw(case.join("calldata.bin"));', begin)
 rust = rust[:begin] + '        if count > 0 {\n' + rust[begin:end] + '        }\n' + rust[end:]
+old = '        let data = raw(case.join("calldata.bin"));'
+assert rust.count(old) == 1
+rust = rust.replace(old, '''        let oversized = raw(case.join("oversized-calldata.bin"));
+        let (refused, _) = call(&state, pins, vault, &oversized, GAS);
+        assert_eq!(refused.output().unwrap().as_ref(), &keccak256("BadPredecessor()")[..4]);
+        println!("{name} rejects the certified 49,153-byte leaf");
+''' + old)
 rust = rust.replace('        let history = Bytes::from(raw(case.join("ordinary-history.bin")));', '''
         let history = if count == 0 { Bytes::new() } else { Bytes::from(raw(case.join("ordinary-history.bin"))) };''')
 rust = rust.replace('        let ordinary_receipt = measure(', '''
