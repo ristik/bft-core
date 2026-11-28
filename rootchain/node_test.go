@@ -1259,8 +1259,9 @@ func Test_handleConsensus(t *testing.T) {
 		node, err := New(&nwPeer, partNet, cm, testobservability.Default(t))
 		require.NoError(t, err)
 
+		handled := make(chan error, 1)
 		go func() {
-			require.ErrorIs(t, node.handleConsensus(t.Context()), context.Canceled)
+			handled <- node.handleConsensus(t.Context())
 		}()
 
 		// normally node gets subscribed by sending Certification Request, here we
@@ -1281,6 +1282,15 @@ func Test_handleConsensus(t *testing.T) {
 
 		// trigger the consensus handler (ie the Consensus Manager sends Cert Response)
 		cm.certificationResult <- &cr
+		close(cm.certificationResult)
+
+		// The send runs asynchronously. Wait for the handler itself before checking the reset.
+		select {
+		case err := <-handled:
+			require.EqualError(t, err, "consensus channel closed")
+		case <-time.After(time.Second):
+			t.Fatal("consensus handler did not finish")
+		}
 
 		select {
 		case <-rspSent:
