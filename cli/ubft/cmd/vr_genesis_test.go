@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -330,15 +331,22 @@ func TestTheVRGenerationRefusesAnyMismatch(t *testing.T) {
 		"ureth denominator split": func(v *vrVerifyInput) { v.urethFlags += " --unicity.base-fee-change-denominator 9" },
 		"ureth elasticity":        func(v *vrVerifyInput) { v.urethFlags += " --unicity.elasticity=3" },
 		"no ureth flags":          func(v *vrVerifyInput) { v.urethFlags = "" },
-		// #1321: the builder's gas limit is the profile's maxGas (184732739), never another one
-		"builder gas limit":          func(v *vrVerifyInput) { v.urethFlags += " --builder.gaslimit=184732738" },
-		"builder gas limit split":    func(v *vrVerifyInput) { v.urethFlags += " --builder.gaslimit 30000000" },
-		"builder gas limit repeated": func(v *vrVerifyInput) { v.urethFlags += " --builder.gaslimit=184732739 --builder.gaslimit=184732739" },
-		"persistence threshold text": func(v *vrVerifyInput) { v.urethFlags += " --engine.persistence-threshold=sixty-four" },
-		"no fee collector":           func(v *vrVerifyInput) { v.feeCollector = "" },
-		"fee collector":              func(v *vrVerifyInput) { v.feeCollector = "0x00000000000000000000000000000000000000fd" },
-		"fresh needs more":           func(v *vrVerifyInput) { v.fresh.Records += 6 },
-		"fresh other code":           func(v *vrVerifyInput) { v.fresh.RegistryCodeHash = [32]byte{1} },
+		"builder gas limit missing": func(v *vrVerifyInput) {
+			v.urethFlags = replaceFlag(v.urethFlags, "--builder.gaslimit=", "")
+		},
+		"builder gas limit wrong": func(v *vrVerifyInput) {
+			v.urethFlags = replaceFlag(v.urethFlags, "--builder.gaslimit=", "--builder.gaslimit=30000000")
+		},
+		"builder gas limit repeated": func(v *vrVerifyInput) {
+			v.urethFlags += " --builder.gaslimit=" + strconv.FormatUint(v.profile.MaxGas, 10)
+		},
+		"persistence threshold text": func(v *vrVerifyInput) {
+			v.urethFlags = replaceFlag(v.urethFlags, "--engine.persistence-threshold=", "--engine.persistence-threshold=sixty-four")
+		},
+		"no fee collector": func(v *vrVerifyInput) { v.feeCollector = "" },
+		"fee collector":    func(v *vrVerifyInput) { v.feeCollector = "0x00000000000000000000000000000000000000fd" },
+		"fresh needs more": func(v *vrVerifyInput) { v.fresh.Records += 6 },
+		"fresh other code": func(v *vrVerifyInput) { v.fresh.RegistryCodeHash = [32]byte{1} },
 		"duplicate slot spelling": func(v *vrVerifyInput) {
 			editGenesis(t, v, func(g map[string]any) {
 				st := allocOf(g, vr)["storage"].(map[string]any)
@@ -360,14 +368,12 @@ func TestTheVRGenerationRefusesAnyMismatch(t *testing.T) {
 	}
 }
 
-// #1321: the shipped vector carries the builder's gas limit and the persistence threshold of the genesis ureths; verify accepts them, in
-// either spelling, when the gas limit is the profile's maxGas.
-func TestTheVRVectorMayCarryTheBuilderGasLimit(t *testing.T) {
-	for _, extra := range []string{" --builder.gaslimit=184732739 --engine.persistence-threshold=64", " --builder.gaslimit 184732739 --engine.persistence-threshold 64"} {
+func TestTheVRVectorAcceptsTheBuilderGasLimitInEitherSpelling(t *testing.T) {
+	for _, separator := range []string{"=", " "} {
 		v := vrFixtureInput(t)
-		v.urethFlags += extra
+		v.urethFlags = replaceFlag(v.urethFlags, "--builder.gaslimit=", "--builder.gaslimit"+separator+strconv.FormatUint(v.profile.MaxGas, 10))
 		_, err := vrVerify(v)
-		require.NoError(t, err, extra)
+		require.NoError(t, err)
 	}
 }
 
