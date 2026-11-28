@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -27,8 +27,9 @@ const deployment = json('fee/deployment.json');
 assert.equal(hex(domain), deployment.domain);
 assert.equal(hex(cfg.vault), deployment.vault);
 assert.equal(hex(cfg.executionGenesis), read('execution.pin').toString().trim());
-const candidates = await Promise.all(['fee/verified-history.cbor', 'fee/load-history.cbor'].map(
-  async (file) => TrustInput.fromBundle(read(file), root)));
+const histories = ['trust.cbor', 'fee/verified-history.cbor', 'fee/load-history.cbor'];
+const candidates = await Promise.all(histories.filter((file) => existsSync(join(run, file)))
+  .map((file) => TrustInput.fromBundle(read(file), root)));
 const trust = candidates.reduce((a, b) => a.history.tip.epoch >= b.history.tip.epoch ? a : b);
 const result = json('fee/recovered/offline-result.json');
 const archive = json('fee/offline-load/archive-result.json');
