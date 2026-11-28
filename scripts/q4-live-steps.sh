@@ -254,11 +254,16 @@ q4_row_heavy_delayed() {     # the heavy root's traffic held: the lights are wei
   q4_root_advance "$light" "$Q4_RECOVER_SECONDS" 3
 }
 
+q4_crash_and_restart_root() { # root, outage check and its arguments
+  local root=$1; shift
+  q4_kill9 "$root" || return
+  "$@" || return
+  q4_restart_root "$root"
+}
+
 q4_row_light_sigkill() {     # SIGKILL a light root: the rest keep the quorum; restart over the retained home
   local light; light=$(q4_lights | head -n 1)
-  q4_kill9 "$light" || return 1
-  q4_root_advance "$Q4_HEAVY_ROOT" "$Q4_RECOVER_SECONDS" 3 || return 1
-  q4_restart_root "$light" || return 1
+  lane_with_root_watch_paused q4_crash_and_restart_root "$light" q4_root_advance "$Q4_HEAVY_ROOT" "$Q4_RECOVER_SECONDS" 3 || return
   q4_root_advance "$light" "$Q4_RECOVER_SECONDS" 3
 }
 
@@ -266,9 +271,7 @@ q4_row_heavy_sigkill() {     # SIGKILL each heavy root in turn: A 3 of 9 left, B
   local heavy observer
   for heavy in $Q4_HEAVY_ROOTS; do
     observer=$(q4_without "$heavy" | head -n 1)
-    q4_kill9 "$heavy" || return 1
-    q4_root_stalled "$observer" "$Q4_STALL_SECONDS" || return 1
-    q4_restart_root "$heavy" || return 1
+    lane_with_root_watch_paused q4_crash_and_restart_root "$heavy" q4_root_stalled "$observer" "$Q4_STALL_SECONDS" || return
     q4_root_advance "$heavy" "$Q4_RECOVER_SECONDS" 3 || return 1
   done
 }
@@ -658,14 +661,18 @@ PY
 # F11 (quorum-wide restart): every root SIGKILLed together, then restarted over its retained home; the roots commit again and the EVM shard certifies
 # again (full-lane recovery: root commits and certified EVM blocks).
 q4_row_quorum_restart() {
+  lane_with_root_watch_paused q4_restart_quorum || return
+  q4_root_advance "$Q4_HEAVY_ROOT" "$Q4_RECOVER_SECONDS" 3 || return 1
+  q4_commits_advance "$Q4_HEAVY_ROOT" "$Q4_RECOVER_SECONDS" 3
+}
+
+q4_restart_quorum() {
   local r
   for r in $Q4_ROOTS; do q4_kill9 "$r" || return 1; done
   sleep 2
   for r in $Q4_ROOTS; do curl -fsS -m 2 "http://127.0.0.1:$(m2_rpc_port "$r")/api/v1/roundInfo" >/dev/null 2>&1 && { echo "root$r still answers after SIGKILL" >&2; return 1; }; done
   echo "all $(echo $Q4_ROOTS | wc -w | tr -d ' ') roots SIGKILLed; restarting over the retained homes"
   for r in $Q4_ROOTS; do q4_restart_root "$r" || return 1; done
-  q4_root_advance "$Q4_HEAVY_ROOT" "$Q4_RECOVER_SECONDS" 3 || return 1
-  q4_commits_advance "$Q4_HEAVY_ROOT" "$Q4_RECOVER_SECONDS" 3
 }
 
 # F14 + L1 (authentication-refusal representatives): the heavy root's traffic is held, so the honest live weight is the lights' 3 (A) or 6 (B), below Q.
@@ -891,6 +898,22 @@ q4_removed_validator_follows() {
   echo "root$Q4_IN ($(h3_root_id "$Q4_IN")) after the install: a member of epoch 3, no longer a follower, signs votes" | tee -a "$Q4_DIR/non-members.txt"
 }
 
+# h3_restart_roots' restart loop without its final wait: the committed head cannot reach epoch 3 while every successor proposal is held.
+q4_restart_into_held_epoch() {
+  local r prev order=$H3_ROOTS
+  # Under turnover, the joiner restarts first and the replaced root restarts last as a follower.
+  [ "$Q4_TURNOVER" != 1 ] || order="$Q4_IN 1 2 3 $Q4_OUT"
+  for r in $order; do
+    prev=$(echo "$H3_ROOTS" | tr ' ' '\n' | grep -vx "$r" | head -1)
+    stop_pidfile "test-nodes/root$r/pid" 'ubft root-node' || return 1
+    for _ in $(seq 1 50); do lsof -nP -iTCP:"$(m2_rpc_port "$r")" -sTCP:LISTEN >/dev/null 2>&1 || break; sleep 0.2; done
+    m2_archive_root_state "$r" 3 || return 1
+    [ "$r" != "${Q4_OUT:-}" ] || [ "$Q4_TURNOVER" != 1 ] || Q4_OUT_MARK=$(wc -l <"test-nodes/root$r/debug.log" | tr -d ' ')
+    [ "$r" != "${Q4_IN:-}" ] || [ "$Q4_TURNOVER" != 1 ] || Q4_IN_MARK=$(wc -l <"test-nodes/root$r/debug.log" | tr -d ' ')
+    m2_start_root "$r" 3 "$(m2_root_addr "$prev")" || { echo "root $r did not restart into epoch 3" >&2; return 1; }
+  done
+}
+
 q4_first_successor_held() {
   local r i hits=0 before t0 successors=$H3_ROOTS
   [ "$Q4_TURNOVER" != 1 ] || successors=$Q4_B_ENTITIES
@@ -910,20 +933,7 @@ q4_first_successor_held() {
     stop_pidfile "test-nodes/evm$Q4_OUT/pid" 'ubft shard-node (run|restore)' INT || return 1
     stop_pidfile "test-nodes/evm$Q4_IN/pid" 'ubft shard-node (run|restore)' INT || return 1
   fi
-  # h3_restart_roots' restart loop without its final wait: the committed head cannot reach epoch 3 while every successor proposal is held
-  local prev order=$H3_ROOTS
-  # under the turnover the new root restarts first (h3_q3_activate_coupled's order), the retained roots follow, and the replaced root comes last: it is
-  # restarted into epoch 3 too and stays up as a removed validator (L5), holding no rule (it is not a member and proposes nothing)
-  [ "$Q4_TURNOVER" != 1 ] || order="$Q4_IN 1 2 3 $Q4_OUT"
-  for r in $order; do
-    prev=$(echo "$H3_ROOTS" | tr ' ' '\n' | grep -vx "$r" | head -1)
-    stop_pidfile "test-nodes/root$r/pid" 'ubft root-node' || return 1
-    for _ in $(seq 1 50); do lsof -nP -iTCP:"$(m2_rpc_port "$r")" -sTCP:LISTEN >/dev/null 2>&1 || break; sleep 0.2; done
-    m2_archive_root_state "$r" 3 || return 1
-    [ "$r" != "${Q4_OUT:-}" ] || [ "$Q4_TURNOVER" != 1 ] || Q4_OUT_MARK=$(wc -l <"test-nodes/root$r/debug.log" | tr -d ' ')
-    [ "$r" != "${Q4_IN:-}" ] || [ "$Q4_TURNOVER" != 1 ] || Q4_IN_MARK=$(wc -l <"test-nodes/root$r/debug.log" | tr -d ' ')
-    m2_start_root "$r" 3 "$(m2_root_addr "$prev")" || { echo "root $r did not restart into epoch 3" >&2; return 1; }
-  done
+  lane_with_root_watch_paused q4_restart_into_held_epoch || return
   # from here the committee is the successor set: the lane's root lists follow it (the replaced root stays up, outside them)
   # (the offline trace check still reads every root that ever ran: the Byzantine rows of epoch 2 armed the replaced root)
   if [ "$Q4_TURNOVER" = 1 ]; then Q4_TRACE_ROOTS="1 2 3 $Q4_OUT $Q4_IN"; H3_ROOTS=$Q4_B_ENTITIES; Q4_ROOTS=$Q4_B_ENTITIES; fi

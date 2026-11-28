@@ -15,7 +15,7 @@ import (
 	"github.com/unicitynetwork/bft-core/b1state"
 )
 
-const Source = "ristik/unicity-pos-contracts@69f0e116e24aa7e19262d04c2890f2109dae3f7b:artifacts/seal-registry.json"
+const Source = "ristik/unicity-pos-contracts@de62921f10be506f3cd7a559ae8541bcb644d0f4:artifacts/seal-registry.json"
 const CodeHashHex = "0x93dae8b0e730c861e66468a0ff109395190b7f5292da4a19a6f9515fd15c1841"
 
 // MaxMeasuredEpochs is the most epochs per update the runtime's G_rest was measured for (contracts B1GenesisBuilder: UnmeasuredB above 2).

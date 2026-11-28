@@ -245,14 +245,20 @@ dump_stalled_roots() {
 H6_ROOT_DUMP_REASON=
 nb2DriverPid=
 rootStallWatchPid=
+stop_root_stall_watch() {
+  if [ -n "$rootStallWatchPid" ]; then
+    kill -TERM "$rootStallWatchPid" 2>/dev/null || true
+    wait "$rootStallWatchPid" 2>/dev/null || true
+    rootStallWatchPid=
+  fi
+}
+
 cleanup() {
+  stop_root_stall_watch
+  lane_clear_root_watch_markers
   if [ "${INGRESS_LOSS_LANE:-0}" = 1 ]; then loss_load_stop; fi
   if [ "${NB2_T7_LANE:-0}" = 1 ]; then trap '' TERM HUP INT; fi
   if declare -F vrb_poa_resume_on_exit >/dev/null; then vrb_poa_resume_on_exit; fi
-  if [ -n "${rootStallWatchPid:-}" ]; then
-    kill -TERM "$rootStallWatchPid" 2>/dev/null || true
-    wait "$rootStallWatchPid" 2>/dev/null || true
-  fi
   if [ -n "$nb2DriverPid" ]; then kill -TERM "$nb2DriverPid" 2>/dev/null || true; wait "$nb2DriverPid" || true; fi
   dump_stalled_roots
   if [ "${F8_MIXED_LANE:-0}" = 1 ]; then f8_stop; fi
@@ -1024,6 +1030,7 @@ preflightFailures=$failures
 if [ "${ANYAGE_LANE:-0}" = 1 ]; then agg_prepare_confs || { echo "aggregator shard configuration failed" >&2; exit 1; }; fi
 # All paired rehearsal lanes use this root launcher, including restarts and joiners.
 if [ "$laneStallDumpSecs" -gt 0 ] 2>/dev/null; then
+  lane_clear_root_watch_markers || exit 1   # clear markers left by a previous run
   export UBFT_LANE_ROOT_DEBUG=1
   python3 scripts/root-stall-watch.py test-nodes "$(lane_port 25866)" "$laneStallDumpSecs" &
   rootStallWatchPid=$!
@@ -1339,6 +1346,7 @@ if [ "$postM2aMode" = t6 ] && [ "${T6_COUPLED_ROTATION:-0}" = 1 ]; then
     else
       fail "T6 coupled rotation s=1 failed"
     fi
+    stop_root_stall_watch
     t6_rotation_teardown
   else
     fail "T6 coupled rotation skipped because an earlier lane check failed"
