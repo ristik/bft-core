@@ -1910,7 +1910,7 @@ func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation
 		switch {
 		case err != nil && errors.Is(context.Cause(waitCtx), errAwaitSuperseded):
 			outcome = "superseded"
-		case errors.Is(context.Cause(waitCtx), context.DeadlineExceeded):
+		case err != nil && errors.Is(context.Cause(waitCtx), context.DeadlineExceeded):
 			outcome = "timeout"
 		case err != nil:
 			outcome = "error"
