@@ -5,6 +5,8 @@ import (
 	"context"
 	"crypto"
 	"errors"
+	"io"
+	"log/slog"
 	"sort"
 	"sync"
 	"testing"
@@ -289,6 +291,35 @@ func (f *fixture) counted() int {
 // status is the buffer's status under the view the collector resolves now.
 func (f *fixture) status() QuorumStatus {
 	return f.node.incomingRequests.IsConsensusReceived(1, types.ShardID{}, f.view())
+}
+
+func TestRequestViewTraceAllocationsWithDebugOff(t *testing.T) {
+	f := newFixture(t, fxOpts{})
+	f.node.log = slog.New(slog.NewTextHandler(io.Discard, nil))
+	view := f.view()
+	tr := view.ExpectedTR()
+	require.NotEmpty(t, tr.StatHash)
+	require.NotEmpty(t, tr.FeeHash)
+	req := f.request(0, view, 9, nil)
+	ctx := t.Context()
+
+	for _, tc := range []struct {
+		name   string
+		action string
+		replay bool
+	}{
+		{name: "initial view", action: "view"},
+		{name: "replayed view", action: "view", replay: true},
+		{name: "refreshed view", action: "view refreshed"},
+		{name: "held request", action: "held"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			allocs := testing.AllocsPerRun(100, func() {
+				f.node.traceRequestView(ctx, req, view, tc.action, tc.replay)
+			})
+			require.Zero(t, allocs)
+		})
+	}
 }
 
 // The same requests reach a quorum or not by the resolved view's weights, in the node, end to end. Under the mirrored (6,1,1,1)

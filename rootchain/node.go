@@ -66,6 +66,7 @@ type (
 
 	Node struct {
 		peer             *network.Peer // p2p network host for partition
+		receiverID       string
 		incomingRequests *CertRequestBuffer
 		subscription     *Subscriptions
 		net              PartitionNet
@@ -121,6 +122,9 @@ func New(
 		early:            newEarlyRequests(),
 		log:              observe.Logger(),
 		tracer:           observe.Tracer("rootchain.node"),
+	}
+	if conf := peer.Configuration(); conf != nil {
+		node.receiverID = conf.ID.String()
 	}
 	if err := node.initMetrics(meter); err != nil {
 		return nil, fmt.Errorf("initializing metrics: %w", err)
@@ -341,6 +345,12 @@ func (v *Node) admitRequest(ctx context.Context, req *certification.BlockCertifi
 	if req == nil {
 		return fmt.Errorf("%w: %w", rctypes.ErrInvalidRequest, certification.ErrBlockCertificationRequestIsNil)
 	}
+	v.traceRequest(ctx, req, "arrival", slog.Bool("replay", origin.replay))
+	defer func() {
+		if rErr != nil {
+			v.traceRequest(ctx, req, "refused", slog.Bool("replay", origin.replay), logger.Error(rErr))
+		}
+	}()
 	// the installed root epoch before anything is resolved or validated: a request is held, replayed and counted only under it
 	snapshot := v.observeEpoch(ctx)
 	if origin.replay && origin.epoch != snapshot {
@@ -369,6 +379,10 @@ func (v *Node) admitRequest(ctx context.Context, req *certification.BlockCertifi
 		return fmt.Errorf("acquiring shard %s - %s info: %w", req.PartitionID, req.ShardID, err)
 	}
 	// we got the shard info thus it's a valid partition/shard
+	if si.LastCR != nil {
+		v.traceRequest(ctx, req, "view", slog.Bool("replay", origin.replay),
+			slog.Uint64("expectedRound", si.LastCR.Technical.Round))
+	}
 	err = si.ValidRequest(req)
 	if err == nil {
 		err = si.FreshInRootEpoch(snapshot) // a request that matches the closed epoch's context is refused (#1036)
@@ -377,6 +391,7 @@ func (v *Node) admitRequest(ctx context.Context, req *certification.BlockCertifi
 		if legacyNearFuture(si, req) {
 			herr := v.holdNearFuture(req, origin, snapshot, nil)
 			if herr == nil {
+				v.traceRequest(ctx, req, "held", slog.Uint64("expectedRound", si.LastCR.Technical.Round))
 				v.log.DebugContext(ctx, fmt.Sprintf("holding the request of round %d until the commit of round %d applies", req.IRRound(), si.LastCR.Technical.Round),
 					logger.Shard(req.PartitionID, req.ShardID))
 				return nil
@@ -413,6 +428,34 @@ func (v *Node) admitRequest(ctx context.Context, req *certification.BlockCertifi
 		return fmt.Errorf("subscribing the sender: %w", err)
 	}
 	return v.countRequest(ctx, req, si, false, snapshot)
+}
+
+func (v *Node) traceRequest(ctx context.Context, req *certification.BlockCertificationRequest, action string, attrs ...slog.Attr) {
+	if !v.log.Enabled(ctx, slog.LevelDebug) {
+		return
+	}
+	fields := []slog.Attr{
+		logger.Shard(req.PartitionID, req.ShardID),
+		slog.String("receiver", v.receiverID), slog.String("sender", req.NodeID),
+		slog.String("action", action), slog.Uint64("requestRound", req.IRRound()),
+	}
+	if ir := req.InputRecord; ir != nil {
+		fields = append(fields, slog.Uint64("requestEpoch", ir.Epoch),
+			slog.String("previousHash", fmt.Sprintf("%x", ir.PreviousHash)), slog.String("blockHash", fmt.Sprintf("%x", ir.BlockHash)))
+	}
+	v.log.LogAttrs(ctx, slog.LevelDebug, "ingress request", append(fields, attrs...)...)
+}
+
+func (v *Node) traceRequestView(ctx context.Context, req *certification.BlockCertificationRequest, view requestAdmission, action string, replay bool) {
+	if !v.log.Enabled(ctx, slog.LevelDebug) {
+		return
+	}
+	expectedRound := view.ExpectedTR().Round
+	v.traceRequest(ctx, req, action, slog.Bool("replay", replay), slog.Uint64("expectedRound", expectedRound))
+	if action == "held" {
+		v.log.DebugContext(ctx, fmt.Sprintf("holding the request of round %d until the commit of round %d applies", req.IRRound(), expectedRound),
+			logger.Shard(req.PartitionID, req.ShardID))
+	}
 }
 
 // freshInRootEpoch applies the activation freshness rule (storage.ShardInfo.FreshInRootEpoch) to a request a view admitted, on the parent
@@ -617,12 +660,14 @@ func (v *Node) collectUnderView(ctx context.Context, req *certification.BlockCer
 		}
 		return nil
 	}
+	v.traceRequestView(ctx, req, view, "view", origin.replay)
 	err := view.ValidRequest(req)
 	if err != nil && resolve != nil {
 		// the parent may have been committed, or an activation installed, during the resolution: a context-dependent refusal (stale
 		// continuity, membership, key) is final only under the view in force now
 		if again, rerr := resolve(); rerr == nil && again != nil && viewChanged(view, again) {
 			view = again
+			v.traceRequestView(ctx, req, view, "view refreshed", origin.replay)
 			err = view.ValidRequest(req)
 		}
 	}
@@ -634,8 +679,7 @@ func (v *Node) collectUnderView(ctx context.Context, req *certification.BlockCer
 		// authentic and exactly one round ahead. It is counted for nothing until it is admitted under the committed context.
 		herr := v.holdNearFuture(req, origin, snapshot, viewAuthority(view))
 		if herr == nil {
-			v.log.DebugContext(ctx, fmt.Sprintf("holding the request of round %d until the commit of round %d applies", req.IRRound(), view.ExpectedTR().Round),
-				logger.Shard(req.PartitionID, req.ShardID))
+			v.traceRequestView(ctx, req, view, "held", origin.replay)
 			return nil
 		}
 		err = errors.Join(err, herr)
@@ -687,6 +731,7 @@ func (v *Node) countRequest(ctx context.Context, req *certification.BlockCertifi
 	if res := v.incomingRequests.IsConsensusReceived(req.PartitionID, req.ShardID, tb); res != QuorumInProgress {
 		if !collectionOnly {
 			if status, requests, again := v.incomingRequests.Redeliver(req, tb, redeliverMinInterval); again {
+				v.traceRequest(ctx, req, "redeliver", slog.String("result", status.String()))
 				// the node repeats, byte for byte, the request whose outcome was decided but is not certified yet: the first hand-over to
 				// the leader may have been lost (#665). Hand it over again; the leader's buffer ignores a duplicate.
 				reason := consensus.Quorum
@@ -699,6 +744,7 @@ func (v *Node) countRequest(ctx context.Context, req *certification.BlockCertifi
 					Partition: req.PartitionID, Shard: req.ShardID, Reason: reason, Requests: requests, RootEpoch: epoch})
 			}
 		}
+		v.traceRequest(ctx, req, "already decided", slog.String("result", res.String()))
 		v.log.DebugContext(ctx, fmt.Sprintf("dropping stale block certification request (%s) for partition %s", res, req.PartitionID), logger.Shard(req.PartitionID, req.ShardID))
 		return
 	}
@@ -707,6 +753,7 @@ func (v *Node) countRequest(ctx context.Context, req *certification.BlockCertifi
 	if err != nil {
 		return fmt.Errorf("storing request: %w", err)
 	}
+	v.traceRequest(ctx, req, "counted", slog.String("result", res.String()))
 	if v.afterCount != nil {
 		v.afterCount() // tests: what may run concurrently between the count and the hand-over
 	}
@@ -776,6 +823,11 @@ func (v *Node) handleConsensus(ctx context.Context) error {
 		case cr, ok := <-v.consensusManager.CertificationResult():
 			if !ok {
 				return fmt.Errorf("consensus channel closed")
+			}
+			if v.log.Enabled(ctx, slog.LevelDebug) {
+				v.log.LogAttrs(ctx, slog.LevelDebug, "ingress context advanced", logger.Shard(cr.Partition, cr.Shard),
+					slog.String("receiver", v.receiverID), slog.Uint64("expectedRound", cr.Technical.Round),
+					slog.Uint64("rootRound", cr.UC.GetRootRoundNumber()), slog.String("leader", cr.Technical.Leader))
 			}
 			v.revalidateSubscriptions(ctx)
 			v.subscription.Send(ctx, cr)

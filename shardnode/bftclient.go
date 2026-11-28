@@ -1668,6 +1668,10 @@ func (c *BFTClient) sendRequest(ctx context.Context, req *certification.BlockCer
 			return err
 		}
 	}
+	if c.log != nil && c.log.Enabled(ctx, slog.LevelDebug) {
+		c.log.DebugContext(ctx, "certification request route", "sender", req.NodeID, "receivers", rootIDs,
+			"requestRound", req.IRRound(), "rootRound", luc.GetRootRoundNumber(), "rootEpoch", origin)
+	}
 	if c.activationGate != nil {
 		err := c.activationGate.enqueue(ctx, origin, func(sendCtx context.Context) error { return c.net.Send(sendCtx, req, rootIDs...) })
 		if errors.Is(err, ErrRootActivationSuperseded) {
