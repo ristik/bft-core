@@ -196,8 +196,13 @@ const boundBaseFee = (base, blocks) => {
   for (let i = 0; i < blocks; i++) base += max([1n, base / 8n]);
   return base;
 };
-const candidateFee = boundBaseFee(
+const sampledInclusionFloor = boundBaseFee(
   max(inclusionSamples.map((call) => BigInt(call.signingState.finalizedBaseFee))), maxInclusionBlocks) + tip;
+// A replacement cannot discount an older signed packet at the same nonce.
+const highestSignedBid = max([
+  ...inclusionSamples.map((call) => BigInt(call.maxFeePerGasWei)), failed.request.maxFeePerGas,
+]);
+const candidateFee = max([sampledInclusionFloor, highestSignedBid]);
 const coversSampledInclusion = inclusionSamples.every((call) => candidateFee >= BigInt(call.includedBaseFeeWei) + BigInt(call.tipWei));
 const backlogAtProgressStart = Number(checkpoint.startSegment);
 const d = backlogAtProgressStart + 64 + duringProgress;
@@ -266,7 +271,8 @@ writeFileSync(output, JSON.stringify({
     restore: window('restore'), checkpoint, resumed: restored, ordinaryBeforeFallbackExercised: false },
   funding: { payer, observedMaximumSignedExposureWei: String(exposure), candidateFeeWei: String(candidateFee),
     everySignatureFundedObservedPath, observedPaidFeesWei: reserve.throughPayout.observedFees,
-    maxInclusionBlocks, coversSampledInclusion, tipWei: String(tip), d, n, ordinaryAttempts, nonceCount, candidateMaxNonce,
+    maxInclusionBlocks, coversSampledInclusion, tipWei: String(tip), sampledInclusionFloorWei: String(sampledInclusionFloor),
+    highestSignedBidWei: String(highestSignedBid), d, n, ordinaryAttempts, nonceCount, candidateMaxNonce,
     observedPathBlocks, fullPathFeeAtFullBlocksWei: String(fullPathFeeAtFullBlocks),
     candidateBudgetWei: String(candidateBudget), signingState: initial,
     recoveryCeilingWei: recoveryCeiling?.toString() ?? null, ordinaryCeilingWei: String(ordinaryCeiling),
