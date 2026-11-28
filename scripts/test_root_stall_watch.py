@@ -66,9 +66,9 @@ class RootStallWatchTest(unittest.TestCase):
         self.log = home / "debug.log"
         self.root = Root(home, 123, self.server.server_port, 0)
 
-    def sample_at(self, now):
+    def sample_at(self, now, *, stopping=False):
         with patch("time.monotonic", return_value=now):
-            self.root.sample(5)
+            self.root.sample(5, stopping=stopping)
 
     def test_records_stall_despite_live_logs_and_rearms_after_progress(self):
         self.sample_at(1)
@@ -182,6 +182,24 @@ class RootStallWatchTest(unittest.TestCase):
             watch(self.root.home.parent, self.root.port, 15, lambda: True)
         self.assertEqual(["123"], self.server.stack_requests)
         self.assertIn("round unavailable, pid 123", self.log.read_text())
+
+    def test_teardown_retries_failed_restart_capture_during_cooldown(self):
+        self.sample_at(1)
+        self.pause_marker.touch()
+        self.server.round_number = None
+        self.sample_at(6)
+        self.pause_marker.replace(self.failed_marker)
+
+        self.server.fail_capture = True
+        self.sample_at(7)
+        self.server.fail_capture = False
+        self.sample_at(8)
+        self.assertEqual(["123"], self.server.stack_requests)
+        self.assertFalse(self.log.exists())
+
+        self.sample_at(9, stopping=True)
+        self.assertEqual(["123", "123"], self.server.stack_requests)
+        self.assertIn("goroutine 1 [running]", self.log.read_text())
 
     def sample_expired_pause_during_capture(self, transition):
         self.sample_at(1)

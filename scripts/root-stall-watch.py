@@ -107,10 +107,11 @@ class Root:
             return
         progressed = self.progressed
         elapsed = now - progressed
-        failed_at_teardown = stopping and pause is Pause.FAILED and not round_available
-        if self.dumped or (elapsed < threshold and not failed_at_teardown):
+        failed_at_teardown = stopping and pause is Pause.FAILED
+        stalled = elapsed >= threshold or (failed_at_teardown and not round_available)
+        if self.dumped or not stalled:
             return
-        if self.last_attempt is not None and now - self.last_attempt < threshold:
+        if not failed_at_teardown and self.last_attempt is not None and now - self.last_attempt < threshold:
             return
         self.last_attempt = now
         try:
