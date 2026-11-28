@@ -212,9 +212,13 @@ against the native execution and contract pins from the #1038 fixtures.
 node scripts/nb2-t7/audit-erc20-calibration.mjs "$run" "$sdk_lib" "$audit_json"
 bash scripts/nb2-t7/replay-erc20-gap-calibration.sh \
   "$HOME/nb2/1038-qual" "$HOME/evidence/1038-qual/native-settlement" "$new_evidence_dir" "$sdk_lib"
+bash scripts/nb2-t7/replay-erc20-start-calibration.sh \
+  "$HOME/nb2/1038-qual" "$HOME/evidence/1038-qual/native-width" "$new_start_evidence_dir"
 ```
 
-The native replay covers a full three-gap advance and both payout routes
+The native Start uses 16 operations and 32 pages, with the archived wide
+deposit, allocation, and certification witnesses. The terminal replay
+covers a full three-gap advance and both payout routes
 at suffixes zero through two, with a concentrated 127-position scan,
 seal and expensive token calls. The recovered cases use the archived
 wide certified predecessor and the full gap witnesses. The live audit
