@@ -38,6 +38,7 @@ func (r clockRound) d() time.Duration { return r.end.Sub(r.start) }
 
 func startRoundClock(m *ConsensusManager) *roundClock {
 	c := &roundClock{stop: make(chan struct{}), done: make(chan struct{})}
+	ready := make(chan struct{})
 	go func() {
 		defer close(c.done)
 		lookup := func(round uint64) (peer.ID, bool) {
@@ -53,6 +54,7 @@ func startRoundClock(m *ConsensusManager) *roundClock {
 			}
 		}
 		note(last)
+		close(ready)
 		for {
 			select {
 			case <-c.stop:
@@ -81,6 +83,7 @@ func startRoundClock(m *ConsensusManager) *roundClock {
 			last, lastAt = round, now
 		}
 	}()
+	<-ready
 	return c
 }
 

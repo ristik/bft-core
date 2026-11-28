@@ -13,6 +13,7 @@ import (
 	"maps"
 	"slices"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -49,8 +50,9 @@ type Options struct {
 	// UTB makes the activation's protocol tuple the envelope-version-3 one (q3format.Q3ConfigUTB).
 	UTB             bool
 	Weights         []uint64 // successor weights in member order; four members or more
+	WeightsByNodeID bool     // assign Weights in canonical NodeID order instead of fixture order
 	CommitSealRound uint64   // the old committee's commit round (>= the ordered round 4)
-	SignedBy        int      // how many of the four old members sign the commit; default 3 (the unit threshold); fewer is a forgery
+	SignedBy        int      // how many old members sign; defaults to three or the same-size genesis's unit threshold
 	// After appends an activation to the given fixture's chain: its weighted committee commits this fixture's successor body
 	// under scheme 2. The
 	// old committee signs with its first SignedBy members in member order (default 2: the heavy member and one light one, weight 7
@@ -103,6 +105,9 @@ type Options struct {
 	// NoJoiner keeps every old member in the successor and adds none: a re-weighting of the same committee (bft-core#1086: the default
 	// in-process switch, which a successor with a joiner does not take).
 	NoJoiner bool
+	// SameCommitteeGenesis starts with a unit-weight committee of len(Weights)
+	// and retains all of its bindings. Use it for large steady committee tests.
+	SameCommitteeGenesis bool
 	// Registry makes a coupled handoff a validator-registry one (VT-06d/e): the committed candidate is the candidate v6 of the same
 	// fields with these RegistryChanges (verdicts as given) and a VR result id, and its digest is what the body binds. It is called with
 	// the fixture's extra shard configurations, so a change can name them. The link then carries no preimage (the history's readiness
@@ -193,9 +198,17 @@ func New(t *testing.T, o Options) *Fixture {
 			o.CommitSealRound = o.After.CommitSealRound + 8
 		}
 	}
+	if o.SameCommitteeGenesis {
+		require.Nil(t, o.After)
+		require.Nil(t, o.Chain)
+		o.NoJoiner = true
+	}
 	if o.SignedBy == 0 {
 		o.SignedBy = 3
-		if o.After != nil {
+		switch {
+		case o.SameCommitteeGenesis:
+			o.SignedBy = 2*len(o.Weights)/3 + 1
+		case o.After != nil:
 			o.SignedBy = 2
 		}
 	}
@@ -212,7 +225,11 @@ func New(t *testing.T, o Options) *Fixture {
 	case o.Chain != nil:
 		f.OldNodes, f.Old = o.Chain.OldNodes, o.Chain.Old
 	default:
-		f.OldNodes = make([]*testutils.TestNode, 4)
+		genesisSize := 4
+		if o.SameCommitteeGenesis {
+			genesisSize = len(o.Weights)
+		}
+		f.OldNodes = make([]*testutils.TestNode, genesisSize)
 		for i := range f.OldNodes {
 			f.OldNodes[i] = testutils.NewTestNode(t)
 		}
@@ -268,6 +285,17 @@ func New(t *testing.T, o Options) *Fixture {
 			require.NotZero(t, o.Weights[i], "every K member is a node of the replaced committee")
 		}
 	}
+	if o.WeightsByNodeID && !o.Recovery {
+		ordered := slices.Clone(f.NewNodes)
+		slices.SortFunc(ordered, func(a, b *testutils.TestNode) int {
+			return strings.Compare(a.PeerConf.ID.String(), b.PeerConf.ID.String())
+		})
+		weights := make([]uint64, len(ordered))
+		for i, node := range f.NewNodes {
+			weights[i] = o.Weights[slices.Index(ordered, node)]
+		}
+		o.Weights = weights
+	}
 	for i, n := range f.NewNodes {
 		verifier, err := n.Signer.Verifier()
 		require.NoError(t, err)
@@ -290,7 +318,7 @@ func New(t *testing.T, o Options) *Fixture {
 	operator, err := evmroot.D4OperatorCandidateDigest(f.Members)
 	require.NoError(t, err)
 	var shardConf *types.PartitionDescriptionRecord
-	genesisEVM, validators := testutils.CreateTestNodes(t, 4)
+	genesisEVM, validators := testutils.CreateTestNodes(t, len(f.Old.RootNodes))
 	// The fixture's primary replaces one of four members while the weights move from unit to the heavy member; the distance budget is
 	// widened so that these tests exercise installation and replay, not the budget (continuity has its own tests).
 	t2 := 2500 * time.Millisecond
@@ -522,7 +550,11 @@ func (f *Fixture) assignment(t *testing.T, o Options, oldID []byte) [32]byte {
 		}
 		if o.After == nil {
 			// a root member that stays keeps its EVM validator, so the primary differs from K by one replaced member only
-			if j := slices.IndexFunc(f.OldNodes[:min(max(3, len(f.Members)-1), len(f.OldNodes))], func(n *testutils.TestNode) bool { return n.PeerConf.ID.String() == m.NodeID }); j >= 0 {
+			retained := min(max(3, len(f.Members)-1), len(f.OldNodes))
+			if o.SameCommitteeGenesis {
+				retained = len(f.OldNodes)
+			}
+			if j := slices.IndexFunc(f.OldNodes[:retained], func(n *testutils.TestNode) bool { return n.PeerConf.ID.String() == m.NodeID }); j >= 0 {
 				v := f.ShardConf.Validators[j]
 				kept := &types.NodeInfo{NodeID: v.NodeID, SigKey: bytes.Clone(v.SigKey), Stake: weight}
 				keys[i] = evmKey{f.GenesisEVM[j].Signer, kept}
