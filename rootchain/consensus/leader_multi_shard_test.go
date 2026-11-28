@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -146,11 +147,19 @@ func signedShardRequest(t *testing.T, r *q3Replica, s liveShard, view *storage.R
 }
 
 func shardHash(m *ConsensusManager, s liveShard) []byte {
+	hash, _ := watchedShardCertificate(m, s)
+	return hash
+}
+
+func watchedShardCertificate(m *ConsensusManager, s liveShard) (hash []byte, round uint64) {
 	si := m.blockStore().ShardInfo(s.partition, s.shard)
 	if si == nil || si.LastCR == nil {
-		return nil
+		return nil, 0
 	}
-	return si.LastCR.UC.InputRecord.Hash
+	if seal := si.LastCR.UC.UnicitySeal; seal != nil {
+		round = seal.RootChainRoundNumber
+	}
+	return si.LastCR.UC.InputRecord.Hash, round
 }
 
 // establish certifies every shard's first state, so that an RSMT shard's next request is a proved transition from a certified root and not the first-state exception.
@@ -238,8 +247,18 @@ func TestGate9RescueTraceWithRealShards(t *testing.T) {
 	if os.Getenv("BFT_GATE9_TRACE") == "" {
 		t.Skip("set BFT_GATE9_TRACE=1: a measurement, not a regression test")
 	}
+	gate9RescueTrace(t, 4)
+}
+
+func gate9RescueTrace(t *testing.T, members int) {
+	t.Helper()
 	T := time.Duration(traceEnvInt(t, "BFT_TRACE_T", 10)) * time.Second
-	topology := cmp.Or(os.Getenv("BFT_TRACE_TOPOLOGY"), "single")
+	larger := members > 4
+	defaultTopology, defaultBlockRate := "single", phaseLockBlockRate
+	if larger {
+		defaultTopology, defaultBlockRate = "f8batch", 900*time.Millisecond
+	}
+	topology := cmp.Or(os.Getenv("BFT_TRACE_TOPOLOGY"), defaultTopology)
 	deadAt := traceEnvInt(t, "BFT_TRACE_DEAD", 0)
 	options := traceTopology(t, topology)
 	var transport *liveTransport
@@ -249,8 +268,13 @@ func TestGate9RescueTraceWithRealShards(t *testing.T) {
 		transport = newLiveTransport(t)
 		setup = transport.install
 	}
-	blockRate := time.Duration(traceEnvInt(t, "BFT_TRACE_BLOCK_RATE_MS", int(phaseLockBlockRate/time.Millisecond))) * time.Millisecond
-	c := newEqualLiveRate(t, T, blockRate, options, setup, "H", "a", "b", "c")
+	blockRate := time.Duration(traceEnvInt(t, "BFT_TRACE_BLOCK_RATE_MS", int(defaultBlockRate/time.Millisecond))) * time.Millisecond
+	labels := []string{"H", "a", "b", "c"}
+	if larger {
+		labels = rootTimingNames(members)
+		options.SameCommitteeGenesis = true
+	}
+	c := newEqualLiveRate(t, T, blockRate, options, setup, labels...)
 	submit := func(name string, req *IRChangeRequest) error {
 		return c.nodes[c.idx(name)].r.manager.RequestCertification(context.Background(), *req)
 	}
@@ -262,7 +286,29 @@ func TestGate9RescueTraceWithRealShards(t *testing.T) {
 	lag := 4*uint64(len(c.nodes)) + 4
 	names := c.all()
 	slices.SortFunc(names, func(a, b string) int { return strings.Compare(c.id(a).String(), c.id(b).String()) })
-	d, x := names[deadAt%4], names[(deadAt+1)%4]
+	d, x := names[deadAt%members], names[(deadAt+1)%members]
+	dead, returning := []string{d}, []string{x}
+	exactQuorum := larger && os.Getenv("BFT_973_EXACT_QUORUM") == "1"
+	if larger {
+		b := (members - 1) / 3
+		oldVoters := 3 * b
+		if exactQuorum {
+			// Every old QC must carry this whole set, so a collector
+			// cannot select a different quorum subset with a live triple.
+			oldVoters = int(c.nodes[0].r.f.Body.RootThreshold)
+		}
+		returning = names[oldVoters:]
+		dead = nil
+		// Spread the b stops so the complete old voter table has at
+		// most two consecutive survivors, including across its wrap.
+		for i := 0; i < b; i++ {
+			dead = append(dead, names[i*oldVoters/b])
+		}
+		d = dead[0]
+		requireTimingQuorum(t, c, c.except(returning...))
+		requireTimingQuorum(t, c, c.except(dead...))
+		t.Logf("NodeID order %v, unit weights, exact old quorum %v", names, exactQuorum)
+	}
 	// every forward of a retained request, by the round the watched node is in: the delivery premise of a recovery run is that a request reaches its leader before the run
 	var forwardsMu sync.Mutex
 	forwards := map[string][]uint64{}
@@ -282,7 +328,7 @@ func TestGate9RescueTraceWithRealShards(t *testing.T) {
 		tapForward(msg)
 		return base(from, to, msg)
 	}
-	first := c.except(x)
+	first := c.except(returning...)
 	if transport != nil {
 		transport.tap = tapForward
 		transport.up(c, first...)
@@ -298,7 +344,7 @@ func TestGate9RescueTraceWithRealShards(t *testing.T) {
 		return true
 	}, 15*time.Minute, 50*time.Millisecond, "the cluster commits live in the activated epoch")
 	establish(t, c, first[0], shards, submit)
-	survivors := c.except(x, d)
+	survivors := c.except(append(slices.Clone(returning), dead...)...)
 	watch := survivors[0]
 	m := func(name string) *ConsensusManager { return c.nodes[c.idx(name)].r.manager }
 	known := func(round uint64) bool {
@@ -306,11 +352,8 @@ func TestGate9RescueTraceWithRealShards(t *testing.T) {
 		return err == nil
 	}
 	seal := func(p liveShard) uint64 {
-		si := m(watch).blockStore().ShardInfo(p.partition, p.shard)
-		if si == nil || si.LastCR == nil {
-			return 0
-		}
-		return si.LastCR.UC.UnicitySeal.RootChainRoundNumber
+		_, round := watchedShardCertificate(m(watch), p)
+		return round
 	}
 	require.Eventually(t, func() bool { // what the node watched reads as established is what establish saw, or a shard would later read as certified with no request sent
 		for _, s := range shards {
@@ -320,22 +363,164 @@ func TestGate9RescueTraceWithRealShards(t *testing.T) {
 		}
 		return true
 	}, 2*time.Minute, 5*time.Millisecond, "the watched node holds the established states")
-	c.stop(d)
-	if transport != nil {
-		transport.down(c, d)
-		transport.up(c, x)
+	if larger {
+		reportRecoveryCycle(t, m(watch), c, names)
 	}
-	c.start(x)
-	t0 := time.Now()
+	var t0 time.Time
 	since := func() time.Duration { return time.Since(t0).Round(time.Millisecond) }
-	forwardsMu.Lock()
-	currentRound = func() uint64 { return m(watch).pacemaker.GetCurrentRound() }
-	forwardsMu.Unlock()
 	counters := func(label string) {
 		if traceCounters != nil {
 			t.Logf("counters at %s: %s", label, traceCounters())
 		}
 	}
+	type sample struct {
+		round uint64
+		d     time.Duration
+		known bool
+	}
+	var samples []sample
+	var startRound, lastRound uint64
+	var roundAt time.Time
+	var lastKnown bool
+	var firstKnownAfter time.Time
+	var lastEdge uint64
+	var firstKnownRound uint64
+	var unknown, commit rescueCommitObservation
+	var rescueMiss bool
+	var rescueWindow rescueTimingWindow
+	var end rescueTimingPoint
+	var committedAfterUnknown atomic.Bool
+	readRound := m(watch).pacemaker.GetCurrentRound
+	committed := func() uint64 { return c.committedRound(watch) }
+	if larger {
+		committed = func() uint64 { return m(watch).blockStore().CommittedRound() }
+	}
+	beginObservation := func(round uint64) {
+		startRound = round
+		lastRound, roundAt, lastKnown = startRound, t0, known(startRound)
+		t.Logf("T=%s, block rate %s, topology %s, shards %v, start round %d, committed %d, stopped %v, returned %v", T, blockRate, topology, shards, startRound, committed(), dead, returning)
+	}
+	recordCommit := func(observation rescueCommitObservation) {
+		commit = observation
+		committedAfterUnknown.Store(true)
+		elapsed := commit.at.Sub(unknown.at)
+		t.Logf("first commit after that observed at pacemaker round %d (committed round %d), %s: unknown-to-commit %s over %d rounds", commit.round, commit.head, commit.at.Sub(t0).Round(time.Millisecond), elapsed.Round(time.Millisecond), commit.round-unknown.round)
+		counters("the first commit")
+		if larger && !rescueMiss && elapsed > 75*time.Second {
+			rescueMiss = true
+			t.Logf("75 s rescue target missed: first commit after unknown round %d observed after %s", unknown.round, elapsed)
+		}
+	}
+	observe := func(now time.Time, round uint64) {
+		roundKnown := lastKnown
+		if round != lastRound {
+			roundKnown = known(round)
+		}
+		beforeKnown := !roundKnown && round != lastEdge && !unknown.at.IsZero() && known(round+1)
+		at := now.Sub(t0).Round(time.Millisecond)
+		if round != lastRound {
+			gap := now.Sub(roundAt) / time.Duration(round-lastRound)
+			for r := lastRound; r < round; r++ {
+				samples = append(samples, sample{r, gap, lastKnown})
+			}
+			lastRound, roundAt, lastKnown = round, now, roundKnown
+		}
+		if beforeKnown {
+			lastEdge = round
+			t.Logf("round %d at %s: its leader unknown, the next known", round, at)
+			counters("that round's start")
+		}
+		if !lastKnown && unknown.at.IsZero() {
+			if larger {
+				unknown = rescueWindow.readUnknown(round, committed, readRound)
+				if unknown.at.IsZero() {
+					return
+				}
+			} else {
+				unknown = rescueCommitObservation{rescueTimingPoint{at: now, round: round}, committed()}
+			}
+			t.Logf("first unknown round %d at %s (committed baseline %d), %d rounds after the stop", unknown.round, unknown.at.Sub(t0).Round(time.Millisecond), unknown.head, unknown.round-startRound)
+			counters("the first unknown round")
+		}
+		if lastKnown && !unknown.at.IsZero() && firstKnownAfter.IsZero() {
+			firstKnownAfter, firstKnownRound = now, round
+			t.Logf("first known round after that %d at %s: unknown window total %s over %d rounds", firstKnownRound, at, now.Sub(unknown.at).Round(time.Millisecond), firstKnownRound-unknown.round)
+			counters("the first known round")
+		}
+		if unknown.at.IsZero() || !now.After(unknown.at) || !commit.at.IsZero() {
+			return
+		}
+		var observation rescueCommitObservation
+		if larger {
+			observation = rescueWindow.readCommit(committed, readRound)
+			if observation.at.IsZero() {
+				return
+			}
+		} else {
+			observation = rescueCommitObservation{rescueTimingPoint{at: now, round: round}, committed()}
+		}
+		if observation.head != unknown.head {
+			recordCommit(observation)
+		} else if larger && !rescueMiss && observation.at.Sub(unknown.at) >= 75*time.Second {
+			rescueMiss = true
+			t.Logf("75 s elapsed since the first unknown leader at round %d; no commit by pacemaker round %d", unknown.round, observation.round)
+		}
+	}
+	stopObserving := func() {}
+	if larger {
+		// Sample the round and committed head while shard proofs are being built.
+		// The submission loop only reads the atomic progress flag until the observer joins.
+		start := rescueWindow.sampleRound(readRound)
+		t0 = start.at
+		beginObservation(start.round)
+		clock := startRoundClock(m(watch))
+		stop, done, ready := make(chan struct{}), make(chan struct{}), make(chan struct{})
+		go func() {
+			defer close(done)
+			ticker := time.NewTicker(5 * time.Millisecond)
+			defer ticker.Stop()
+			close(ready)
+			for {
+				select {
+				case <-stop:
+					return
+				case <-ticker.C:
+					sample := rescueWindow.sampleRound(readRound)
+					if sample.at.IsZero() {
+						return
+					}
+					observe(sample.at, sample.round)
+				}
+			}
+		}()
+		<-ready
+		stopObserving = sync.OnceFunc(func() {
+			close(stop)
+			rounds := clock.halt()
+			<-done
+			if !end.at.IsZero() {
+				rounds = slices.DeleteFunc(rounds, func(r clockRound) bool { return r.end.After(end.at) })
+			}
+			reportTimingUnknown(t, rounds)
+		})
+		defer stopObserving()
+	}
+	for _, name := range dead {
+		c.stop(name)
+		if transport != nil {
+			transport.down(c, name)
+		}
+	}
+	if transport != nil {
+		transport.up(c, returning...)
+	}
+	c.start(returning...)
+	if !larger {
+		t0 = time.Now() // keep the original four-root trace's time origin
+	}
+	forwardsMu.Lock()
+	currentRound = m(watch).pacemaker.GetCurrentRound
+	forwardsMu.Unlock()
 	for _, s := range shards {
 		proof := shardRequest(t, c.nodes[c.idx(watch)].r, s, false, false)
 		require.NotNil(t, proof, s)
@@ -354,19 +539,9 @@ func TestGate9RescueTraceWithRealShards(t *testing.T) {
 	for _, s := range shards {
 		established[s.String()] = shardHash(m(watch), s)
 	}
-	startRound, startCommit := c.state(watch).Round, c.committedRound(watch)
-	t.Logf("T=%s, block rate %s, topology %s, %s, dead index %d, start round %d, committed %d, stopped %s", T, blockRate, topology, shards, deadAt, startRound, startCommit, d)
-
-	type sample struct {
-		round uint64
-		d     time.Duration
-		known bool
+	if !larger {
+		beginObservation(readRound())
 	}
-	var samples []sample
-	lastRound, roundAt, lastKnown := startRound, t0, known(startRound)
-	var unknownFrom, firstKnownAfter, commitAt time.Time
-	var lastEdge uint64
-	var unknownRound, firstKnownRound, commitRound, commitAtUnknown uint64
 	sentUnder := map[string]uint64{}
 	sendRounds := map[string][]uint64{}
 	certAt := map[string]time.Duration{}
@@ -384,65 +559,67 @@ func TestGate9RescueTraceWithRealShards(t *testing.T) {
 	}
 	deadline := t0.Add(40 * time.Minute)
 	progressAt := t0
+	var certificateMiss bool
+certify:
 	for len(certAt) < len(shards) {
 		require.True(t, time.Now().Before(deadline), "%d of %d certified in 40 minutes", len(certAt), len(shards))
 		now := time.Now()
-		st := c.state(watch)
-		if st.Round != lastRound {
-			gap := now.Sub(roundAt) / time.Duration(st.Round-lastRound)
-			for r := lastRound; r < st.Round; r++ {
-				samples = append(samples, sample{r, gap, lastKnown})
-			}
-			lastRound, roundAt, lastKnown = st.Round, now, known(st.Round)
-		}
-		if !lastKnown && st.Round != lastEdge && known(st.Round+1) && !unknownFrom.IsZero() {
-			lastEdge = st.Round
-			t.Logf("round %d at %s: its leader unknown, the next known", st.Round, since())
-			counters("that round's start")
-		}
-		if !lastKnown && unknownFrom.IsZero() {
-			unknownFrom, unknownRound, commitAtUnknown = now, st.Round, c.committedRound(watch)
-			t.Logf("first unknown round %d at %s, %d rounds after the stop", unknownRound, since(), unknownRound-startRound)
-			counters("the first unknown round")
-		}
-		if lastKnown && !unknownFrom.IsZero() && firstKnownAfter.IsZero() {
-			firstKnownAfter, firstKnownRound = now, st.Round
-			t.Logf("first known round after that %d at %s: unknown window total %s over %d rounds", firstKnownRound, since(), now.Sub(unknownFrom).Round(time.Millisecond), firstKnownRound-unknownRound)
-			counters("the first known round")
-		}
-		if !unknownFrom.IsZero() && commitAt.IsZero() && c.committedRound(watch) != commitAtUnknown {
-			commitAt, commitRound = now, st.Round
-			t.Logf("first commit after that at round %d, %s: unknown-to-commit %s over %d rounds", commitRound, since(), now.Sub(unknownFrom).Round(time.Millisecond), commitRound-unknownRound)
-			counters("the first commit")
+		round := readRound()
+		if !larger {
+			observe(now, round)
 		}
 		for _, p := range shards {
 			if _, done := certAt[p.String()]; done {
 				continue
 			}
-			if !bytes.Equal(shardHash(m(watch), p), established[p.String()]) {
+			hash, sealRound := watchedShardCertificate(m(watch), p)
+			if !bytes.Equal(hash, established[p.String()]) {
+				if larger && len(certAt)+1 == len(shards) {
+					end = rescueWindow.finish(readRound)
+					certAt[p.String()] = end.at.Sub(t0)
+					stopObserving()
+					// The certificate and its seal came from one read of the durable
+					// root. It can witness progress at the cutoff when a separate
+					// head read did not return in time.
+					if commit.at.IsZero() && !unknown.at.IsZero() && sealRound > unknown.head {
+						t.Logf("last watched-root certificate witnesses commit of round %d at the rescue cutoff", sealRound)
+						recordCommit(rescueCommitObservation{end, sealRound})
+					}
+					break certify
+				}
 				certAt[p.String()] = time.Since(t0)
 				continue
 			}
-			if !unknownFrom.IsZero() && (len(sendRounds[p.String()]) == 0 || seal(p) != sentUnder[p.String()]) {
-				send(p, st.Round)
+			if (larger || !unknown.at.IsZero()) && (len(sendRounds[p.String()]) == 0 || seal(p) != sentUnder[p.String()]) {
+				send(p, round)
 			}
 		}
-		if !commitAt.IsZero() && time.Since(progressAt) > 30*time.Second {
+		if larger && !certificateMiss && now.Sub(t0) >= 360*time.Second && len(certAt) < len(shards) {
+			certificateMiss = true
+			t.Logf("360 s elapsed at round %d; fresh certificates recorded for %d/%d shards at the watched root", round, len(certAt), len(shards))
+		}
+		if committedAfterUnknown.Load() && time.Since(progressAt) > 30*time.Second {
 			progressAt = time.Now()
 			for _, p := range shards {
 				_, done := certAt[p.String()]
-				t.Logf("progress %s at round %d: %s certified %v, seal %d, sent under %d, sends at rounds %v", since(), st.Round, p, done, seal(p), sentUnder[p.String()], sendRounds[p.String()])
+				t.Logf("progress %s at round %d: %s certified %v, seal %d, sent under %d, sends at rounds %v", since(), round, p, done, seal(p), sentUnder[p.String()], sendRounds[p.String()])
 			}
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	end := time.Now()
+	if end.at.IsZero() {
+		end = rescueTimingPoint{round: readRound(), at: time.Now()}
+	}
 	counters("the last certificate")
 	if transport != nil {
 		transport.reportDelivery(t0, "the stop", shards, func(s liveShard) []byte { return shardHash(m(watch), s) })
 	}
-	require.False(t, unknownFrom.IsZero(), "no unknown round")
-	require.False(t, commitAt.IsZero(), "no commit")
+	if unknown.at.IsZero() {
+		require.True(t, larger && !exactQuorum, "no unknown round")
+		t.Log("no unknown-leader window before the fresh certificates")
+	} else {
+		require.False(t, commit.at.IsZero(), "no commit")
+	}
 
 	// Window totals, then what they are made of. Rounds taking more than T/2 ran a timer; other rounds over stallAt are stalls.
 	const stallAt = 200 * time.Millisecond
@@ -469,9 +646,8 @@ func TestGate9RescueTraceWithRealShards(t *testing.T) {
 			}
 		}
 	}
-	slices.Sort(fast)
-	t.Logf("all %d rounds: %d timers %s (%d in unknown rounds), %d known fast; %d unknown fast %s, median %s, p95 %s, p99 %s, max %s", len(samples), timers, timerSum.Round(time.Millisecond), unknownTimers, knownFast,
-		len(fast), unknownSum.Round(time.Millisecond), fast[len(fast)/2].Round(10*time.Microsecond), fast[len(fast)*95/100].Round(10*time.Microsecond), fast[len(fast)*99/100].Round(10*time.Microsecond), fast[len(fast)-1].Round(10*time.Microsecond))
+	t.Logf("all %d rounds: %d timers %s (%d in unknown rounds), %d known fast; unknown fast total %s, %s", len(samples), timers, timerSum.Round(time.Millisecond), unknownTimers, knownFast,
+		unknownSum.Round(time.Millisecond), durations(fast, stallAt))
 	slices.SortFunc(stalls, func(a, b sample) int { return cmp.Compare(b.d, a.d) })
 	var worst []string
 	for _, s := range stalls[:min(len(stalls), 5)] {
@@ -480,22 +656,22 @@ func TestGate9RescueTraceWithRealShards(t *testing.T) {
 	t.Logf("stalls over %s among unknown fast rounds: %d, %s in all, worst round:duration %s", stallAt, len(stalls), stallSum.Round(time.Millisecond), strings.Join(worst, " "))
 	var after []string
 	for _, s := range samples {
-		if s.round+3 >= firstKnownRound && s.round < firstKnownRound+8 || s.round+3 >= commitRound && s.round < commitRound+8 {
+		if s.round+3 >= firstKnownRound && s.round < firstKnownRound+8 || s.round+3 >= commit.round && s.round < commit.round+8 {
 			after = append(after, fmt.Sprintf("%d:%v:%s", s.round, s.known, s.d.Round(time.Millisecond)))
 		}
 	}
-	t.Logf("rounds from the first known (%d) and the first commit (%d), round:known:duration: %s", firstKnownRound, commitRound, strings.Join(after, " "))
+	t.Logf("rounds from the first known (%d) and the first commit observation (%d), round:known:duration: %s", firstKnownRound, commit.round, strings.Join(after, " "))
 	var resend []uint64
 	sends := 0
 	var certs []time.Duration
 	for _, p := range shards {
 		forwardsMu.Lock()
-		sent := slices.DeleteFunc(slices.Clone(forwards[p.String()]), func(r uint64) bool { return r+3 < firstKnownRound || (r > firstKnownRound+8 && r+3 < commitRound) })
+		sent := slices.DeleteFunc(slices.Clone(forwards[p.String()]), func(r uint64) bool { return r+3 < firstKnownRound || (r > firstKnownRound+8 && r+3 < commit.round) })
 		forwardsMu.Unlock()
 		t.Logf("shard %s: sends at rounds %v, certified %s after the stop; forwards around the first known round and the first commit at rounds %v", p, sendRounds[p.String()], certAt[p.String()].Round(time.Millisecond), sent)
 		sends += len(sendRounds[p.String()])
-		if n := len(sendRounds[p.String()]); n > 1 {
-			resend = append(resend, max(sendRounds[p.String()][n-1], commitRound)-commitRound) // the poll can see a new seal before the new commit
+		if n := len(sendRounds[p.String()]); n > 1 && !commit.at.IsZero() {
+			resend = append(resend, max(sendRounds[p.String()][n-1], commit.round)-commit.round) // the poll can see a new seal before the new commit
 		}
 		certs = append(certs, certAt[p.String()])
 	}
@@ -504,8 +680,12 @@ func TestGate9RescueTraceWithRealShards(t *testing.T) {
 	if len(resend) > 0 {
 		t.Logf("R as this harness resubmits, on seeing a new seal, so not a real shard's reaction; rounds from the first commit to a shard's fresh request: %d of %d shards resubmitted, min %d, median %d, max %d", len(resend), len(shards), resend[0], resend[len(resend)/2], resend[len(resend)-1])
 	}
-	t.Logf("certified: first shard %s, median %s, last %s after the stop; from the first commit to the last certificate %s over %d rounds; stop to last certificate %d rounds, %d sends", certs[0].Round(time.Millisecond), certs[len(certs)/2].Round(time.Millisecond),
-		certs[len(certs)-1].Round(time.Millisecond), end.Sub(commitAt).Round(time.Millisecond), c.state(watch).Round-commitRound, c.state(watch).Round-startRound, sends)
+	t.Logf("certified: first shard %s, median %s, last %s after the stop; stop to last certificate %d rounds, %d sends",
+		certs[0].Round(time.Millisecond), certs[len(certs)/2].Round(time.Millisecond), certs[len(certs)-1].Round(time.Millisecond), end.round-startRound, sends)
+	if !commit.at.IsZero() {
+		t.Logf("from the first commit after the unknown window to the last certificate: %s over %d rounds",
+			end.at.Sub(commit.at).Round(time.Millisecond), end.round-commit.round)
+	}
 
 	// rho: BFT_TRACE_STEADY more rounds with the dead member still down and the returned one up, every shard sending a fresh request as soon as
 	// it reads its new certificate. The test generates and signs those requests, so how soon a shard sends again is this harness's, not a real shard's R.
@@ -530,6 +710,57 @@ func TestGate9RescueTraceWithRealShards(t *testing.T) {
 		t.Logf("steady phase: %d rounds from %d with %s down, certificates per shard %v", steady, from, d, certs)
 		reportRho(t, rounds, selector.RecoveryRunStart, c.id(d))
 	}
+}
+
+type rescueTimingPoint struct {
+	at    time.Time
+	round uint64 // pacemaker round observed with the timestamp
+}
+
+type rescueCommitObservation struct {
+	rescueTimingPoint
+	head uint64 // durable committed round, or the terminal certificate's seal round
+}
+
+// rescueTimingWindow serializes observation boundaries with the certificate
+// cutoff. Committed-head reads can block and run outside this lock.
+type rescueTimingWindow struct {
+	mu     sync.Mutex
+	closed bool
+}
+
+func (w *rescueTimingWindow) finish(readRound func() uint64) rescueTimingPoint {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.closed = true
+	return rescueTimingPoint{round: readRound(), at: time.Now()}
+}
+
+func (w *rescueTimingWindow) sampleRound(readRound func() uint64) rescueTimingPoint {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return rescueTimingPoint{}
+	}
+	return rescueTimingPoint{round: readRound(), at: time.Now()}
+}
+
+func (w *rescueTimingWindow) readCommit(readHead, readRound func() uint64) rescueCommitObservation {
+	head := readHead()
+	point := w.sampleRound(readRound)
+	if point.at.IsZero() {
+		return rescueCommitObservation{}
+	}
+	return rescueCommitObservation{point, head}
+}
+
+func (w *rescueTimingWindow) readUnknown(unknownRound uint64, readHead, readRound func() uint64) rescueCommitObservation {
+	observation := w.readCommit(readHead, readRound)
+	// The head belongs to this unknown observation only if the pacemaker is still in that round.
+	if observation.round != unknownRound {
+		return rescueCommitObservation{}
+	}
+	return observation
 }
 
 // steadyDeadline allows every steady round a timer and a second.
