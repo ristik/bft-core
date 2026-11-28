@@ -131,6 +131,63 @@ failed receipt path to exercise the failed-retry read.
 the public evidence. It records test measurements. Fundable fee and peak-window
 envelopes need measured bounds for the combined qualification workloads.
 
+## Private ERC20 qualification
+
+Start the same launcher under nohup with `NB2_LANE_SLOT=wait`,
+`NB2_LANE_OWNER=nb2-1038-qual` and `NB2_QUALIFY_ERC20=1`. The launcher
+waits for slot 0 or 2 and claims one before starting the lane. Use the
+existing UCT build inputs above. Also set:
+
+- `NB2_ERC20_CONTRACTS` to the clean #107 merge checkout `de62921f1`
+  with its recursive submodules initialized and solc 0.8.37 cached for Forge.
+- `NB2_ERC20_PLUGIN` to the clean #99 merge checkout `43c4535de`.
+- `NB2_ERC20_ORACLE_SOURCE` to the clean #1338 checkout and
+  `NB2_ERC20_ORACLE_REV` to its full revision. Use the landed merge when
+  available. Run the Go oracle from the selected checkout before starting
+  the lane.
+
+To use slot 3, enter a separate network namespace with only loopback up
+and set its ephemeral port range to 40000–60999. Run the launcher as the
+lane user with `NB2_LANE_SLOT=3` and `NB2_HOST_NETNS` set to the original
+namespace identity from `readlink /proc/self/ns/net`. Stage the pinned
+MongoDB image's `mongod` and `mongosh` binaries and its image reference
+in `NB2_MONGO_BIN_DIR`. Populate the npm cache before entering the
+namespace and set `npm_config_offline=true` inside it. The normal slot
+lock is shared with the host and the listener checks run in the namespace.
+
+The launcher builds the ERC20 contracts and SDK from fresh exports of their
+pinned Git trees before taking the slot. For slot 3, MongoDB uses a private
+data directory for each invocation, which the launcher removes after teardown.
+On slots 0 and 2 the Docker container and volume use the invocation's random
+claim token in their names.
+
+After the certified 40/60 UCT control the runner deploys two disposable tokens with separate
+vaults. Both use authenticated activation evidence and the TypeScript wallet.
+With ERC20 qualification enabled, a configured scenario hook runs after both
+ERC20s finish and receives the generation that has already run the UCT control.
+The wallet input keeps funding qualification false. The private scenario
+authorizes test locks and burns after recording the wallet's admission refusal.
+The fee token charges one unit on a delegated deposit and exercises expensive
+work below the vault's token call caps. Each asset runs two nested splits,
+ordinary and recovered payouts, a recipient block and an independent retry.
+The holder exits before the signed backup is certified. The recovered payout
+restores a Progress receipt after the preferred archive stops.
+
+The fee scenario defaults to 72 real seals, including a checkpoint at 64
+folded gaps. Set `NB2_ERC20_FEE_SEGMENTS=12` for a shorter rehearsal.
+Counters, raw signed transactions, receipts, authenticated log locators,
+costs and backlog observations are written inside the run directory.
+The summary verifies the advance chain from the completed Run through the
+paid receipt and reports separate reserve totals for the 64-gap prefix and
+the complete path to payout. Both totals apply to the measured workload.
+
+Rebuild the pinned verifier and summarize a finished run offline with
+`python3 scripts/nb2-t7/summarize-erc20.py RUN OUTPUT --plugin PLUGIN_CHECKOUT`.
+Use the #99 merge checkout above. With the npm cache populated, set
+`npm_config_offline=true` to replay without network access. The verifier
+authenticates the receipts from the run's trust pin, decodes the signed
+relayer transactions, and recomputes the reserve from their bids and receipts.
+
 ## Focused regressions
 
 Run these from bft-core on the dev server. They do not acquire a slot or start
@@ -147,3 +204,7 @@ ln -s "$review/plugin/packages/native-bridge-plugin/lib" "$review/sdk"
 cp scripts/nb2-t7/{receipt,receipt.test}.ts "$review/"
 "$review/plugin/node_modules/.bin/tsx" --test "$review/receipt.test.ts"
 ```
+
+Run `python3 scripts/nb2-t7/summary_test.py ARCHIVED_ROUND_2_RUN --plugin PLUGIN_CHECKOUT -v`
+to test a tampered receipt proof and an empty signed transaction against
+disposable copies of the archived evidence.

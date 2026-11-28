@@ -3,7 +3,7 @@
 # libraries moves by N*1000 (scripts/lib/lane-slot.sh holds the table). The lock is ~/host-lock/slot-N.txt (LANE_LOCK_DIR to move it).
 #   scripts/lane-slot.sh acquire [--slot N] [--owner NAME] [--tmux SESSION] [--tree DIR] [--profile P[,P]] [--token T]
 #        pick the lowest free slot (or N), write the lock, print "SLOT TOKEN". The claim token is generated (uuid) unless --token gives one; it is unique across all locks.
-#        Refuses an occupied slot, and (slots 1..3) a slot whose listeners for the profile fall in the host's ephemeral port range and are not reserved. Profiles:
+#        Exits 75 if an explicitly requested slot is occupied. Refuses slots 1..3 when listeners for the profile fall in the host's ephemeral port range and are not reserved. Profiles:
 #        paired-default (default: the paired devnet with its section-3 negative clients), f6b, f6c, seed, f8. Slot 0 keeps its historical ports and is not refused: it is covered by the bind preflight.
 #   scripts/lane-slot.sh release [N] --token T [--owner NAME] [--force]   remove the lock of the claim with token T, owned by NAME (default $LANE_OWNER, else $USER); --force skips both checks. N defaults to $LANE_SLOT, else the slot the token names
 #   scripts/lane-slot.sh status                                           every slot: free, or its lock; a lock whose tmux session is gone is flagged
@@ -59,7 +59,7 @@ case "$cmd" in
       case "$s" in 0 | 1 | 2 | 3) ;; *) echo "slot must be 0..3" >&2; exit 2 ;; esac
       f=$(lockfile "$s")
       if [ -e "$f" ]; then
-        [ -z "$slot" ] || { echo "slot $s is occupied:" >&2; sed 's/^/  /' "$f" >&2; exit 1; }
+        [ -z "$slot" ] || { echo "slot $s is occupied:" >&2; sed 's/^/  /' "$f" >&2; exit 75; }
         continue
       fi
       if grep -qsxF "token: $token" "$lockdir"/slot-[0-3].txt 2>/dev/null; then echo "acquire: token '$token' is already held by another lock: a claim token must be unique" >&2; exit 1; fi
