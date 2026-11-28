@@ -194,6 +194,36 @@ bash scripts/nb2-t7/replay-erc20-max-resume.sh \
   "$HOME/nb2/1038-qual" "$HOME/evidence/1038-qual/native-width" "$new_evidence_dir"
 ```
 
+### ERC20 release calibration
+
+Set `NB2_ERC20_ADMISSION=1 NB2_ERC20_CALIBRATE=1 NB2_ERC20_FEE_SEGMENTS=72` and
+pin `NB2_ERC20_PLUGIN_REV` to the release being measured. The fee-token lane
+offers up to 16 operations in Start and restores from the matching certified
+checkpoint. Its sealer starts before Start and continues through alternate
+archive restoration, Resume and three-gap catch-up. The driver records the
+actual packet shapes, the observed segment interval around each phase and
+the payer's finalized and pending state at each signing attempt.
+
+After teardown, authenticate the measured calls and seal chain with the
+built release SDK. Replay the candidate batch and terminal suffixes separately
+against the native execution and contract pins from the #1038 fixtures.
+
+```sh
+node scripts/nb2-t7/audit-erc20-calibration.mjs "$run" "$sdk_lib" "$audit_json"
+bash scripts/nb2-t7/replay-erc20-gap-calibration.sh \
+  "$HOME/nb2/1038-qual" "$HOME/evidence/1038-qual/native-settlement" "$new_evidence_dir" "$sdk_lib"
+```
+
+The native replay covers a full three-gap advance and both payout routes
+at suffixes zero through two, with a concentrated 127-position scan,
+seal and expensive token calls. The recovered cases use the archived
+wide certified predecessor and the full gap witnesses. The live audit
+reports observed proof timing, arrivals, funding and nonce usage, and
+recomputes a candidate reserve using the sampled inclusion windows.
+The native replay uses synthetic authority and seeded custody. Both sets
+of measurements leave real-value qualification closed pending release-wide
+shape, timing and funding bounds.
+
 ## Focused regressions
 
 Run these from bft-core on the dev server. They do not acquire a slot or start
