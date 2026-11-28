@@ -632,6 +632,10 @@ Stage a verified, compatible release before the scheduled root epoch, and coordi
 
 `validator status` reports previous and current base fee floor, change denominator and collector, and the effective EVM block. Fee changes come from certified registry state at the parent. Leave the startup collector at the release value. Watch the live fee and committee limit changes in `ubft governance list --rpc "$RPC_URL"` and verify the effective values through status.
 
+### Native bridge
+
+**Known limitation.** A deposit whose receipt exceeds the proof limits cannot be recovered offline in this release. The continuation wallet can recover from an oversized shared segment seal when archival segment IDs are available and the fold can be checked against a certified vault head. A receipt-bound fix is planned for the next generation. [#1355](https://github.com/ristik/bft-core/issues/1355)
+
 ### Upgrade to a hotfix release
 
 Use the Foundation's authenticated announcement for your generation. It gives the affected component, hotfix URL, manifest SHA-256 and rollout window. Stage the binary under a distinct filename so the supervisor can still select the previous release. This example stages a root-only `ubft` hotfix.
