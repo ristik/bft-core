@@ -5,7 +5,34 @@ import (
 	"testing"
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
+	"github.com/stretchr/testify/require"
 )
+
+func TestLegacyReturnUsesFixedUCTAsset(t *testing.T) {
+	for _, useConfigAsset := range []bool{false, true} {
+		w := mustWorld(t, 64, 16, 2)
+		w.Cfg.Asset = HU([]byte("not the UCT asset"))
+		w.Gamma = w.Cfg.Bytes()
+		owner := Key("legacy-uct-return")
+		dep, err := w.MakeDeposit(big.NewInt(100), owner, ReceiptOpts{})
+		require.NoError(t, err)
+		draft := w.RootDraft(dep, []*secp256k1.PrivateKey{owner})
+		ret := w.ReturnTo(dep.Value, Recipient20("legacy-uct-recipient"), 0)
+		if useConfigAsset {
+			ret.Asset = w.Cfg.Asset
+		}
+		draft.Return(ret)
+		token, err := w.Finalize(draft)
+		require.NoError(t, err)
+		verdict, err := VerifyReturn(w.Gamma, Evidence(token.Bytes()), w.Trust, CandidateParams)
+		if useConfigAsset {
+			require.ErrorIs(t, err, ErrReturnAsset)
+		} else {
+			require.NoError(t, err)
+			require.Equal(t, AssetUCT, verdict.Asset)
+		}
+	}
+}
 
 func mustWorld(t testing.TB, k, b uint64, shards int) *World {
 	t.Helper()

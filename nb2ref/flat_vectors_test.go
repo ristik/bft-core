@@ -143,7 +143,7 @@ func flatFixtureRootWithReceipt(t *testing.T, w *World, v *FlatVerifier, value i
 	t.Helper()
 	r := DepositIntentSecret(w.WalletKey, v.domain, 1)
 	rho := Rho(v.domain, r)
-	log := RawLog{Address: w.Cfg.Vault, Topics: [][32]byte{TopicDeposited, u256u(1)}, Data: DepositedData(v.domain, big.NewInt(value), rho, FirstOwner(key))}
+	log := RawLog{Address: w.Cfg.Vault, Topics: depositLogTopics(w.Cfg, 1), Data: DepositedData(v.domain, big.NewInt(value), rho, FirstOwner(key))}
 	p, err := w.ReceiptProof(log, opts)
 	require.NoError(t, err)
 	j := ReceiptBacking{D: v.domain, N: 1, R: r, Proof: *p}
@@ -195,7 +195,7 @@ func flatFixtureReturn(t *testing.T, w *World, v *FlatVerifier, d *Draft, index 
 	t.Helper()
 	vd, err := parseMintData(w.Cfg, d.Mint.Data)
 	require.NoError(t, err)
-	d.Return(&ReturnData{D: v.domain, Asset: AssetUCT, Amount: vd, Recipient: Recipient20("flat-vector"), MinIndex: index})
+	d.Return(&ReturnData{D: v.domain, Asset: w.Cfg.Asset, Amount: vd, Recipient: Recipient20("flat-vector"), MinIndex: index})
 	if d.Cert == nil {
 		d.Cert = make(map[int]CertOpts)
 	}

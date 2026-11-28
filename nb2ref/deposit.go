@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"math"
 	"math/big"
+	"slices"
 
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/rlp"
@@ -27,9 +28,10 @@ const (
 
 // Event signatures and their topic0 (section 13.2).
 var (
-	TopicDeposited     = HE([]byte("Deposited(uint64,bytes32,uint256,bytes32,bytes)"))
-	TopicPaid          = HE([]byte("Paid(bytes32,address,uint256)"))
-	TopicSegmentSealed = HE([]byte("SegmentSealed(uint64,bytes32,bytes32,bytes)"))
+	TopicERC20Deposited = HE([]byte("ERC20Deposited(uint64,address,bytes32,uint256,bytes32,bytes)"))
+	TopicDeposited      = HE([]byte("Deposited(uint64,bytes32,uint256,bytes32,bytes)"))
+	TopicPaid           = HE([]byte("Paid(bytes32,address,uint256)"))
+	TopicSegmentSealed  = HE([]byte("SegmentSealed(uint64,bytes32,bytes32,bytes)"))
 )
 
 // DepositIntentSecret is r = HMAC-SHA256(key = k_w, msg = C(b("UNICITY_NB2_DEPOSIT_INTENT"), b(D), i)).
@@ -377,6 +379,15 @@ func verifyRootMint(c *Config, t *TrustInput, m *MintTx) (*ReceiptBacking, *big.
 	return j, value, nil
 }
 
+func depositLogTopics(c *Config, nonce uint64) [][32]byte {
+	if e := c.ERC20; e != nil {
+		var token [32]byte
+		copy(token[12:], e.Token[:])
+		return [][32]byte{TopicERC20Deposited, u256u(nonce), token}
+	}
+	return [][32]byte{TopicDeposited, u256u(nonce)}
+}
+
 // verifyFundedMint checks the same signed deposit opening in both bridge generations.
 func verifyFundedMint(c *Config, d [32]byte, m *MintTx, j *ReceiptBacking, receipt func(*DepositProof) (*ReceiptLog, error)) (*big.Int, error) {
 	if j.D != d {
@@ -388,7 +399,7 @@ func verifyFundedMint(c *Config, d [32]byte, m *MintTx, j *ReceiptBacking, recei
 	if err != nil {
 		return nil, err
 	}
-	if len(log.Topics) != 2 || log.Topics[0] != TopicDeposited || log.Topics[1] != u256u(j.N) {
+	if !slices.Equal(log.Topics, depositLogTopics(c, j.N)) {
 		if err := fail(ErrLogTopics); err != nil {
 			return nil, err
 		}

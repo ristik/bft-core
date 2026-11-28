@@ -18,13 +18,21 @@ func FlatAssetIDs(c *Config) (ty, aid [32]byte) {
 }
 
 func DecodeFlatConfig(gamma []byte) (*Config, error) {
-	c, err := decodeConfig(gamma, CandidateParams, 2)
+	version := uint64(2)
+	if len(gamma) != 0 && gamma[0] == 0x96 {
+		version = 3
+	}
+	c, err := decodeConfig(gamma, CandidateParams, version)
 	if err != nil {
 		return nil, err
 	}
-	c.wireVersion = 2
+	c.wireVersion = version
+	asset := AssetUCT
 	ty, aid := FlatAssetIDs(c)
-	if c.Ty != ty || c.Aid != aid || c.Asset != AssetUCT {
+	if e := c.ERC20; e != nil {
+		asset, ty, aid = ERC20AssetIDs(c.ChainID, e.Token, c.ExecutionGenesis)
+	}
+	if c.Ty != ty || c.Aid != aid || c.Asset != asset {
 		return nil, ErrConfigShape
 	}
 	return c, nil
@@ -43,6 +51,9 @@ func NewFlatVerifier(gamma []byte, deployment FlatDeployment, authority FlatAuth
 	cfg, err := DecodeFlatConfig(gamma)
 	if err != nil {
 		return nil, err
+	}
+	if e := cfg.ERC20; e != nil && (deployment.Salt != e.Generation || deployment.Pins != e.Pins) {
+		return nil, ErrConfigShape
 	}
 	if err := flatRegistryNetwork(authority.Registry, cfg.Network); err != nil {
 		return nil, err
