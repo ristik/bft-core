@@ -400,7 +400,11 @@ func checkReturnAt(c *Config, d [32]byte, last *TransferTx, amount *big.Int) (*R
 			return nil, err
 		}
 	}
-	if r.Asset != AssetUCT {
+	asset := AssetUCT
+	if e := c.ERC20; e != nil {
+		asset, _, _ = ERC20AssetIDs(c.ChainID, e.Token, c.ExecutionGenesis)
+	}
+	if r.Asset != asset {
 		if err := fail(ErrReturnAsset); err != nil {
 			return nil, err
 		}
