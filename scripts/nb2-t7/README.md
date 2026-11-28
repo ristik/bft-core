@@ -226,7 +226,9 @@ bash scripts/nb2-t7/replay-erc20-start-calibration.sh \
 ```
 
 The native Start uses 16 operations and 32 pages, with the archived wide
-deposit, allocation, and certification witnesses. The terminal replay
+deposit, allocation, and certification witnesses. Pass `narrow` as the fourth
+argument to replay the same lineage in one-operation cuts with direct receipt
+shapes and verify each cut against the candidate wire caps. The terminal replay
 covers a full three-gap advance and both payout routes
 at suffixes zero through two, with a concentrated 127-position scan,
 seal and expensive token calls. The recovered cases use full gap witnesses
