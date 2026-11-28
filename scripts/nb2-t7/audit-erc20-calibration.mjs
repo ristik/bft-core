@@ -81,14 +81,16 @@ async function measuredCall(prefix, kind, to, expectedEvent) {
   const baseFee = log.header.baseFeePerGas;
   const tip = request.maxPriorityFeePerGas;
   const fullBid = baseFee + tip;
-  assert.equal(BigInt(cost.effectiveGasPrice), fullBid < request.maxFeePerGas ? fullBid : request.maxFeePerGas, prefix);
+  const effectiveFeePerGas = fullBid < request.maxFeePerGas ? fullBid : request.maxFeePerGas;
+  assert.equal(BigInt(cost.effectiveGasPrice), effectiveFeePerGas, prefix);
+  assert.equal(BigInt(cost.paidFee), gasUsed * effectiveFeePerGas, prefix);
   const inclusionBlocks = Number(log.header.number - BigInt(state.finalizedBlockNumber));
   assert(Number.isSafeInteger(inclusionBlocks) && inclusionBlocks > 0, prefix);
   return { kind, prefix, txHash: loc.transactionHash, block: Number(log.header.number),
     blockTimestamp: Number(log.header.timestamp), payer: hex(from), nonce: Number(request.nonce),
     submittedGas: Number(request.gas), gasUsed: Number(gasUsed), signedBytes: raw.length,
     calldataBytes: request.data.length, includedBaseFeeWei: String(baseFee), tipWei: String(tip),
-    maxFeePerGasWei: String(request.maxFeePerGas), inclusionBlocks, signingState: state };
+    maxFeePerGasWei: String(request.maxFeePerGas), paidFeeWei: cost.paidFee, inclusionBlocks, signingState: state };
 }
 
 const runCalls = [];
@@ -170,9 +172,17 @@ const path = [...runCalls, ...advances, recovered];
 const payer = path[0].payer;
 assert(path.every((call, i) => call.payer === payer && call.nonce === i));
 assert(reserve.throughPayout.calls.length === path.length);
-const exposure = path.reduce((sum, call) => sum + BigInt(call.submittedGas) * BigInt(call.maxFeePerGasWei), 0n);
+const bidAmounts = path.map((call) => BigInt(call.submittedGas) * BigInt(call.maxFeePerGasWei));
+const exposure = bidAmounts.reduce((sum, bid) => sum + bid, 0n);
 assert.equal(exposure, BigInt(reserve.throughPayout.upperBids));
-assert(exposure <= BigInt(path[0].signingState.pendingBalance));
+assert.equal(path.reduce((sum, call) => sum + BigInt(call.paidFeeWei), 0n), BigInt(reserve.throughPayout.observedFees));
+let remainingExposure = exposure;
+const everySignatureFundedObservedPath = path.every(({ signingState }, index) => {
+  const funded = remainingExposure <= BigInt(signingState.pendingBalance) &&
+    remainingExposure <= BigInt(signingState.finalizedBalance);
+  remainingExposure -= bidAmounts[index];
+  return funded;
+});
 const max = (items) => items.reduce((a, b) => a > b ? a : b);
 const inclusionSamples = [...path, ordinary, retry];
 const maxInclusionBlocks = Math.max(...inclusionSamples.map((call) => call.inclusionBlocks));
@@ -218,11 +228,14 @@ writeFileSync(output, JSON.stringify({
     run: runCalls.map((call) => window(call.prefix.split('/').at(-1))),
     restore: window('restore'), checkpoint, resumed: restored, ordinaryBeforeFallbackExercised: false },
   funding: { payer, observedMaximumSignedExposureWei: String(exposure), candidateFeeWei: String(candidateFee),
+    everySignatureFundedObservedPath, observedPaidFeesWei: reserve.throughPayout.observedFees,
     maxInclusionBlocks, coversSampledInclusion, tipWei: String(tip), d, n, ordinaryAttempts, nonceCount, candidateMaxNonce,
     observedPathBlocks, fullPathFeeAtFullBlocksWei: String(fullPathFeeAtFullBlocks),
     candidateBudgetWei: String(candidateBudget), signingState: initial,
     recoveryCeilingWei: recoveryCeiling?.toString() ?? null, ordinaryCeilingWei: String(ordinaryCeiling),
     reserveCeilingWei: reserveCeiling?.toString() ?? null,
+    replacementCeilingPerNonceWei: String(perCall),
     passesCandidate: coversSampledInclusion && reserveCeiling !== null && reserveCeiling <= candidateBudget &&
-      reserveCeiling <= BigInt(initial.pendingBalance) && nonceCount <= candidateMaxNonce + 1 },
+      reserveCeiling <= BigInt(initial.pendingBalance) && reserveCeiling <= BigInt(initial.finalizedBalance) &&
+      BigInt(initial.pendingNonce) + BigInt(nonceCount) <= BigInt(candidateMaxNonce + 1) },
 }, null, 2) + '\n');
