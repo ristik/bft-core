@@ -666,9 +666,9 @@ def node(a, pins):
             stop(name)
 
 
-def local_status():
+def local_status(*extra):
     return ubft('validator', 'status', '--custody', read(RELEASE/'deployment.json')['custody'],
-                '--json', output=True, check=False, timeout=25)
+                '--json', *extra, output=True, check=False, timeout=25)
 
 
 def show_status(_a, _pins):
@@ -710,11 +710,34 @@ def participate(halted, *, execution=RPC, root=ROOT, member=None):
     expected_genesis = read(manifest)['genesis_hash']
     said = {}
 
-    def once(key, text):
+    def once(key, text, *, error=False):
         # the loop polls every 5 s: a state that does not change is reported once
         if text and said.get(key) != text:
             said[key] = text
-            print(text, flush=True)
+            print(text, file=sys.stderr if error else None, flush=True)
+
+    def report_retirement(epoch):
+        if said.get('retired_epoch') == epoch:
+            return
+        try:
+            args = ['--id', member] if member is not None else []
+            result = local_status('--rpc', execution, '--sample', 0, *args)
+            report = json.loads(result.stdout)
+            if (isinstance(report, dict) and report.get('rootEpoch') == epoch and report.get('identity') == 'found'
+                    and isinstance(report.get('member'), bool)):
+                said['retired_epoch'] = epoch
+                if report.get('member') is False:
+                    once('retired', f'authority handoff: the verified activation of root epoch {epoch} retired this '
+                         'authority: the identity left the committee and signs nothing more')
+                    return
+                once('retired', f'ERROR: authority handoff: the verified activation of root epoch {epoch} unexpectedly '
+                     'retired this authority while its identity remains in the committee; check this validator immediately',
+                     error=True)
+                return
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+        once('retired', f'ERROR: authority handoff: the verified activation of root epoch {epoch} retired this authority; '
+             'could not confirm the identity left the committee', error=True)
 
     while not halted.wait(5):
         try:
@@ -755,13 +778,13 @@ def participate(halted, *, execution=RPC, root=ROOT, member=None):
             if view['activeEpoch'] > 1 and (member is not None or (active.exists() and not recovering())):
                 old = authority_status()
                 if old.get('retired') and old.get('lineageEpoch', 0) >= view['activeEpoch']:
-                    # #1316: a verified activation retired the authority (the identity left the committee); nothing to advance until
-                    # the next epoch, whose activation it verifies once more
-                    once('retired', f'authority handoff: the verified activation of root epoch {old["lineageEpoch"]} retired this '
-                         'authority: the identity left the committee and signs nothing more')
+                    # #1316: a retired authority has nothing to advance until the next epoch.
+                    report_retirement(old['lineageEpoch'])
                 elif (old['rootEpoch'] < view['activeEpoch'] or not old['sessionIssued'] or
                         not active.exists() or read(active)['rootEpoch'] < view['activeEpoch']):
-                    advance(view['activeEpoch'], root=root, member=member, retired_ok=True)
+                    retired_epoch = advance(view['activeEpoch'], root=root, member=member, retired_ok=True)
+                    if retired_epoch is not None:
+                        report_retirement(retired_epoch)
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
             print(f'authority handoff: {error}', flush=True)
 
@@ -777,7 +800,7 @@ def advance(target, *, root=ROOT, member=None, retired_ok=False):
         advanced = json.loads(authority('advance-with-proof', '--client-socket', d/'client.sock',
                               '--out', d/'client.cred', *proofs, home=d, output=True).stdout)
         if advanced['retired'] and retired_ok:
-            return   # the identity left the committee: participate() reports it once from the authority's status
+            return advanced['lineageEpoch']  # participate() checks and reports whether the departure was expected
         if advanced['rootEpoch'] != target or advanced['retired']:
             raise ValueError('verified activation did not admit this authority')
         journal(active_file(), 'activated', rootEpoch=target, shardEpoch=advanced['shardEpoch'],

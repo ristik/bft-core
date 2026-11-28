@@ -80,9 +80,10 @@ const (
 	opReloadRegistrationPolicy op = 111
 	// opSignPosPoP asks for the P85 assignment possession proof of the pinned election; opSetPosPolicy pins that election once (#1216).
 	// Operator channel only.
-	opSignPosPoP     op = 112
-	opSetPosPolicy   op = 113
-	opPublishSession op = 114
+	opSignPosPoP      op = 112
+	opSetPosPolicy    op = 113
+	opPublishSession  op = 114
+	opPosPolicyStatus op = 115
 )
 
 // MaxAdvanceProofBytes is the largest activation bundle one opAdvanceWithProof can carry: the frame less an allowance for the request's
@@ -105,7 +106,7 @@ func (o op) servedToPoP() bool { return o == opSignHandoffPoP }
 func (o op) servedToOperator() bool {
 	switch o {
 	case opReplaceSession, opStatus, opEnrollment, opCompleteEnrollment, opAdvanceEpoch, opSignHandoffPoP, opSignElectionPoP, opSignDelegationPossession,
-		opAdvanceWithProof, opSignRegistration, opReloadRegistrationPolicy, opSignPosPoP, opSetPosPolicy, opPublishSession:
+		opAdvanceWithProof, opSignRegistration, opReloadRegistrationPolicy, opSignPosPoP, opSetPosPolicy, opPublishSession, opPosPolicyStatus:
 		return true
 	}
 	return false
@@ -129,6 +130,8 @@ func (o op) String() string {
 		return "publish-session"
 	case opStatus:
 		return "status"
+	case opPosPolicyStatus:
+		return "pos-policy-status"
 	case opEnrollment:
 		return "enrollment"
 	case opCompleteEnrollment:

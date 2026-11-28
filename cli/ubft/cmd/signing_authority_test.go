@@ -28,6 +28,7 @@ import (
 	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-core/signingauthority"
 	"github.com/unicitynetwork/bft-core/signingauthority/service"
+	"github.com/unicitynetwork/bft-core/vrschema"
 )
 
 // authoritySocketDir is short on purpose: a Unix socket path is limited to about 100 bytes, and the
@@ -525,4 +526,45 @@ func authorityRunFixture(t *testing.T) (run func(args ...string) error, base []s
 		return err
 	}
 	return run, base, home
+}
+
+func TestSigningAuthorityStatusShowsPosPolicy(t *testing.T) {
+	ctx := t.Context()
+	view := signingauthority.PosDeploymentView{Network: [32]byte{31: 7}, ChainID: vrschema.U64(3), Election: [20]byte{19: 0xe1}}
+	src := &pinSource{view: view, pending: 1}
+	socket, credFile, _ := startAuthority(t, signingauthority.RegistrationPolicy{
+		Deployment: signingauthority.RegistrationDeployment{Network: view.Network, ChainID: view.ChainID, Registry: vrschema.ValidatorRegistry},
+	}, signingauthority.WithPosSource(src, 3))
+	cred, err := readCredentialFile(credFile)
+	require.NoError(t, err)
+	operator, err := service.NewOperatorClient(service.ClientConfig{Dial: service.UnixDialer(socket), Credential: cred})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = operator.Close() })
+
+	run := func() signingAuthorityStatus {
+		app := New(testobserve.NewFactory(t))
+		var out bytes.Buffer
+		app.baseCmd.SetOut(&out)
+		app.baseCmd.SetArgs([]string{"signing-authority", "status", "--operator-socket", socket, "--operator-credential", credFile})
+		require.NoError(t, app.Execute(ctx))
+		var status signingAuthorityStatus
+		require.NoError(t, json.Unmarshal(out.Bytes(), &status))
+		require.Equal(t, "e2e-evm-auth", status.NodeID)
+		return status
+	}
+	require.Equal(t, signingAuthorityPosPin{State: "none"}, run().PosPolicy)
+
+	pin := signingauthority.PosPolicy{IDs: []uint64{8, 5}}
+	require.ErrorIs(t, operator.SetPosPolicy(ctx, pin), signingauthority.ErrPosPending)
+	require.Equal(t, signingAuthorityPosPin{State: "pending", Scope: &signingAuthorityPosScope{IDs: pin.IDs}}, run().PosPolicy)
+
+	require.NoError(t, operator.SetPosPolicy(ctx, pin))
+	p := run().PosPolicy
+	require.Equal(t, "verified", p.State)
+	require.NotNil(t, p.Scope)
+	require.Equal(t, pin.IDs, p.Scope.IDs)
+	require.Equal(t, "0x"+hex.EncodeToString(view.Network[:]), p.Scope.Network)
+	require.NotNil(t, p.Scope.ChainID)
+	require.Equal(t, int64(3), p.Scope.ChainID.Int64())
+	require.Equal(t, "0x00000000000000000000000000000000000000e1", strings.ToLower(p.Scope.Election))
 }

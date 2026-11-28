@@ -167,7 +167,7 @@ func TestTheOperatorChannelSignsThePinnedPosPoP(t *testing.T) {
 	require.ErrorIs(t, err, signingauthority.ErrPosPolicy)
 
 	client := f.admit(t)
-	for _, o := range []op{opSignPosPoP, opSetPosPolicy} {
+	for _, o := range []op{opSignPosPoP, opSetPosPolicy, opPosPolicyStatus} {
 		answer, err := rawCall(t, f.clientDir, wireRequest{Version: protocolVersion, Op: uint64(o), Credential: client.ex.credential, Payload: []byte{0x80}})
 		require.NoError(t, err)
 		require.Equal(t, errWrongEndpoint.Error(), answer.Refusal, "%v", o)

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"github.com/unicitynetwork/bft-core/vrrules"
 	"log/slog"
+	"math/big"
 	"net"
 	"os"
 	"path/filepath"
@@ -861,26 +862,39 @@ credential is returned once to this command, which writes it; losing it requires
 // signingAuthorityStatus is what `signing-authority status` prints. It carries no request bytes, no
 // response and no credential.
 type signingAuthorityStatus struct {
-	AuthorityID           string `json:"authorityId"`
-	NodeID                string `json:"nodeId"`
-	NetworkID             uint16 `json:"networkId"`
-	PartitionID           uint32 `json:"partitionId"`
-	ShardID               string `json:"shardId"`
-	ShardEpoch            uint64 `json:"shardEpoch"`
-	RootEpoch             uint64 `json:"rootEpoch"`
-	EnrollmentComplete    bool   `json:"enrollmentComplete"`
-	ShardConfHash         string `json:"shardConfHash,omitempty"`
-	SigningKeyFingerprint string `json:"signingKeyFingerprint"`
-	Generation            uint64 `json:"generation"`
-	HasReservation        bool   `json:"hasReservation"`
-	ReservedRound         uint64 `json:"reservedRound"`
-	ResponseRetained      bool   `json:"responseRetained"`
-	Faulted               bool   `json:"faulted"`
-	KeyLost               bool   `json:"keyLost"`
-	LineagePinned         bool   `json:"lineagePinned"`
-	LineageEpoch          uint64 `json:"lineageEpoch"`
-	Retired               bool   `json:"retired"`
-	SessionIssued         bool   `json:"sessionIssued"`
+	AuthorityID           string                 `json:"authorityId"`
+	NodeID                string                 `json:"nodeId"`
+	NetworkID             uint16                 `json:"networkId"`
+	PartitionID           uint32                 `json:"partitionId"`
+	ShardID               string                 `json:"shardId"`
+	ShardEpoch            uint64                 `json:"shardEpoch"`
+	RootEpoch             uint64                 `json:"rootEpoch"`
+	EnrollmentComplete    bool                   `json:"enrollmentComplete"`
+	ShardConfHash         string                 `json:"shardConfHash,omitempty"`
+	SigningKeyFingerprint string                 `json:"signingKeyFingerprint"`
+	Generation            uint64                 `json:"generation"`
+	HasReservation        bool                   `json:"hasReservation"`
+	ReservedRound         uint64                 `json:"reservedRound"`
+	ResponseRetained      bool                   `json:"responseRetained"`
+	Faulted               bool                   `json:"faulted"`
+	KeyLost               bool                   `json:"keyLost"`
+	LineagePinned         bool                   `json:"lineagePinned"`
+	LineageEpoch          uint64                 `json:"lineageEpoch"`
+	Retired               bool                   `json:"retired"`
+	SessionIssued         bool                   `json:"sessionIssued"`
+	PosPolicy             signingAuthorityPosPin `json:"posPolicy"`
+}
+
+type signingAuthorityPosPin struct {
+	State string                    `json:"state"`
+	Scope *signingAuthorityPosScope `json:"scope,omitempty"`
+}
+
+type signingAuthorityPosScope struct {
+	Network  string   `json:"network,omitempty"`
+	ChainID  *big.Int `json:"chainId,omitempty"`
+	Election string   `json:"election,omitempty"`
+	IDs      []uint64 `json:"ids"`
 }
 
 func signingAuthorityStatusCmd(baseFlags *baseFlags) *cobra.Command {
@@ -902,6 +916,10 @@ func signingAuthorityStatusCmd(baseFlags *baseFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			pin, err := operator.PosPolicyStatus(cmd.Context())
+			if err != nil {
+				return err
+			}
 			fingerprint := sha256.Sum256(publicKey)
 			out := signingAuthorityStatus{
 				AuthorityID: enrollment.AuthorityID, NodeID: enrollment.NodeID,
@@ -915,6 +933,20 @@ func signingAuthorityStatusCmd(baseFlags *baseFlags) *cobra.Command {
 			}
 			if enrollment.RootEpoch != nil {
 				out.RootEpoch = *enrollment.RootEpoch
+			}
+			out.PosPolicy.State = pin.State
+			if p := pin.Scope; p != nil {
+				scope := signingAuthorityPosScope{IDs: p.IDs}
+				if p.ChainID != ([32]byte{}) {
+					scope.ChainID = new(big.Int).SetBytes(p.ChainID[:])
+				}
+				if p.Network != ([32]byte{}) {
+					scope.Network = hexutil.Encode(p.Network[:])
+				}
+				if p.Election != ([20]byte{}) {
+					scope.Election = common.Address(p.Election).Hex()
+				}
+				out.PosPolicy.Scope = &scope
 			}
 			encoder := json.NewEncoder(cmd.OutOrStdout())
 			encoder.SetIndent("", "  ")

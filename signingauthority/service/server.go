@@ -702,6 +702,8 @@ func (s *Server) operatorOp(ctx context.Context, operation op, payload []byte) (
 		return types.Cbor.Marshal(result)
 	case opStatus, opRestoreStatus:
 		return types.Cbor.Marshal(statusPayloadOf(s.authority.Status()))
+	case opPosPolicyStatus:
+		return types.Cbor.Marshal(s.authority.PosPolicyStatus())
 	case opEnrollment:
 		enrollment, err := types.Cbor.Marshal(s.authority.Enrollment())
 		if err != nil {
