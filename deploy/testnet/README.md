@@ -144,6 +144,15 @@ them on the server and backup host. Local image IDs require image loading on a
 new host; this package does not assume a registry publication or signing service.
 Keep the PR checkout used for packaging too. Do not use CI fixture image IDs.
 
+The optional upstream-facing aggregator is an exception to the merge-commit
+pin policy. `pins.json` retains the single-parent `aggregator-go-upstream`
+revision `12ab9074b02dedf39b90b0bb49829ac77fb2da68` for
+`build-images.py --aggregator-variant upstream` and
+`generate.py --utb-aggregator upstream`. The nine-stage release rehearsal
+qualified the default integration aggregator at the #24 merge. Replacing the
+exception requires a merged upstream-facing build and rehearsal evidence for
+that variant. [Release evidence](evidence/release-manifest.md)
+
 ## Generate and deploy (second operator)
 
 Run with Bash `set -eo pipefail`. Use a dedicated private state parent outside the

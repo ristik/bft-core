@@ -19,7 +19,9 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
+	testobservability "github.com/unicitynetwork/bft-core/internal/testutils/observability"
 	"github.com/unicitynetwork/bft-core/internal/testutils/q3fixture"
+	"github.com/unicitynetwork/bft-core/logger"
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
@@ -294,6 +296,10 @@ func (n *lossyNet) ReceivedChannel() <-chan any { return n.out }
 
 func (n *lossyNet) SendCertificationResponse(ctx context.Context, cr *certification.CertificationResponse, receivers ...peer.ID) error {
 	err := n.LibP2PNetwork.SendCertificationResponse(ctx, cr, receivers...)
+	if n.w.traceLog != nil && cr.Partition == q3fixture.PartitionID && cr.UC.UnicitySeal != nil {
+		n.w.traceLog.Debug("fixture response", "root", n.name, "rootRound", cr.UC.GetRootRoundNumber(),
+			"nextRound", cr.Technical.Round, "leader", cr.Technical.Leader, "receivers", receivers, "status", cr.Status, "error", err)
+	}
 	if n.w.trace && cr.Partition == q3fixture.PartitionID && cr.UC.UnicitySeal != nil {
 		n.w.t.Logf("response root=%s seal=%d next=%d leader=%s to=%v status=%d sendErr=%v",
 			n.name, cr.UC.GetRootRoundNumber(), cr.Technical.Round, cr.Technical.Leader, receivers, cr.Status, err)
@@ -343,6 +349,7 @@ type proposalSample struct {
 
 type shardWorld struct {
 	trace     bool
+	traceLog  *slog.Logger
 	t         *testing.T
 	c         *q4bLive
 	transport *liveTransport
@@ -372,6 +379,11 @@ func (w *shardWorld) judge(root string, req *certification.BlockCertificationReq
 		ev.dropped = true
 	}
 	w.events = append(w.events, ev)
+	if w.traceLog != nil {
+		w.traceLog.Debug("fixture request", "root", ev.root, "sender", ev.node, "requestEpoch", ev.epoch,
+			"requestRound", ev.round, "previousHash", fmt.Sprintf("%x", ev.prev), "blockHash", fmt.Sprintf("%x", ev.blockHash),
+			"dropped", ev.dropped, "receivedAt", ev.at)
+	}
 	if w.trace {
 		w.t.Logf("request root=%s sender=%s epoch=%d shardRound=%d prev=%x block=%x signed=%x dropped=%t at=%s",
 			ev.root, ev.node, ev.epoch, ev.round, ev.prev, ev.blockHash, ev.fp, ev.dropped, ev.at.Format(time.RFC3339Nano))
@@ -463,10 +475,21 @@ type shardWorldConfig struct {
 func newShardWorld(t *testing.T, cfg shardWorldConfig) *shardWorld {
 	t.Helper()
 	w := &shardWorld{t: t, trace: os.Getenv("BFT_976_DIAG") == "1"}
+	if path := os.Getenv("BFT_976_SHARD_TRACE"); path != "" {
+		trace, err := os.Create(path)
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, trace.Close()) })
+		w.traceLog = slog.New(slog.NewJSONHandler(trace, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	w.cancelAll = cancel
 	t.Cleanup(cancel)
 	w.transport = newLiveTransport(t)
+	if w.traceLog != nil {
+		w.transport.obs = testobservability.New(t, "", "", func(*logger.LogConfiguration) (*slog.Logger, error) {
+			return w.traceLog, nil
+		})
+	}
 	w.transport.wrap = func(name string, n *network.LibP2PNetwork) RootPartitionNet {
 		l := &lossyNet{LibP2PNetwork: n, name: name, out: make(chan any, 1024), w: w}
 		go l.run(ctx)
@@ -478,6 +501,14 @@ func newShardWorld(t *testing.T, cfg shardWorldConfig) *shardWorld {
 			return
 		}
 		for _, r := range pm.Block.Payload.Requests {
+			if w.traceLog != nil && r.Partition == q3fixture.PartitionID {
+				attrs := []slog.Attr{slog.String("proposer", pm.Block.Author), slog.Uint64("rootRound", pm.Block.Round),
+					slog.String("reason", fmt.Sprint(r.CertReason)), slog.Int("requests", len(r.Requests))}
+				if len(r.Requests) != 0 {
+					attrs = append(attrs, slog.Uint64("requestRound", r.Requests[0].IRRound()))
+				}
+				w.traceLog.LogAttrs(ctx, slog.LevelDebug, "fixture proposal", attrs...)
+			}
 			if r.Partition == q3fixture.PartitionID && r.CertReason == drctypes.T2Timeout {
 				w.mu.Lock()
 				w.t2Props = append(w.t2Props, proposalSample{at: time.Now(), round: pm.Block.Round})
@@ -486,12 +517,17 @@ func newShardWorld(t *testing.T, cfg shardWorldConfig) *shardWorld {
 		}
 	}
 	w.c = newEqualLiveRate(t, cfg.timeout, cfg.blockRate, cfg.options, w.transport.install, cfg.names...)
+	if w.traceLog != nil {
+		for _, node := range w.c.nodes {
+			w.traceLog.Debug("fixture root", "root", node.name, "receiver", node.r.id().String())
+		}
+	}
 	w.h = w.c.nodes[w.c.idx(cfg.names[0])].r.manager
 	w.transport.up(w.c, w.c.all()...)
 	w.c.start(w.c.all()...)
 	w.c.warm(8, w.c.all()...)
 	// the shards are built on the LIVE shard configuration (the assignment changes its hash after the first live round), then introduced to the roots
-	w.shards = addRealShards(t, w.transport, w.c, cfg.shardOpts)
+	w.shards = addRealShards(t, w.transport, w.c, cfg.shardOpts, w.traceLog)
 	for id := range w.shards {
 		w.ids = append(w.ids, id)
 	}
@@ -605,7 +641,7 @@ func (w *testLogWriter) Write(p []byte) (int, error) {
 }
 
 // addRealShards is liveTransport.addShards with a production shard node behind each validator's shard network instead of a receipt goroutine.
-func addRealShards(t *testing.T, x *liveTransport, c *q4bLive, opts shardnode.BFTClientOptions) map[string]*realShard {
+func addRealShards(t *testing.T, x *liveTransport, c *q4bLive, opts shardnode.BFTClientOptions, trace *slog.Logger) map[string]*realShard {
 	t.Helper()
 	f := c.nodes[0].r.f
 	m := c.nodes[0].r.manager
@@ -644,8 +680,14 @@ func addRealShards(t *testing.T, x *liveTransport, c *q4bLive, opts shardnode.BF
 		diss, err := shardnode.NewNetDisseminator(h.peer, x.obs, peers)
 		require.NoError(t, err)
 		exec := &retainingExecutor{Fake: executortest.NewAt(genesis), pool: pool}
-		node, err := shardnode.New(h.peer, h.net, f.EVMSigners[id], q3fixture.PartitionID, types.ShardID{}, si.ShardConfHash, managerTrust{m: m, old: f.Old}, exec, diss, nil,
-			slog.New(slog.NewTextHandler(&testLogWriter{t: t, prefix: id[len(id)-6:]}, &slog.HandlerOptions{Level: level})), opts)
+		log := trace
+		if log != nil {
+			log = log.With("validator", id)
+		} else {
+			log = slog.New(slog.NewTextHandler(&testLogWriter{t: t, prefix: id[len(id)-6:]}, &slog.HandlerOptions{Level: level}))
+		}
+		node, err := shardnode.New(h.peer, h.net, f.EVMSigners[id], q3fixture.PartitionID, types.ShardID{}, si.ShardConfHash,
+			managerTrust{m: m, old: f.Old}, exec, diss, nil, log, opts)
 		require.NoError(t, err)
 		// as the production shard node is configured: the follower's wait for the leader's block follows the shard's own T2, and certificates are served
 		node.SetAwaitTimeout(shardnode.AwaitTimeoutForT2(f.ShardConf.T2Timeout))
@@ -1187,6 +1229,12 @@ func runLossCycles(t *testing.T, w *shardWorld, cycles int, silent string, rBudg
 		row := cycleRow{cycle: k, leader: shortID(repeats[0].leader), pausedLeader: silent != "" && repeats[0].leader == silent, repeats: len(repeats), certifiedKey: keyOfIR(certified.ir)}
 		for i := range repeats {
 			r := report(i)
+			if w.traceLog != nil {
+				repeat := repeats[i]
+				w.traceLog.Debug("fixture cycle attempt", "cycle", k, "attempt", i+1, "rootRound", repeat.seal,
+					"requestRound", repeat.nextRound, "leader", repeat.leader, "paused", repeat.leader == silent,
+					"certified", i == len(repeats)-1, "delivered", r.exists, "deliveredQuorum", r.quorumOK)
+			}
 			if i == 0 {
 				row.first = r
 			}

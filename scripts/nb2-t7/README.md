@@ -3,8 +3,9 @@
 Run this in a dedicated bft-core checkout on the dev server. It takes a lane slot,
 starts MongoDB and the four paired validators, enrolls their signing authorities,
 and enables signed UTB history at genesis. On exit it stops the processes and
-MongoDB it owns and releases the slot. The launcher requires a fresh checkout
-without `test-nodes`. Keep the run's output outside that checkout.
+MongoDB it owns and releases the slot. Check out a BFT merge commit in a fresh
+worktree without `test-nodes` and build both BFT tools from that commit. Keep
+the run's output outside that checkout.
 
 Use [pins.json](pins.json) for the release inputs. Clone the pinned contracts,
 plug-in and aggregator repositories separately. Use Linux, Go, Node 22, Forge

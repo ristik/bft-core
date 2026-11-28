@@ -22,10 +22,17 @@ done
 [[ "$(go version -m "$AGG_BIN" | sed -n 's/.*vcs.revision=//p')" = "$(jq -r .aggregator "$pins")" ]]
 [[ "$(go version -m "$AGG_BIN" | sed -n 's/.*vcs.modified=//p')" = false ]]
 [[ "$("$URETH_BIN" --version | awk '/Commit SHA/ {print $3}')" = "$(jq -r .ureth "$pins")" ]]
-[[ -x build/ubft && -x build/utb-evidence ]]
-[[ "$(go version -m build/ubft | sed -n 's/.*vcs.revision=//p')" = "$(git rev-parse HEAD)" ]]
+bft_commit=$(git -C . rev-parse HEAD)
+git -C . rev-parse --verify "$bft_commit^2" >/dev/null 2>&1 ||
+  { echo "T7 requires a BFT merge commit, got $bft_commit" >&2; exit 2; }
+for binary in build/ubft build/utb-evidence; do
+  [[ -x "$binary" ]]
+  build_info=$(go version -m "$binary")
+  [[ "$(sed -n 's/.*vcs.revision=//p' <<<"$build_info")" = "$bft_commit" ]]
+  [[ "$(sed -n 's/.*vcs.modified=//p' <<<"$build_info")" = false ]]
+done
 mkdir -m 700 "$NB2_OUT"
-cp "$pins" "$NB2_OUT/pins.json"
+jq --arg bft "$bft_commit" '. + {bft: $bft}' "$pins" >"$NB2_OUT/pins.json"
 cp build/utb-evidence "$NB2_OUT/utb-evidence"
 export POST_M2A_URETH_BIN="$URETH_BIN" POST_M2A_URETH_COMMIT="$(jq -r .ureth "$pins")"
 export UTB_COMPONENTS="contracts=$(jq -r .contracts "$pins") aggregator-commit=$(jq -r .aggregator "$pins") aggregator-binary=sha256:$(sha256sum "$AGG_BIN" | cut -d' ' -f1) ureth=$POST_M2A_URETH_COMMIT"

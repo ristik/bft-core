@@ -116,7 +116,7 @@ jobs:
           esac
           case "$lane" in ureth-targeted|nightly|warm) targeted=true ;; esac
           case "$lane" in nightly|all-live) selftests=true ;; esac
-          # T6 and the targeted ureth tests build the commit under test and the components' ureth, never the frozen product's set
+          # T6 and the targeted ureth tests use the checkout's ureth pin.
           if [ "$product" = pinned ] && { [ "$t6" = true ] || [ "$targeted" = true ]; }; then echo "product=pinned runs the live lanes only (not t6 or ureth-targeted): lane $lane" >&2; exit 1; fi
           if [ "$lane" = pr ]; then
             if [ "$PR_DRAFT" = true ]; then
@@ -413,6 +413,7 @@ jobs:
       - name: T6 rehearsal
         env:
           CI_INJECT_FAILURE: ${{ needs.plan.outputs.inject }}
+          T6_CI_CHECKOUT_SHA: ${{ needs.plan.outputs.sha }}
           T6_DEADLINE_MIN: '105'
         run: scripts/ci/run-t6.sh "$RUNNER_TEMP/artifacts" "$RUNNER_TEMP/t6" "$RUNNER_TEMP/t6-out"
       - name: Resources of this job
