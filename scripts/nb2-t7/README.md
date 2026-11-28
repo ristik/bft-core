@@ -179,6 +179,21 @@ The summary verifies the advance chain from the completed Run through the
 paid receipt and reports separate reserve totals for the 64-gap prefix and
 the complete path to payout. Both totals apply to the measured workload.
 
+For #1345, set `NB2_ERC20_ADMISSION=1` and point `NB2_ERC20_PLUGIN` and
+`NB2_ERC20_PLUGIN_REV` at the clean admission checkout and its full commit.
+The fee-token run records `recovered/admission-run-plan.json` before sending
+Start. It checks the planned cuts against their actual receipts and signed
+envelopes, including at least one maximum-operation Resume. The live runner
+uses trial calibration for its disposable workload.
+
+The offline width regression can run against the saved #1038 workspace and
+its `native-width` evidence without acquiring a lane slot.
+
+```sh
+bash scripts/nb2-t7/replay-erc20-max-resume.sh \
+  "$HOME/nb2/1038-qual" "$HOME/evidence/1038-qual/native-width" "$new_evidence_dir"
+```
+
 ## Focused regressions
 
 Run these from bft-core on the dev server. They do not acquire a slot or start
