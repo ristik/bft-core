@@ -100,6 +100,30 @@ esac
         self.assertEqual((self.root / 'trace').read_text().splitlines(),
                          ['handoff', 'mongo-up', 'lane-2', 'mongo-down', 'release'])
 
+    def test_docker_mongo_name_is_unique_to_the_failed_claim(self):
+        self.stub_launcher_services()
+        self.executable('scripts/ci/mongo-up.sh', '''#!/bin/sh
+echo "$1:$CI_MONGO_NAME" >>"$TRACE"
+test "$1" = down || exit 42
+''')
+        self.executable('scripts/lane-slot.sh', '''#!/bin/sh
+case "$1" in
+  acquire) echo "$7" >>"$TRACE"; echo "$9 $7";;
+  release) echo release >>"$TRACE";;
+esac
+''')
+        for slot in (0, 2):
+            result = subprocess.run(['bash', 'scripts/nb2-t7/run.sh'], cwd=self.root,
+                                    env={**self.env, 'NB2_LANE_SLOT': str(slot),
+                                         'NB2_OUT': str(self.root / f'output-{slot}')},
+                                    capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 42, result.stderr)
+        first, up0, down0, release0, second, up2, down2, release2 = (
+            self.root / 'trace').read_text().splitlines()
+        self.assertNotEqual(first, second)
+        self.assertEqual((up0, down0, release0), (f'up:nb2-t7-{first}', f'down:nb2-t7-{first}', 'release'))
+        self.assertEqual((up2, down2, release2), (f'up:nb2-t7-{second}', f'down:nb2-t7-{second}', 'release'))
+
     def test_repeated_signals_keep_lane_cleanup_order_and_token(self):
         self.stub_launcher_services()
         self.executable('scripts/reth-paired-devnet.sh', CHILD)

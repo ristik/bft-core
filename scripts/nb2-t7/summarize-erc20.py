@@ -5,31 +5,37 @@ import argparse
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
+import subprocess
+import tempfile
 
 
 def read(path):
     return json.loads(path.read_text()) if path.is_file() else None
 
 
-def certified_call(run, name):
+def verify_evidence(run, plugin):
+    here = Path(__file__).resolve().parent
+    revision = read(here / 'pins.json')['erc20Plugin']
+    with tempfile.TemporaryDirectory(prefix='nb2-summary-') as build:
+        checkout = Path(build) / 'plugin'
+        subprocess.run(['bash', here / 'build-plugin.sh', plugin.resolve(), revision, checkout],
+                       check=True, stdout=2)
+        sdk = checkout / 'packages/native-bridge-plugin/lib'
+        return json.loads(subprocess.check_output(
+            ['node', here / 'verify-summary-evidence.mjs', run, sdk], text=True))
+
+
+def certified_call(run, name, verified):
+    proof = verified.get(str(run / name))
+    if not proof:
+        return None
     cost = read(run / (name + '.cost.json'))
-    locator = read(run / (name + '.locator.json'))
-    receipt = read(run / (name + '.receipt.json'))
-    proof = run / (name + '.cbor')
-    if not (cost and locator and receipt and proof.is_file() and proof.stat().st_size):
-        return None
-    index = locator['receiptLogIndex']
-    if receipt['status'] != '0x1' or not 0 <= index < len(receipt['logs']):
-        return None
-    log = receipt['logs'][index]
-    if (
-        cost['tx'] == locator['transactionHash'] == receipt['transactionHash']
-        and cost['blockHash'] == locator['blockHash'] == receipt['blockHash']
-        and int(cost['transactionIndex']) == int(locator['transactionIndex']) == int(receipt['transactionIndex'], 16)
-        and all(log[key].lower() == locator[key].lower() for key in ('address', 'data'))
-        and [topic.lower() for topic in log['topics']] == locator['topics']
-    ):
+    locator = proof['locator']
+    if (cost and cost['tx'] == proof['tx']
+            and cost['blockHash'] == locator['blockHash']
+            and int(cost['transactionIndex']) == int(locator['transactionIndex'])):
         return {**cost, 'locator': locator}
     return None
 
@@ -46,16 +52,15 @@ def paid(call, vault, amount):
     return False
 
 
-def payout(run, name, q_delta):
+def payout(run, name, q_delta, verified):
     custody = read(run / (name + '.custody.json'))
-    call = certified_call(run, name)
-    if (custody and call and int(custody['qDelta']) == q_delta
-            and (run / (name + '.signed')).is_file()):
+    call = certified_call(run, name, verified)
+    if custody and call and int(custody['qDelta']) == q_delta:
         return {'qDelta': q_delta, **call}
     return None
 
 
-def uct_control(run):
+def uct_control(run, verified):
     result = read(run / 'result.json')
     deployment = read(run / 'deployment.json')
     final = read(run / 'recovered.custody.json')
@@ -66,7 +71,7 @@ def uct_control(run):
         return None
     if int(final['balance']) != 0 or int(final['outstanding']) != 0:
         return None
-    calls = {name: certified_call(run, name) for name in ('ordinary', 'recovered')}
+    calls = {name: certified_call(run, name, verified) for name in ('ordinary', 'recovered')}
     if all(paid(call, deployment['vault'], expected[name]) for name, call in calls.items()):
         return {**expected, 'payouts': calls}
     return None
@@ -89,20 +94,19 @@ def gap_input(run, label, predecessor, kind):
     return int.from_bytes(data[end:end + 2], 'big')
 
 
-def funded_reserve(out, recovered):
+def funded_reserve(out, recovered, verified):
     run = out / 'recovered'
     result = read(run / 'offline-result.json')
     observation = read(run / 'reserve-observations.json')
     funding = read(out / 'relayer-funding.json')
-    funding_receipt = read(out / 'fund-relayer.receipt.json')
+    transfer = verified.get(str(out / 'fund-relayer'))
     deployment = read(out / 'deployment.json')
-    if not (result and observation and funding and funding_receipt and deployment and recovered):
+    if not (result and observation and funding and transfer and deployment and recovered):
         return None
-    if (funding_receipt['status'] != '0x1' or funding_receipt['transactionHash'] != funding['tx']
-            or funding_receipt['to'].lower() != funding['payer']
-            or observation['fundedRelayer'] != funding['tx']
-            or int(observation['funded']) != int(funding['balance'])
-            or int(funding['balance']) <= 0):
+    if (transfer['tx'] != funding['tx'] or transfer['recipient'] != funding['payer']
+            or observation['fundedRelayer'] != transfer['tx']
+            or int(observation['funded']) != int(transfer['value'])
+            or int(funding['balance']) != int(transfer['value'])):
         return None
 
     progress = int(result['progressCalls'])
@@ -115,7 +119,7 @@ def funded_reserve(out, recovered):
     for i, advance in enumerate(advances):
         label = f'offline-advance-{through}'
         gaps = advance['verifiedGaps']
-        call = certified_call(run, label)
+        call = certified_call(run, label, verified)
         if (label != advance['label'] or gaps <= 0 or not call
                 or gap_input(run, label, labels[-1], 1 if i == 0 else 2) != gaps):
             return None
@@ -140,13 +144,11 @@ def funded_reserve(out, recovered):
 
     fees, bids = [], []
     for nonce, label in enumerate(labels):
-        call = certified_call(run, label)
-        bid = read(run / (label + '.submitted.json'))
-        if (not (call and bid and (run / (label + '.signed')).is_file())
-                or bid['payer'] != funding['payer'] or int(bid['nonce']) != nonce or bid['hash'] != call['tx']):
+        tx = verified.get(str(run / label))
+        if not tx or tx['payer'] != transfer['recipient'] or int(tx['nonce']) != nonce:
             return None
-        fee = int(call['paidFee'])
-        limit = int(bid['gasLimit']) * int(bid['maxFeePerGas'])
+        fee = int(tx['paidFee'])
+        limit = int(tx['upperBid'])
         if fee < 0 or fee > limit:
             return None
         fees.append(fee)
@@ -160,7 +162,7 @@ def funded_reserve(out, recovered):
     complete = totals(len(labels), through)
     if observation['checkpoint64'] != prefix or observation['throughPayout'] != complete:
         return None
-    return {**observation, 'passedObservedWindow': bool(prefix and sum(bids) <= int(funding['balance']))}
+    return {**observation, 'passedObservedWindow': bool(prefix and sum(bids) <= int(transfer['value']))}
 
 
 def throughput(run):
@@ -186,7 +188,7 @@ def throughput(run):
             'finalBacklog': restored['finalBacklog'], 'samples': len(calls), 'passedObservedWindow': pass_window}
 
 
-def summarize(run, asset):
+def summarize(run, asset, verified):
     out = run / asset
     restored = read(out / 'recovered/restored-predecessor.locator.json')
     rollback = read(out / 'payout-failure.custody.json')
@@ -194,9 +196,9 @@ def summarize(run, asset):
     biggest = max(costs, key=lambda row: row[1]['signedBytes'], default=None)
     recovery_calls = [row for row in costs if '/recovered/offline-' in row[0]]
     totals = {key: sum(int(row[1][key]) for row in costs) for key in ('gas', 'paidFee')}
-    ordinary = payout(out, 'ordinary-paid', -40)
-    recovered = payout(out / 'recovered', 'offline-paid', -910)
-    retry = payout(out, 'retry-paid', -50)
+    ordinary = payout(out, 'ordinary-paid', -40, verified)
+    recovered = payout(out / 'recovered', 'offline-paid', -910, verified)
+    retry = payout(out, 'retry-paid', -50, verified)
     retry_custody = read(out / 'retry-paid.custody.json')
     return {
         'deposit': read(out / 'deposit-custody.json'), 'walletAdmission': read(out / 'wallet-admission.json'),
@@ -207,7 +209,7 @@ def summarize(run, asset):
         'isolated': (out / 'isolation-after.json').is_file(), 'includedCosts': totals,
         'largestObservedSignedTransaction': biggest, 'throughput': throughput(out),
         'largestObservedSignedRecoveryPacket': max(recovery_calls, key=lambda row: row[1]['signedBytes'], default=None),
-        'reserveObservation': funded_reserve(out, recovered),
+        'reserveObservation': funded_reserve(out, recovered, verified),
     }
 
 
@@ -215,12 +217,19 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('run', type=Path)
     parser.add_argument('output', type=Path)
+    parser.add_argument('--plugin', type=Path, default=os.environ.get('NB2_ERC20_PLUGIN'),
+                        help='Git checkout containing the pinned ERC20 SDK revision')
     args = parser.parse_args()
-    assets = {asset: summarize(args.run, asset) for asset in ('plain', 'fee')}
+    args.run = args.run.resolve()
+    has_deployment = any((args.run / asset / 'gamma.bin').is_file() for asset in ('', 'plain', 'fee'))
+    if has_deployment and args.plugin is None:
+        parser.error('--plugin or NB2_ERC20_PLUGIN is required to verify receipt and transaction evidence')
+    verified = verify_evidence(args.run, args.plugin) if has_deployment else {}
+    assets = {asset: summarize(args.run, asset, verified) for asset in ('plain', 'fee')}
     fee_window = assets['fee']['throughput']
     fee_reserve = assets['fee']['reserveObservation']
     both = list(assets.values())
-    uct = uct_control(args.run)
+    uct = uct_control(args.run, verified)
     checks = {
         'native UCT alongside two ERC20s': bool(uct and all(a['isolated'] and a['deposit'] for a in both)),
         'nested splits and ordinary and recovered across a seal': all(a['ordinary'] and a['recovered'] for a in both),

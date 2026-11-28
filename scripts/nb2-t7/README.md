@@ -158,6 +158,8 @@ lock is shared with the host and the listener checks run in the namespace.
 The launcher builds the ERC20 contracts and SDK from fresh exports of their
 pinned Git trees before taking the slot. For slot 3, MongoDB uses a private
 data directory for each invocation, which the launcher removes after teardown.
+On slots 0 and 2 the Docker container and volume use the invocation's random
+claim token in their names.
 
 After the certified 40/60 UCT control the runner deploys two disposable tokens with separate
 vaults. Both use authenticated activation evidence and the TypeScript wallet.
@@ -179,6 +181,13 @@ The summary verifies the advance chain from the completed Run through the
 paid receipt and reports separate reserve totals for the 64-gap prefix and
 the complete path to payout. Both totals apply to the measured workload.
 
+Rebuild the pinned verifier and summarize a finished run offline with
+`python3 scripts/nb2-t7/summarize-erc20.py RUN OUTPUT --plugin PLUGIN_CHECKOUT`.
+Use the #99 merge checkout above. With the npm cache populated, set
+`npm_config_offline=true` to replay without network access. The verifier
+authenticates the receipts from the run's trust pin, decodes the signed
+relayer transactions, and recomputes the reserve from their bids and receipts.
+
 ## Focused regressions
 
 Run these from bft-core on the dev server. They do not acquire a slot or start
@@ -195,3 +204,7 @@ ln -s "$review/plugin/packages/native-bridge-plugin/lib" "$review/sdk"
 cp scripts/nb2-t7/{receipt,receipt.test}.ts "$review/"
 "$review/plugin/node_modules/.bin/tsx" --test "$review/receipt.test.ts"
 ```
+
+Run `python3 scripts/nb2-t7/summary_test.py ARCHIVED_ROUND_2_RUN --plugin PLUGIN_CHECKOUT -v`
+to test a tampered receipt proof and an empty signed transaction against
+disposable copies of the archived evidence.

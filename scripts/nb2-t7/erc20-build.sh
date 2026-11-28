@@ -5,7 +5,8 @@
 : "${NB2_ERC20_ORACLE_SOURCE:?path to the bft-core #1338 checkout}"
 : "${NB2_ERC20_ORACLE_REV:?pinned bft-core #1338 revision}"
 export NB2_ERC20_CONTRACTS_REV=de62921f10be506f3cd7a559ae8541bcb644d0f4
-export NB2_ERC20_PLUGIN_REV=43c4535deccee68f45a2400848ec9b28dbec9999
+NB2_ERC20_PLUGIN_REV=$(jq -er .erc20Plugin "$pins")
+export NB2_ERC20_PLUGIN_REV
 test "$(git -C "$NB2_ERC20_CONTRACTS" rev-parse HEAD)" = "$NB2_ERC20_CONTRACTS_REV"
 test "$(git -C "$NB2_ERC20_PLUGIN" rev-parse HEAD)" = "$NB2_ERC20_PLUGIN_REV"
 test "$(git -C "$NB2_ERC20_ORACLE_SOURCE" rev-parse HEAD)" = "$NB2_ERC20_ORACLE_REV"

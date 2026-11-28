@@ -44,7 +44,6 @@ export POST_M2A_URETH_BIN="$URETH_BIN" POST_M2A_URETH_COMMIT="$(jq -r .ureth "$p
 export UTB_COMPONENTS="contracts=$(jq -r .contracts "$pins") aggregator-commit=$(jq -r .aggregator "$pins") aggregator-binary=sha256:$(sha256sum "$AGG_BIN" | cut -d' ' -f1) ureth=$POST_M2A_URETH_COMMIT"
 export NB2_T7_LANE=1 M2_PROFILE2=1 Q3_B1=1 UTB_LANE=1 SIGNING=authority DNB_AGG_SHARDS=1
 export M2_RUN_LOG_DIR="$NB2_OUT/paired" UTB_VERIFIER="$NB2_OUT/utb-evidence"
-export CI_MONGO_NAME="nb2-t7-$$"
 lane_owner=${NB2_LANE_OWNER:-nb2-t7}
 lane_token=
 lane_pid=
@@ -139,6 +138,7 @@ if [[ "$LANE_SLOT" = 3 ]]; then
   "${mongo_shell[@]}" --eval 'db.hello().isWritablePrimary' | grep -qx true
   ss -lnt >"$NB2_OUT/loopback-listeners.txt"
 else
+  export CI_MONGO_NAME="nb2-t7-$lane_token"
   mongo_started=1
   bash scripts/ci/mongo-up.sh up "$NB2_OUT/mongo"
 fi
